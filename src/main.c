@@ -113,7 +113,7 @@ static const bool* nc__keyboard_state;
 static SDL_GPUTexture* nc__terrain_textures;
 static SDL_GPUSampler* nc__texture_sampler;
 static SDL_GPUGraphicsPipeline* nc__pipeline;
-static nc__touch_event_t nc__movement_touch_event, nc__camera_touch_event;
+static nc__touch_event_t nc__move_touch, nc__look_touch;
 static nc__block_type selected_type = NC__BLOCK_TYPE_STONE;
 
 static bool nc__load_astc_header(const char* data, nc__astc_header* header) {
@@ -534,9 +534,9 @@ static void nc__modify_block(const nc__block_type new_block) {
                 closest_distance = hit_distance;
                 closest_block_id = nc__chunk.dense[i];
                 normal = (vkm_bvec3){ {
-                    (enter_distance == enter_distances.x) * (inverse_ray_direction.x < 0.0f ? 1 : -1),
-                    (enter_distance == enter_distances.y) * (inverse_ray_direction.y < 0.0f ? 1 : -1),
-                    (enter_distance == enter_distances.z) * (inverse_ray_direction.z < 0.0f ? 1 : -1),
+                    (int8_t)((enter_distance == enter_distances.x) * (inverse_ray_direction.x < 0.0f ? 1 : -1)),
+                    (int8_t)((enter_distance == enter_distances.y) * (inverse_ray_direction.y < 0.0f ? 1 : -1)),
+                    (int8_t)((enter_distance == enter_distances.z) * (inverse_ray_direction.z < 0.0f ? 1 : -1)),
                 } };
             }
         }
@@ -568,23 +568,23 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     SDL_GPUCommandBuffer* command_buffer = NULL;
     SDL_GPUCopyPass* copy_pass = NULL;
 
-    const Uint64 ticks = SDL_GetTicks();
+    const Uint64 ticks = SDL_GetTicksNS();
     static Uint64 last_ticks = 0;
-    const float delta_time = last_ticks == 0 ? 1.0f / 60.0f : (float)(ticks - last_ticks) / 1000.0f;
+    const double delta_time = last_ticks == 0 ? 1.0 / 60.0 : (double)(ticks - last_ticks) / 1000000000.0;
     last_ticks = ticks;
 
-    if (nc__camera_touch_event.finger_id) {
+    if (nc__look_touch.finger_id) {
         vkm_vec2 delta;
-        vkm_sub(&nc__camera_touch_event.current_pos, &nc__camera_touch_event.initial_pos, &delta);
-        nc__camera.yaw += delta.x * NC__TOUCHSCREEN_SENSITIVITY * delta_time;
-        nc__camera.pitch += -delta.y * NC__TOUCHSCREEN_SENSITIVITY * delta_time;
+        vkm_sub(&nc__look_touch.current_pos, &nc__look_touch.initial_pos, &delta);
+        nc__camera.yaw += delta.x * NC__TOUCHSCREEN_SENSITIVITY * (float)delta_time;
+        nc__camera.pitch += -delta.y * NC__TOUCHSCREEN_SENSITIVITY * (float)delta_time;
     }
 
     const float pitch_sine = vkm_sin(nc__camera.pitch);
     const float pitch_cosine = vkm_cos(nc__camera.pitch);
     const float yaw_sine = vkm_sin(nc__camera.yaw);
     const float yaw_cosine = vkm_cos(nc__camera.yaw);
-    vkm_vec3 forward = { {
+    const vkm_vec3 forward = { {
         pitch_cosine * yaw_sine,
         pitch_sine,
         pitch_cosine * yaw_cosine,
@@ -594,48 +594,47 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_vec3_normalize(&right, &right);
     vkm_vec3_cross(&forward, &right, &up);
 
-    vkm_vec3 target;
-    vkm_vec3_add(&forward, &nc__camera.position, &target);
-
     vkm_vec3 input = { {
         (float)nc__keyboard_state[SDL_SCANCODE_D] - (float)nc__keyboard_state[SDL_SCANCODE_A],
         (float)nc__keyboard_state[SDL_SCANCODE_R] - (float)nc__keyboard_state[SDL_SCANCODE_F],
         (float)nc__keyboard_state[SDL_SCANCODE_W] - (float)nc__keyboard_state[SDL_SCANCODE_S],
     } };
 
-    if (nc__movement_touch_event.finger_id) {
+    if (nc__move_touch.finger_id) {
         vkm_vec2 delta;
-        vkm_sub(&nc__movement_touch_event.current_pos, &nc__movement_touch_event.initial_pos, &delta);
+        vkm_sub(&nc__move_touch.current_pos, &nc__move_touch.initial_pos, &delta);
         // emulate touchscreen analog input that doesn't take the entire screen to make values go anywhere from 0 to 1.
-        vkm_mul(&delta, 20.0f, &delta);
-        input.x += delta.x * NC__MOVEMENT_SPEED * delta_time;
-        input.z += -delta.y * NC__MOVEMENT_SPEED * delta_time;
+        vkm_mul(&delta, 10.0f, &delta);
+        input.x += delta.x;
+        input.z += -delta.y;
     }
 
     const float length = vkm_length(&input);
     if (length > 1.0f) {
         vkm_div(&input, length, &input);
     }
-    vkm_mul(&input, NC__MOVEMENT_SPEED, &input);
 
-    vkm_mul(&right, input.x * delta_time, &right);
-    vkm_mul(&up, input.y * delta_time, &up);
-    vkm_mul(&forward, input.z * delta_time, &forward);
+    vkm_vec3 velocity;
+    vkm_mul(&right, input.x, &velocity);
+    vkm_muladd(&up, input.y, &velocity);
+    vkm_muladd(&forward, input.z, &velocity);
+
+    vkm_mul(&velocity, NC__MOVEMENT_SPEED, &velocity);
+
+    vkm_muladd(&velocity, (float)delta_time, &nc__camera.position);
 
     vkm_mat4 view_matrix;
+    vkm_vec3 target;
+    vkm_vec3_add(&nc__camera.position, &forward, &target);
     vkm_look_at(&nc__camera.position, &target, &CVKM_VEC3_UP, &view_matrix);
-
-    vkm_add(&nc__camera.position, &right, &nc__camera.position);
-    vkm_add(&nc__camera.position, &up, &nc__camera.position);
-    vkm_add(&nc__camera.position, &forward, &nc__camera.position);
 
     vkm_mat4 projection;
     vkm_perspective(
-        vkm_deg2rad(80.0f),
-        (float)nc__viewport_size.x / (float)nc__viewport_size.y,
-        0.2f,
-        500.0f,
-        &projection);
+            vkm_deg2rad(80.0f),
+            (float)nc__viewport_size.x / (float)nc__viewport_size.y,
+            0.2f,
+            500.0f,
+            &projection);
 
     vkm_mat4 view_projection;
     vkm_mul(&projection, &view_matrix, &view_projection);
@@ -656,17 +655,17 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     copy_pass = SDL_BeginGPUCopyPass(command_buffer);
     SDL_UploadToGPUBuffer(
-        copy_pass,
-        &(SDL_GPUTransferBufferLocation){
-            .transfer_buffer = nc__transfer_buffer,
-            .offset = 0,
-        },
-        &(SDL_GPUBufferRegion){
-            .buffer = nc__vertex_buffer,
-            .offset = 0,
-            .size = NC__CHUNK_SIZE,
-        },
-        true);
+            copy_pass,
+            &(SDL_GPUTransferBufferLocation){
+                .transfer_buffer = nc__transfer_buffer,
+                .offset = 0,
+            },
+            &(SDL_GPUBufferRegion){
+                .buffer = nc__vertex_buffer,
+                .offset = 0,
+                .size = NC__CHUNK_SIZE,
+            },
+            true);
     SDL_EndGPUCopyPass(copy_pass);
     copy_pass = NULL;
 
@@ -780,8 +779,8 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
             break;
         case SDL_EVENT_FINGER_DOWN:
             if (event->tfinger.x < 0.5f) {
-                if (!nc__movement_touch_event.finger_id) {
-                    nc__movement_touch_event = (nc__touch_event_t){
+                if (!nc__move_touch.finger_id) {
+                    nc__move_touch = (nc__touch_event_t){
                         .initial_pos = { { event->tfinger.x, event->tfinger.y } },
                         .current_pos = { { event->tfinger.x, event->tfinger.y } },
                         .finger_id = event->tfinger.fingerID,
@@ -789,8 +788,8 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
                     };
                 }
             } else {
-                if (!nc__camera_touch_event.finger_id) {
-                    nc__camera_touch_event = (nc__touch_event_t){
+                if (!nc__look_touch.finger_id) {
+                    nc__look_touch = (nc__touch_event_t){
                         .initial_pos = { { event->tfinger.x, event->tfinger.y } },
                         .current_pos = { { event->tfinger.x, event->tfinger.y } },
                         .finger_id = event->tfinger.fingerID,
@@ -800,30 +799,30 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
             }
             break;
         case SDL_EVENT_FINGER_UP:
-            if (nc__movement_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__movement_touch_event.finger_id = 0;
-                if (event->tfinger.timestamp - nc__movement_touch_event.timestamp < 500000000) {
+            if (nc__move_touch.finger_id == event->tfinger.fingerID) {
+                nc__move_touch.finger_id = 0;
+                if (event->tfinger.timestamp - nc__move_touch.timestamp < 500000000) {
                     nc__modify_block(NC__BLOCK_TYPE_AIR);
                 }
-            } else if (nc__camera_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__camera_touch_event.finger_id = 0;
-                if (event->tfinger.timestamp - nc__camera_touch_event.timestamp < 500000000) {
+            } else if (nc__look_touch.finger_id == event->tfinger.fingerID) {
+                nc__look_touch.finger_id = 0;
+                if (event->tfinger.timestamp - nc__look_touch.timestamp < 500000000) {
                     nc__modify_block(selected_type);
                 }
             }
             break;
         case SDL_EVENT_FINGER_CANCELED:
-            if (nc__movement_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__movement_touch_event.finger_id = 0;
-            } else if (nc__camera_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__camera_touch_event.finger_id = 0;
+            if (nc__move_touch.finger_id == event->tfinger.fingerID) {
+                nc__move_touch.finger_id = 0;
+            } else if (nc__look_touch.finger_id == event->tfinger.fingerID) {
+                nc__look_touch.finger_id = 0;
             }
             break;
         case SDL_EVENT_FINGER_MOTION:
-            if (nc__movement_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__movement_touch_event.current_pos = (vkm_vec2){ { event->tfinger.x, event->tfinger.y } };
-            } else if (nc__camera_touch_event.finger_id == event->tfinger.fingerID) {
-                nc__camera_touch_event.current_pos = (vkm_vec2){ { event->tfinger.x, event->tfinger.y } };
+            if (nc__move_touch.finger_id == event->tfinger.fingerID) {
+                nc__move_touch.current_pos = (vkm_vec2){{event->tfinger.x, event->tfinger.y } };
+            } else if (nc__look_touch.finger_id == event->tfinger.fingerID) {
+                nc__look_touch.current_pos = (vkm_vec2){{event->tfinger.x, event->tfinger.y } };
             }
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
