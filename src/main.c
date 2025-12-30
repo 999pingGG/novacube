@@ -25,7 +25,7 @@ enum {
 
 #ifdef ANDROID
 #define NC__ASSETS_BASE_PATH ""
-#define NC__TEXTURE_FILE_EXTENSION ".astc"
+#define NC__TEXTURE_FILE_EXTENSION ".png"
 #else
 #define NC__ASSETS_BASE_PATH "assets/"
 #define NC__TEXTURE_FILE_EXTENSION ".png"
@@ -47,16 +47,6 @@ typedef struct nc__camera_t {
     float yaw, pitch;
 } nc__camera_t;
 
-typedef struct nc__astc_header {
-    uint8_t magic[4];
-    uint8_t block_x;
-    uint8_t block_y;
-    uint8_t block_z;
-    uint8_t dim_x[3];
-    uint8_t dim_y[3];
-    uint8_t dim_z[3];
-} nc__astc_header;
-
 typedef struct nc__touch_event_t {
     vkm_vec2 initial_pos, current_pos;
     SDL_FingerID finger_id;
@@ -75,12 +65,7 @@ typedef struct nc__touch_event_t {
 #define NC__MOVEMENT_SPEED 5.0f
 #define NC__COUNTOF(a) (sizeof(a) / sizeof(*a))
 #define NC__TERRAIN_TEXTURE_LENGTH 16
-#ifdef ANDROID
-// astc 4x4: 1 byte per texel
-#define NC__TERRAIN_TEXTURE_SIZE (NC__TERRAIN_TEXTURE_LENGTH * NC__TERRAIN_TEXTURE_LENGTH)
-#else
 #define NC__TERRAIN_TEXTURE_SIZE (NC__TERRAIN_TEXTURE_LENGTH * NC__TERRAIN_TEXTURE_LENGTH * 4)
-#endif
 #ifdef NDEBUG
 #define NC__BUILD_TYPE "Release"
 #else
@@ -116,55 +101,8 @@ static SDL_GPUGraphicsPipeline* nc__pipeline;
 static nc__touch_event_t nc__movement_touch_event, nc__camera_touch_event;
 static nc__block_type selected_type = NC__BLOCK_TYPE_STONE;
 
-static bool nc__load_astc_header(const char* data, nc__astc_header* header) {
-    if (*(uint32_t*)data != 0x5ca1ab13) {
-        return SDL_SetError("Invalid ASTC header.");
-    }
-
-    memcpy(header, data, sizeof(*header));
-    return true;
-}
-
 // TODO: Review for memory correctness.
 static bool nc__load_texture(const char* path, char* data, const unsigned index) {
-#ifdef ANDROID
-    size_t size;
-    char* file_data = SDL_LoadFile(path, &size);
-    if (!file_data) {
-        return false;
-    }
-    if (size < sizeof(nc__astc_header)) {
-        SDL_free(file_data);
-        return false;
-    }
-
-    nc__astc_header header;
-    if (!nc__load_astc_header(file_data, &header)) {
-        SDL_free(file_data);
-        return false;
-    }
-
-    assert(header.block_x == 4);
-    assert(header.block_y == 4);
-    assert(header.block_z == 1);
-    // max 65535x65535 image
-    assert(!header.dim_x[2] && !header.dim_y[2]);
-    // z dimension must be 1 for 2D images
-    assert(header.dim_z[0] == 1 && !header.dim_z[1] && !header.dim_z[2]);
-
-#ifndef NDEBUG
-    const uint16_t width = *(uint16_t*)header.dim_x;
-    assert(!header.dim_x[2]);
-    const uint16_t height = *(uint16_t*)header.dim_y;
-    assert(!header.dim_y[2]);
-    assert(width == height && width == NC__TERRAIN_TEXTURE_LENGTH);
-#endif
-
-    memcpy(data + NC__TERRAIN_TEXTURE_SIZE * index, file_data + sizeof(header), NC__TERRAIN_TEXTURE_SIZE);
-    SDL_free(file_data);
-
-    return true;
-#else
     SDL_Surface* texture = SDL_LoadPNG(path);
     if (!texture) {
         return false;
@@ -176,7 +114,6 @@ static bool nc__load_texture(const char* path, char* data, const unsigned index)
     SDL_DestroySurface(texture);
 
     return true;
-#endif
 }
 
 static SDL_GPUShader* nc__load_shader(
@@ -258,7 +195,10 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, false);
     NC__CHECK_SDL_RESULT(sdl_result);
     SDL_GPUVulkanOptions options = {
-        .vulkan_api_version = VK_API_VERSION_1_0,
+        .vulkan_api_version = VK_API_VERSION_1_1,
+        .vulkan_10_physical_device_features = &(VkPhysicalDeviceFeatures) {
+            .robustBufferAccess = true,
+        }
     };
     sdl_result = SDL_SetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER, &options);
     NC__CHECK_SDL_RESULT(sdl_result);
@@ -323,11 +263,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 
     nc__terrain_textures = SDL_CreateGPUTexture(nc__gpu_device, &(SDL_GPUTextureCreateInfo){
         .type = SDL_GPU_TEXTURETYPE_2D_ARRAY,
-#ifdef ANDROID
-        .format = SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM,
-#else
         .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-#endif
         .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
         .width = 16,
         .height = 16,
@@ -419,7 +355,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         .rasterizer_state = {
             .fill_mode = SDL_GPU_FILLMODE_FILL,
-            .cull_mode = SDL_GPU_CULLMODE_BACK,
+            .cull_mode = SDL_GPU_CULLMODE_NONE,
             .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
             .enable_depth_clip = true,
         },
@@ -632,8 +568,13 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         500.0f,
         &projection);
 
-    vkm_mat4 view_projection;
-    vkm_mul(&projection, &view_matrix, &view_projection);
+    struct {
+        vkm_mat4 view_projection;
+        float time;
+    } view_projection;
+
+    vkm_mul(&projection, &view_matrix, &view_projection.view_projection);
+    view_projection.time = (float)SDL_GetTicks() / 1000.0f;
 
 #ifndef ANDROID
     if (!nc__foreground) {
