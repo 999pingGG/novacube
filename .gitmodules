@@ -1,0 +1,4 @@
+[submodule "android-project/app/jni/SDL"]
+	path = android-project/app/jni/SDL
+	url = https://github.com/999pingGG/SDL.git
+	branch = gpu-android-pre-rotation

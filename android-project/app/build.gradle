@@ -33,9 +33,6 @@ android {
             version '4.1.2'
         }
     }
-    buildFeatures {
-        prefab true
-    }
     ndkVersion '29.0.14206865'
     buildToolsVersion '36.1.0'
 }
@@ -44,5 +41,4 @@ dependencies {
     implementation libs.appcompat
     implementation libs.material
     implementation libs.constraintlayout
-    implementation files('libs/SDL3-3.3.7.aar')
 }

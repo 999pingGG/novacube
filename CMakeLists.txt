@@ -16,7 +16,11 @@ else()
     add_executable(novacube ${NC_SOURCES})
 endif()
 
-find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
+if(ANDROID)
+    add_subdirectory(android-project/app/jni/SDL)
+else()
+    find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
+endif()
 target_link_libraries(novacube PRIVATE SDL3::SDL3)
 
 find_package(Vulkan REQUIRED COMPONENTS glslc)

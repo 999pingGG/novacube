@@ -59,3 +59,4 @@ dkms.conf
 include/novacube/version.h
 android-project/hs_err*
 android-project/replay_*
+/android-project/app/jni/SDL/
