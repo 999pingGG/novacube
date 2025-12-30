@@ -30,7 +30,7 @@ endif()
 
 target_include_directories(novacube PRIVATE include libs/cvkm libs/tds/include libs/rapidhash)
 
-if (NOT ANDROID AND (WIN32 OR UNIX))
+if(NOT ANDROID AND (WIN32 OR UNIX))
     add_custom_command(
             TARGET novacube
             POST_BUILD
@@ -48,10 +48,30 @@ execute_process(
         OUTPUT_VARIABLE GIT_HASH
         OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-target_compile_definitions(novacube PRIVATE
-        NC__VERSION="v${PROJECT_VERSION}"
-        NC__GIT_HASH="${GIT_HASH}"
-        NC__GIT_DESCRIBE="${GIT_DESCRIBE}")
+execute_process(
+        COMMAND git symbolic-ref -q HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_HEAD_REF
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+if(GIT_HEAD_REF)
+        set(GIT_HEAD_FILE "${CMAKE_SOURCE_DIR}/.git/${GIT_HEAD_REF}")
+else()
+        # Detached HEAD (e.g. checkout a commit or tag)
+        set(GIT_HEAD_FILE "${CMAKE_SOURCE_DIR}/.git/HEAD")
+endif()
+
+configure_file(
+        ${CMAKE_SOURCE_DIR}/include/novacube/version.h.in
+        ${CMAKE_SOURCE_DIR}/include/novacube/version.h
+        @ONLY)
+
+set_property(
+        DIRECTORY
+        APPEND
+        PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/.git/HEAD
+        ${GIT_HEAD_FILE})
 
 set_target_properties(novacube PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube)

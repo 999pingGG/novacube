@@ -11,6 +11,8 @@
 #include <SDL3/SDL_main.h>
 #include <vulkan/vulkan.h>
 
+#include <novacube/version.h>
+
 typedef uint8_t nc__block_type;
 
 enum {

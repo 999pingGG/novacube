@@ -1,0 +1,7 @@
+#pragma once
+#ifndef _NC_VERSION_H_
+#define _NC_VERSION_H_
+#define NC__VERSION "v@PROJECT_VERSION@"
+#define NC__GIT_HASH "@GIT_HASH@"
+#define NC__GIT_DESCRIBE "@GIT_DESCRIBE@"
+#endif

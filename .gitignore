@@ -56,3 +56,4 @@ dkms.conf
 
 /*build*/
 /assets/
+include/novacube/version.h
