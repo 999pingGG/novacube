@@ -573,14 +573,6 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     const float delta_time = last_ticks == 0 ? 1.0f / 60.0f : (float)(ticks - last_ticks) / 1000.0f;
     last_ticks = ticks;
 
-    if (nc__movement_touch_event.finger_id) {
-        vkm_vec2 delta;
-        vkm_sub(&nc__movement_touch_event.current_pos, &nc__movement_touch_event.initial_pos, &delta);
-        vkm_mul(&delta, 3.0f, &delta);
-        nc__camera.position.x += delta.x * NC__MOVEMENT_SPEED * delta_time;
-        nc__camera.position.z += -delta.y * NC__MOVEMENT_SPEED * delta_time;
-    }
-
     if (nc__camera_touch_event.finger_id) {
         vkm_vec2 delta;
         vkm_sub(&nc__camera_touch_event.current_pos, &nc__camera_touch_event.initial_pos, &delta);
@@ -610,7 +602,20 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         (float)nc__keyboard_state[SDL_SCANCODE_R] - (float)nc__keyboard_state[SDL_SCANCODE_F],
         (float)nc__keyboard_state[SDL_SCANCODE_W] - (float)nc__keyboard_state[SDL_SCANCODE_S],
     } };
-    vkm_normalize(&input, &input);
+
+    if (nc__movement_touch_event.finger_id) {
+        vkm_vec2 delta;
+        vkm_sub(&nc__movement_touch_event.current_pos, &nc__movement_touch_event.initial_pos, &delta);
+        // emulate touchscreen analog input that doesn't take the entire screen to make values go anywhere from 0 to 1.
+        vkm_mul(&delta, 20.0f, &delta);
+        input.x += delta.x * NC__MOVEMENT_SPEED * delta_time;
+        input.z += -delta.y * NC__MOVEMENT_SPEED * delta_time;
+    }
+
+    const float length = vkm_length(&input);
+    if (length > 1.0f) {
+        vkm_div(&input, length, &input);
+    }
     vkm_mul(&input, NC__MOVEMENT_SPEED, &input);
 
     vkm_mul(&right, input.x * delta_time, &right);
