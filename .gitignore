@@ -57,3 +57,5 @@ dkms.conf
 /*build*/
 /assets/
 include/novacube/version.h
+android-project/hs_err*
+android-project/replay_*
