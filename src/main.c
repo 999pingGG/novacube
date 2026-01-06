@@ -70,7 +70,7 @@ typedef struct nc__touch_event_t {
 #define NC__CHUNK_COUNT (NC__CHUNK_LENGTH * NC__CHUNK_LENGTH * NC__CHUNK_LENGTH)
 #define NC__CHUNK_SIZE (NC__CHUNK_COUNT * sizeof(nc__block_t))
 #define NC__CHUNK_INDEX(x, y, z) ((x) + ((y) * NC__CHUNK_LENGTH) + ((z) * NC__CHUNK_LENGTH * NC__CHUNK_LENGTH))
-#define NC__MOUSE_SENSITIVITY vkm_deg2rad(1.0f)
+#define NC__MOUSE_SENSITIVITY vkm_deg2rad(0.2f)
 #define NC__TOUCHSCREEN_SENSITIVITY 15.0f
 #define NC__MOVEMENT_SPEED 5.0f
 #define NC__COUNTOF(a) (sizeof(a) / sizeof(*a))
@@ -112,7 +112,7 @@ static nc__camera_t nc__camera = {
 static const bool* nc__keyboard_state;
 static SDL_GPUTexture* nc__terrain_textures;
 static SDL_GPUSampler* nc__texture_sampler;
-static SDL_GPUGraphicsPipeline* nc__pipeline;
+static SDL_GPUGraphicsPipeline* nc__pipeline, *nc__reticle_pipeline;
 static nc__touch_event_t nc__move_touch, nc__look_touch;
 static nc__block_type selected_type = NC__BLOCK_TYPE_STONE;
 
@@ -220,9 +220,16 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     SDL_PropertiesID props = 0;
     SDL_GPUTransferBuffer* transfer_buffer = NULL;
     SDL_GPUCommandBuffer* command_buffer = NULL;
-    SDL_GPUShader* vertex_shader = NULL, *fragment_shader = NULL;
+    SDL_GPUShader
+            *vertex_shader = NULL,
+            *fragment_shader = NULL,
+            *reticle_vertex_shader = NULL,
+            *reticle_fragment_shader = NULL;
 
-    SDL_Log("Novacube " NC__VERSION "\nBuild: " __DATE__ " " __TIME__ " " NC__BUILD_TYPE "\nGit: " NC__GIT_DESCRIBE "\nCommit: " NC__GIT_HASH);
+    SDL_Log("Novacube " NC__VERSION "\n"
+            "Build: " __DATE__ " " __TIME__ " " NC__BUILD_TYPE "\n"
+            "Git: " NC__GIT_DESCRIBE "\n"
+            "Commit: " NC__GIT_HASH);
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
@@ -389,10 +396,39 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 
     SDL_Log("Loaded %d terrain textures.", (int)NC__COUNTOF(nc__terrain_texture_paths));
 
-    vertex_shader = nc__load_shader(NC__ASSETS_BASE_PATH "shaders/cube-vert.spv", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 0, 0);
+    vertex_shader = nc__load_shader(
+            NC__ASSETS_BASE_PATH "shaders/cube-vert.spv",
+            SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
+            1,
+            0,
+            0);
     NC__CHECK_SDL_RESULT(vertex_shader);
-    fragment_shader = nc__load_shader(NC__ASSETS_BASE_PATH "shaders/cube-frag.spv", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0, 0);
+    fragment_shader = nc__load_shader(
+            NC__ASSETS_BASE_PATH "shaders/cube-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            1,
+            0,
+            0,
+            0);
     NC__CHECK_SDL_RESULT(fragment_shader);
+
+    reticle_vertex_shader = nc__load_shader(
+            NC__ASSETS_BASE_PATH "shaders/reticle-vert.spv",
+            SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
+            0,
+            0,
+            0);
+    NC__CHECK_SDL_RESULT(reticle_vertex_shader);
+    reticle_fragment_shader = nc__load_shader(
+            NC__ASSETS_BASE_PATH "shaders/reticle-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0,
+            0,
+            0,
+            0);
+    NC__CHECK_SDL_RESULT(reticle_fragment_shader);
 
     nc__pipeline = SDL_CreateGPUGraphicsPipeline(nc__gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
         .vertex_shader = vertex_shader,
@@ -446,6 +482,39 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     SDL_ReleaseGPUShader(nc__gpu_device, fragment_shader);
     fragment_shader = NULL;
 
+    nc__reticle_pipeline = SDL_CreateGPUGraphicsPipeline(nc__gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
+        .vertex_shader = reticle_vertex_shader,
+        .fragment_shader = reticle_fragment_shader,
+        .vertex_input_state = { 0 },
+        .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        .rasterizer_state = {
+            .fill_mode = SDL_GPU_FILLMODE_FILL,
+            .cull_mode = SDL_GPU_CULLMODE_BACK,
+            .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
+            .enable_depth_clip = true,
+        },
+        .depth_stencil_state = {
+            .compare_op = SDL_GPU_COMPAREOP_LESS,
+            .enable_depth_test = false,
+            .enable_depth_write = false,
+            .enable_stencil_test = false,
+        },
+        .target_info = {
+            .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
+                {
+                    .format = SDL_GetGPUSwapchainTextureFormat(nc__gpu_device, nc__window),
+                },
+            },
+            .num_color_targets = 1,
+            .has_depth_stencil_target = false,
+        },
+    });
+    NC__CHECK_SDL_RESULT(nc__reticle_pipeline);
+    SDL_ReleaseGPUShader(nc__gpu_device, reticle_vertex_shader);
+    reticle_vertex_shader = NULL;
+    SDL_ReleaseGPUShader(nc__gpu_device, reticle_fragment_shader);
+    reticle_fragment_shader = NULL;
+
     nc__keyboard_state = SDL_GetKeyboardState(NULL);
 
     SDL_SetWindowRelativeMouseMode(nc__window, true);
@@ -453,6 +522,12 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     return SDL_APP_CONTINUE;
 
     error:
+    SDL_ReleaseGPUGraphicsPipeline(nc__gpu_device, nc__reticle_pipeline);
+    nc__reticle_pipeline = NULL;
+    SDL_ReleaseGPUShader(nc__gpu_device, reticle_fragment_shader);
+    reticle_fragment_shader = NULL;
+    SDL_ReleaseGPUShader(nc__gpu_device, reticle_vertex_shader);
+    reticle_vertex_shader = NULL;
     SDL_ReleaseGPUGraphicsPipeline(nc__gpu_device, nc__pipeline);
     nc__pipeline = NULL;
     SDL_ReleaseGPUShader(nc__gpu_device, fragment_shader);
@@ -680,7 +755,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                     .clear_color = { 0.53f, 0.81f, 0.92f, 1.0f },
                     .load_op = SDL_GPU_LOADOP_CLEAR,
                     .store_op = SDL_GPU_STOREOP_STORE,
-                    .cycle = true,
+                    .cycle = false,
                 },
                 1,
                 &(SDL_GPUDepthStencilTargetInfo){
@@ -704,6 +779,20 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                 1);
         SDL_PushGPUVertexUniformData(command_buffer, 0, &view_projection, sizeof(view_projection));
         SDL_DrawGPUPrimitives(render_pass, 36, nc__chunk.count, 0, 0);
+        SDL_EndGPURenderPass(render_pass);
+
+        render_pass = SDL_BeginGPURenderPass(
+                command_buffer,
+                &(SDL_GPUColorTargetInfo){
+                    .texture = swapchain_texture,
+                    .load_op = SDL_GPU_LOADOP_LOAD,
+                    .store_op = SDL_GPU_STOREOP_STORE,
+                    .cycle = false,
+                },
+                1,
+                NULL);
+        SDL_BindGPUGraphicsPipeline(render_pass, nc__reticle_pipeline);
+        SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
         SDL_EndGPURenderPass(render_pass);
     }
 
@@ -849,6 +938,8 @@ void SDL_AppQuit(void* app_state, const SDL_AppResult result) {
 
     SDL_Log("See you later!");
 
+    SDL_ReleaseGPUGraphicsPipeline(nc__gpu_device, nc__reticle_pipeline);
+    nc__reticle_pipeline = NULL;
     SDL_ReleaseGPUGraphicsPipeline(nc__gpu_device, nc__pipeline);
     nc__pipeline = NULL;
     SDL_ReleaseGPUSampler(nc__gpu_device, nc__texture_sampler);

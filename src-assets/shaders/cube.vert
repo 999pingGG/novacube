@@ -2,9 +2,9 @@
 
 layout(location = 0) in uvec4 in_position_and_block_type;
 
-layout(std140, set = 1, binding = 0) uniform uniforms {
+layout(std140, set = 1, binding = 0) uniform global_uniforms {
     mat4 view_projection;
-} ubo;
+} uniforms;
 
 // Note: mediump is bugged with PowerVR Rogue
 layout(location = 0) out vec3 out_uv;
@@ -73,7 +73,6 @@ const vec2 cube_uvs[] = vec2[](
     vec2(0.0, 0.0));
 
 void main() {
-    gl_Position = ubo.view_projection * vec4(in_position_and_block_type.xyz + cube_vertices[gl_VertexIndex], 1.0);
-
+    gl_Position = uniforms.view_projection * vec4(in_position_and_block_type.xyz + cube_vertices[gl_VertexIndex], 1.0);
     out_uv = vec3(cube_uvs[gl_VertexIndex % 6], in_position_and_block_type.w - 1);
 }

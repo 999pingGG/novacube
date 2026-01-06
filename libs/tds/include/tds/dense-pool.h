@@ -58,28 +58,27 @@ TDS_SIZE_T TDS_FUNCTION(remove)(TDS_TYPE* pool, const TDS_SIZE_T id) {
     TDS_ASSERT(pool->sparse[id] < pool->count);
     TDS_ASSERT(pool->dense[pool->sparse[id]] == id);
 
+    const TDS_SIZE_T dense_index = pool->sparse[id];
+
 #ifdef TDS_VALUE_FINI
-    TDS_VALUE_FINI(vec->array[index]);
+    TDS_VALUE_FINI(pool->array[dense_index]);
 #endif
 
-    const TDS_SIZE_T dense_index = pool->sparse[id];
-    if (dense_index == pool->count - 1) {
-        pool->dense[dense_index] =
-            // Check the next free ID, while avoid reading one past the end.
-            pool->count == pool->capacity || pool->dense[pool->count] == TDS_MAX_VALUE(TDS_SIZE_T)
-                ? TDS_MAX_VALUE(TDS_SIZE_T)
-                : dense_index;
-    } else {
-        // Move the last element into the just freed position.
-        pool->array[dense_index] = pool->array[pool->count - 1];
+    const TDS_SIZE_T last_dense = --pool->count;
+    if (dense_index != last_dense) {
+        const TDS_SIZE_T moved_id = pool->dense[last_dense];
 
-        pool->sparse[pool->count - 1] = dense_index;
-        pool->dense[dense_index] = pool->count - 1;
+        // Move value.
+        pool->array[dense_index] = pool->array[last_dense];
 
-        // Free index bookkeeping.
-        pool->dense[pool->count - 1] = id;
+        // Fix mappings.
+        pool->dense[dense_index] = moved_id;
+        pool->sparse[moved_id] = dense_index;
     }
-    pool->count--;
+
+    // Put freed sparse id into freelist.
+    pool->dense[last_dense] = id;
+
     return dense_index;
 }
 
@@ -102,7 +101,7 @@ TDS_VALUE_T* TDS_FUNCTION(first)(const TDS_TYPE* pool) {
 void TDS_FUNCTION(clear)(TDS_TYPE* pool) {
 #ifdef TDS_VALUE_FINI
     for (TDS_SIZE_T i = 0; i < pool->count; i++) {
-        TDS_VALUE_FINI(vec->array[i]);
+        TDS_VALUE_FINI(pool->array[i]);
     }
 #endif
     for (TDS_SIZE_T i = 0; i < pool->capacity; i++) {
@@ -114,7 +113,7 @@ void TDS_FUNCTION(clear)(TDS_TYPE* pool) {
 void TDS_FUNCTION(fini)(TDS_TYPE* pool) {
 #ifdef TDS_VALUE_FINI
     for (TDS_SIZE_T i = 0; i < pool->count; i++) {
-        TDS_VALUE_FINI(vec->array[i]);
+        TDS_VALUE_FINI(pool->array[i]);
     }
 #endif
     TDS_FREE(pool->array);
