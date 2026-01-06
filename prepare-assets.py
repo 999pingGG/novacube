@@ -46,6 +46,8 @@ def run(cmd):
             print("---- stderr ----")
             print(result.stderr)
 
+    return result.returncode == 0
+
 
 def strip_exif_if_requested(path: Path, enabled: bool):
     if not enabled:
@@ -122,10 +124,9 @@ def compile_shaders():
             out_android = out_dir_android / f'{shader.stem}-{stage}.spv'
 
             print(f'[SHADER] Compiling {shader} -> {out}')
-            run(['glslc', '--target-env=vulkan1.0', str(shader), '-o', str(out)])
-
-            print(f'[SHADER] Copying {out} -> {out_android}')
-            shutil.copy2(out, out_android)
+            if run(['glslc', '--target-env=vulkan1.0', str(shader), '-o', str(out)]):
+                print(f'[SHADER] Copying {out} -> {out_android}')
+                shutil.copy2(out, out_android)
 
 
 def main():
