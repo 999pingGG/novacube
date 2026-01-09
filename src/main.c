@@ -11,7 +11,9 @@
 #include <SDL3/SDL_main.h>
 #include <vulkan/vulkan.h>
 
-#include <novacube/version.h>
+#include "novacube/sdl_util.h"
+#include "novacube/ui.h"
+#include "novacube/version.h"
 
 typedef uint8_t nc__block_type;
 
@@ -81,18 +83,6 @@ typedef struct nc__touch_event_t {
 #else
 #define NC__TERRAIN_TEXTURE_SIZE (NC__TERRAIN_TEXTURE_LENGTH * NC__TERRAIN_TEXTURE_LENGTH * 4)
 #endif
-#ifdef NDEBUG
-#define NC__BUILD_TYPE "Release"
-#else
-#define NC__BUILD_TYPE "Debug"
-#endif
-
-#define NC__CHECK_SDL_RESULT(result) do { \
-    if (!result) { \
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", SDL_GetError(), NULL); \
-        goto error; \
-    } \
-} while (false)
 
 static SDL_GPUDevice* nc__gpu_device;
 static SDL_Window* nc__window;
@@ -227,19 +217,19 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             *reticle_fragment_shader = NULL;
 
     SDL_Log("Novacube " NC__VERSION "\n"
-            "Build: " __DATE__ " " __TIME__ " " NC__BUILD_TYPE "\n"
+            "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
             "Git: " NC__GIT_DESCRIBE "\n"
             "Commit: " NC__GIT_HASH);
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
     bool sdl_result = SDL_InitSubSystem(SDL_INIT_VIDEO);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
 
     props = SDL_CreateProperties();
-    NC__CHECK_SDL_RESULT(props);
+    NC_CHECK_SDL_RESULT(props);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(
             props,
             SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN,
@@ -248,29 +238,29 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 #else
             false);
 #endif
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(
             props,
             SDL_PROP_GPU_DEVICE_CREATE_PREFERLOWPOWER_BOOLEAN,
             true);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_D3D12_ALLOW_FEWER_RESOURCE_SLOTS_BOOLEAN, true);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, false);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     SDL_GPUVulkanOptions options = {
         .vulkan_api_version = VK_API_VERSION_1_0,
     };
     sdl_result = SDL_SetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER, &options);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     nc__gpu_device = SDL_CreateGPUDeviceWithProperties(props);
-    NC__CHECK_SDL_RESULT(nc__gpu_device);
+    NC_CHECK_SDL_RESULT(nc__gpu_device);
     SDL_DestroyProperties(props);
 
     props = SDL_GetGPUDeviceProperties(nc__gpu_device);
@@ -283,16 +273,16 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 #endif
 
     nc__window = SDL_CreateWindow("Novacube " NC__VERSION, 640, 480, flags);
-    NC__CHECK_SDL_RESULT(nc__window);
+    NC_CHECK_SDL_RESULT(nc__window);
     // get the actual window dimensions
     int width, height;
     sdl_result = SDL_GetWindowSize(nc__window, &width, &height);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     nc__viewport_size.x = (uint16_t)width;
     nc__viewport_size.y = (uint16_t)height;
 
     sdl_result = SDL_ClaimWindowForGPUDevice(nc__gpu_device, nc__window);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
 
     nc__depth_texture = SDL_CreateGPUTexture(nc__gpu_device, &(SDL_GPUTextureCreateInfo){
         .type = SDL_GPU_TEXTURETYPE_2D,
@@ -304,7 +294,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .num_levels = 1,
         .sample_count = SDL_GPU_SAMPLECOUNT_1,
     });
-    NC__CHECK_SDL_RESULT(nc__depth_texture);
+    NC_CHECK_SDL_RESULT(nc__depth_texture);
 
     for (int z = 126; z < 129; z++) {
         for (int y = 126; y < 129; y++) {
@@ -321,12 +311,12 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
         .size = NC__CHUNK_SIZE,
     });
-    NC__CHECK_SDL_RESULT(nc__vertex_buffer);
+    NC_CHECK_SDL_RESULT(nc__vertex_buffer);
     nc__transfer_buffer = SDL_CreateGPUTransferBuffer(nc__gpu_device, &(SDL_GPUTransferBufferCreateInfo){
         .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
         .size = NC__CHUNK_SIZE,
     });
-    NC__CHECK_SDL_RESULT(nc__transfer_buffer);
+    NC_CHECK_SDL_RESULT(nc__transfer_buffer);
 
     nc__terrain_textures = SDL_CreateGPUTexture(nc__gpu_device, &(SDL_GPUTextureCreateInfo){
         .type = SDL_GPU_TEXTURETYPE_2D_ARRAY,
@@ -355,23 +345,24 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
         .size = NC__COUNTOF(nc__terrain_texture_paths) * NC__TERRAIN_TEXTURE_SIZE,
     });
-    NC__CHECK_SDL_RESULT(transfer_buffer);
+    NC_CHECK_SDL_RESULT(transfer_buffer);
 
     char* mapped = SDL_MapGPUTransferBuffer(nc__gpu_device, transfer_buffer, false);
-    NC__CHECK_SDL_RESULT(mapped);
+    NC_CHECK_SDL_RESULT(mapped);
     for (unsigned i = 0; i < NC__COUNTOF(nc__terrain_texture_paths); i++) {
         const bool result = nc__load_texture(nc__terrain_texture_paths[i], mapped, i);
-        NC__CHECK_SDL_RESULT(result);
+        NC_CHECK_SDL_RESULT(result);
     }
     SDL_UnmapGPUTransferBuffer(nc__gpu_device, transfer_buffer);
 
     command_buffer = SDL_AcquireGPUCommandBuffer(nc__gpu_device);
-    NC__CHECK_SDL_RESULT(command_buffer);
+    NC_CHECK_SDL_RESULT(command_buffer);
 
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+    SDL_GPUCopyPass* initial_resource_copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+
     for (unsigned i = 0; i < NC__COUNTOF(nc__terrain_texture_paths); i++) {
         SDL_UploadToGPUTexture(
-                copy_pass,
+                initial_resource_copy_pass,
                 &(SDL_GPUTextureTransferInfo){
                     .transfer_buffer = transfer_buffer,
                     .offset = i * NC__TERRAIN_TEXTURE_SIZE,
@@ -385,11 +376,12 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
                 },
                 false);
     }
-    SDL_EndGPUCopyPass(copy_pass);
+
+    SDL_EndGPUCopyPass(initial_resource_copy_pass);
 
     sdl_result = SDL_SubmitGPUCommandBuffer(command_buffer);
     command_buffer = NULL;
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
 
     SDL_ReleaseGPUTransferBuffer(nc__gpu_device, transfer_buffer);
     transfer_buffer = NULL;
@@ -403,7 +395,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             1,
             0,
             0);
-    NC__CHECK_SDL_RESULT(vertex_shader);
+    NC_CHECK_SDL_RESULT(vertex_shader);
     fragment_shader = nc__load_shader(
             NC__ASSETS_BASE_PATH "shaders/cube-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
@@ -411,7 +403,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             0,
             0,
             0);
-    NC__CHECK_SDL_RESULT(fragment_shader);
+    NC_CHECK_SDL_RESULT(fragment_shader);
 
     reticle_vertex_shader = nc__load_shader(
             NC__ASSETS_BASE_PATH "shaders/reticle-vert.spv",
@@ -420,7 +412,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             0,
             0,
             0);
-    NC__CHECK_SDL_RESULT(reticle_vertex_shader);
+    NC_CHECK_SDL_RESULT(reticle_vertex_shader);
     reticle_fragment_shader = nc__load_shader(
             NC__ASSETS_BASE_PATH "shaders/reticle-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
@@ -428,7 +420,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             0,
             0,
             0);
-    NC__CHECK_SDL_RESULT(reticle_fragment_shader);
+    NC_CHECK_SDL_RESULT(reticle_fragment_shader);
 
     nc__pipeline = SDL_CreateGPUGraphicsPipeline(nc__gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
         .vertex_shader = vertex_shader,
@@ -476,7 +468,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             .has_depth_stencil_target = true,
         },
     });
-    NC__CHECK_SDL_RESULT(nc__pipeline);
+    NC_CHECK_SDL_RESULT(nc__pipeline);
     SDL_ReleaseGPUShader(nc__gpu_device, vertex_shader);
     vertex_shader = NULL;
     SDL_ReleaseGPUShader(nc__gpu_device, fragment_shader);
@@ -509,11 +501,13 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
             .has_depth_stencil_target = false,
         },
     });
-    NC__CHECK_SDL_RESULT(nc__reticle_pipeline);
+    NC_CHECK_SDL_RESULT(nc__reticle_pipeline);
     SDL_ReleaseGPUShader(nc__gpu_device, reticle_vertex_shader);
     reticle_vertex_shader = NULL;
     SDL_ReleaseGPUShader(nc__gpu_device, reticle_fragment_shader);
     reticle_fragment_shader = NULL;
+
+    nc_ui_init(nc__gpu_device, nc__viewport_size);
 
     nc__keyboard_state = SDL_GetKeyboardState(NULL);
 
@@ -534,6 +528,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     fragment_shader = NULL;
     SDL_ReleaseGPUShader(nc__gpu_device, vertex_shader);
     vertex_shader = NULL;
+    nc_ui_fini(nc__gpu_device);
     SDL_CancelGPUCommandBuffer(command_buffer);
     command_buffer = NULL;
     SDL_ReleaseGPUTransferBuffer(nc__gpu_device, transfer_buffer);
@@ -721,10 +716,10 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 #endif
 
     command_buffer = SDL_AcquireGPUCommandBuffer(nc__gpu_device);
-    NC__CHECK_SDL_RESULT(command_buffer);
+    NC_CHECK_SDL_RESULT(command_buffer);
 
     nc__block_t* mapped = SDL_MapGPUTransferBuffer(nc__gpu_device, nc__transfer_buffer, true);
-    NC__CHECK_SDL_RESULT(mapped);
+    NC_CHECK_SDL_RESULT(mapped);
     memcpy(mapped, nc__chunk.array, nc__chunk.count * sizeof(*nc__chunk.array));
     SDL_UnmapGPUTransferBuffer(nc__gpu_device, nc__transfer_buffer);
 
@@ -741,13 +736,16 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                 .size = NC__CHUNK_SIZE,
             },
             true);
+    nc_upload_pending_ui_textures(nc__gpu_device, copy_pass);
     SDL_EndGPUCopyPass(copy_pass);
+
     copy_pass = NULL;
 
     SDL_GPUTexture* swapchain_texture;
     bool sdl_result = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, nc__window, &swapchain_texture, NULL, NULL);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     if (swapchain_texture) {
+#pragma region Render terrain
         SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(
                 command_buffer,
                 &(SDL_GPUColorTargetInfo){
@@ -755,7 +753,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                     .clear_color = { 0.53f, 0.81f, 0.92f, 1.0f },
                     .load_op = SDL_GPU_LOADOP_CLEAR,
                     .store_op = SDL_GPU_STOREOP_STORE,
-                    .cycle = false,
+                    .cycle = true,
                 },
                 1,
                 &(SDL_GPUDepthStencilTargetInfo){
@@ -763,8 +761,6 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                     .clear_depth = 1.0f,
                     .load_op = SDL_GPU_LOADOP_CLEAR,
                     .store_op = SDL_GPU_STOREOP_DONT_CARE,
-                    .stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
-                    .stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
                     .cycle = true,
                 });
         SDL_BindGPUGraphicsPipeline(render_pass, nc__pipeline);
@@ -780,7 +776,9 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         SDL_PushGPUVertexUniformData(command_buffer, 0, &view_projection, sizeof(view_projection));
         SDL_DrawGPUPrimitives(render_pass, 36, nc__chunk.count, 0, 0);
         SDL_EndGPURenderPass(render_pass);
+#pragma endregion
 
+#pragma region Render reticle
         render_pass = SDL_BeginGPURenderPass(
                 command_buffer,
                 &(SDL_GPUColorTargetInfo){
@@ -794,10 +792,15 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         SDL_BindGPUGraphicsPipeline(render_pass, nc__reticle_pipeline);
         SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
         SDL_EndGPURenderPass(render_pass);
+#pragma endregion
+
+#pragma region Draw 2D stuff
+        nc_draw_2d(device);
+#pragma endregion
     }
 
     sdl_result = SDL_SubmitGPUCommandBuffer(command_buffer);
-    NC__CHECK_SDL_RESULT(sdl_result);
+    NC_CHECK_SDL_RESULT(sdl_result);
     return SDL_APP_CONTINUE;
 
     error:
@@ -836,7 +839,7 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
                 .num_levels = 1,
                 .sample_count = SDL_GPU_SAMPLECOUNT_1,
             });
-            NC__CHECK_SDL_RESULT(nc__depth_texture);
+            NC_CHECK_SDL_RESULT(nc__depth_texture);
             break;
         case SDL_EVENT_DID_ENTER_FOREGROUND:
         case SDL_EVENT_WINDOW_SHOWN:
@@ -942,6 +945,7 @@ void SDL_AppQuit(void* app_state, const SDL_AppResult result) {
     nc__reticle_pipeline = NULL;
     SDL_ReleaseGPUGraphicsPipeline(nc__gpu_device, nc__pipeline);
     nc__pipeline = NULL;
+    nc_ui_fini(nc__gpu_device);
     SDL_ReleaseGPUSampler(nc__gpu_device, nc__texture_sampler);
     nc__texture_sampler = NULL;
     SDL_ReleaseGPUTexture(nc__gpu_device, nc__terrain_textures);

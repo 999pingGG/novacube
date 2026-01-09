@@ -4,4 +4,9 @@
 #define NC__VERSION "v@PROJECT_VERSION@"
 #define NC__GIT_HASH "@GIT_HASH@"
 #define NC__GIT_DESCRIBE "@GIT_DESCRIBE@"
+#ifdef NDEBUG
+#define NC_BUILD_TYPE "Release"
+#else
+#define NC_BUILD_TYPE "Debug"
+#endif
 #endif

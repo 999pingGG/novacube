@@ -6,9 +6,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(NC_SOURCES
+        libs/clay/clay.h
         libs/cvkm/cvkm.h
         libs/rapidhash/rapidhash.h
-        src/main.c)
+        include/novacube/sdl_util.h
+        include/novacube/ui.h
+        src/main.c
+        src/ui.c)
 
 if(ANDROID)
     add_library(novacube SHARED ${NC_SOURCES})
@@ -24,11 +28,12 @@ target_include_directories(novacube PRIVATE ${Vulkan_INCLUDE_DIRS})
 
 if(MSVC)
     target_compile_options(novacube PRIVATE /W4 /WX)
+    target_compile_definitions(novacube PRIVATE _CRT_NONSTDC_NO_DEPRECATE)
 else()
     target_compile_options(novacube PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-target_include_directories(novacube PRIVATE include libs/cvkm libs/tds/include libs/rapidhash)
+target_include_directories(novacube PRIVATE include libs/clay libs/cvkm libs/tds/include libs/rapidhash)
 
 if(NOT ANDROID AND (WIN32 OR UNIX))
     add_custom_command(
