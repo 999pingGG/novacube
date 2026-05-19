@@ -116,6 +116,7 @@ static SDL_GPUGraphicsPipeline* nc__pipeline, *nc__reticle_pipeline;
 static nc__touch_event_t nc__move_touch, nc__look_touch;
 static nc__block_type selected_type = NC__BLOCK_TYPE_STONE;
 
+#ifdef ANDROID
 static bool nc__load_astc_header(const char* data, nc__astc_header* header) {
     if (*(uint32_t*)data != 0x5ca1ab13) {
         return SDL_SetError("Invalid ASTC header.");
@@ -124,6 +125,7 @@ static bool nc__load_astc_header(const char* data, nc__astc_header* header) {
     memcpy(header, data, sizeof(*header));
     return true;
 }
+#endif
 
 // TODO: Review for memory correctness.
 static bool nc__load_texture(const char* path, char* data, const unsigned index) {

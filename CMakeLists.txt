@@ -16,6 +16,11 @@ else()
     add_executable(novacube ${NC_SOURCES})
 endif()
 
+find_library(MATH_LIBRARY m)
+if(MATH_LIBRARY)
+    target_link_libraries(novacube PRIVATE ${MATH_LIBRARY})
+endif()
+
 find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
 target_link_libraries(novacube PRIVATE SDL3::SDL3)
 
@@ -73,5 +78,5 @@ set_property(
         ${CMAKE_SOURCE_DIR}/.git/HEAD
         ${GIT_HEAD_FILE})
 
-set_target_properties(novacube PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
+set_target_properties(novacube PROPERTIES DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube)
