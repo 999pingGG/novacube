@@ -673,7 +673,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     vkm_vec3 input = { {
         (float)nc__keyboard_state[SDL_SCANCODE_D] - (float)nc__keyboard_state[SDL_SCANCODE_A],
-        (float)nc__keyboard_state[SDL_SCANCODE_R] - (float)nc__keyboard_state[SDL_SCANCODE_F],
+        (float)nc__keyboard_state[SDL_SCANCODE_SPACE] - (float)nc__keyboard_state[SDL_SCANCODE_LSHIFT],
         (float)nc__keyboard_state[SDL_SCANCODE_W] - (float)nc__keyboard_state[SDL_SCANCODE_S],
     } };
 
@@ -917,10 +917,10 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
             }
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            if (event->button.button == SDL_BUTTON_LEFT) {
+            if (event->button.button == SDL_BUTTON_RIGHT) {
                 nc__modify_block(selected_type);
             }
-            if (event->button.button == SDL_BUTTON_RIGHT) {
+            if (event->button.button == SDL_BUTTON_LEFT) {
                 nc__modify_block(NC__BLOCK_TYPE_AIR);
             }
             break;
