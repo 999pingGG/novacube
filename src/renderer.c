@@ -1113,10 +1113,14 @@ void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t*
 
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame) {
     NC_ASSERT(renderer->frame_command_buffer);
-    NC_ASSERT(renderer->frame_swapchain_texture);
 
     if (!nc__renderer_flush_uploads(renderer)) {
         return false;
+    }
+
+    if (!renderer->frame_swapchain_texture) {
+        // This is valid: The window is minimized or something. In this case, do not draw.
+        return true;
     }
 
     SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(
