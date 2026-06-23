@@ -1,13 +1,19 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C VERSION 0.2.0.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C VERSION 0.2.1.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(NC_SOURCES
         libs/cvkm/cvkm.h
+        libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
+        src/camera.c
+        src/error_handling.c
+        src/gui.c
+        src/renderer.c
+        src/terrain.c
         src/main.c)
 
 if(ANDROID)
@@ -28,12 +34,17 @@ find_package(Vulkan REQUIRED COMPONENTS glslc)
 target_include_directories(novacube PRIVATE ${Vulkan_INCLUDE_DIRS})
 
 if(MSVC)
-    target_compile_options(novacube PRIVATE /W4 /WX)
+    target_compile_options(novacube PRIVATE /W4 /WX /Zc:preprocessor)
 else()
-    target_compile_options(novacube PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(novacube PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+            -Wno-gnu-zero-variadic-macro-arguments)
 endif()
 
-target_include_directories(novacube PRIVATE include libs/cvkm libs/tds/include libs/rapidhash)
+target_include_directories(novacube PRIVATE include libs/cvkm libs/nuklear libs/tds/include libs/rapidhash)
 
 if(NOT ANDROID AND (WIN32 OR UNIX))
     add_custom_command(
@@ -78,5 +89,7 @@ set_property(
         ${CMAKE_SOURCE_DIR}/.git/HEAD
         ${GIT_HEAD_FILE})
 
-set_target_properties(novacube PROPERTIES DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
+set_target_properties(novacube PROPERTIES
+        DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>"
+        VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube)

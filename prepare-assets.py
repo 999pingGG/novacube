@@ -137,6 +137,8 @@ def main():
 
     args = parser.parse_args()
 
+    # TODO: Wipe the current asset output directory.
+
     process_textures(
         compress_android=args.compress_android,
         strip_exif=args.strip_exif,
