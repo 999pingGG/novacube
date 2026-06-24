@@ -29,8 +29,9 @@ enum {
 typedef struct nc_gui_context_t nc_gui_context_t;
 
 nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer);
-void nc_gui_set_viewport(nc_gui_context_t* context, uint16_t width, uint16_t height);
-void nc_gui_set_window_pixel_density(nc_gui_context_t* context, float window_pixel_density);
+void nc_gui_set_window_size(nc_gui_context_t* context, uint16_t width, uint16_t height);
+void nc_gui_set_pixel_viewport(nc_gui_context_t* context, uint16_t width, uint16_t height);
+void nc_gui_set_window_display_scale(nc_gui_context_t* context, float window_display_scale);
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event);
 nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context);
 nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context);

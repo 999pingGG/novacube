@@ -20,7 +20,7 @@
 #endif
 
 #define NC__MOUSE_SENSITIVITY vkm_deg2rad(0.2f)
-#define NC__TOUCHSCREEN_SENSITIVITY 3.0f
+#define NC__TOUCHSCREEN_RADIANS_PER_UNIT (3.0f / 640.0f)
 #define NC__MOVEMENT_SPEED 5.0f
 
 typedef struct nc__app_t {
@@ -129,8 +129,8 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
         nc_camera_rotate(
                 &app->camera,
-                touch_look_delta.x * NC__TOUCHSCREEN_SENSITIVITY,
-                -touch_look_delta.y * NC__TOUCHSCREEN_SENSITIVITY);
+                touch_look_delta.x * NC__TOUCHSCREEN_RADIANS_PER_UNIT,
+                -touch_look_delta.y * NC__TOUCHSCREEN_RADIANS_PER_UNIT);
     }
 
     vkm_vec3 forward;
@@ -219,12 +219,17 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
     }
 
     if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+        const vkm_usvec2 window_size = nc_renderer_get_window_size(app->renderer);
+        nc_gui_set_window_size(app->gui, window_size.x, window_size.y);
+    }
+
+    if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
         const vkm_usvec2 viewport = nc_renderer_get_viewport(app->renderer);
-        nc_gui_set_viewport(app->gui, viewport.x, viewport.y);
+        nc_gui_set_pixel_viewport(app->gui, viewport.x, viewport.y);
     }
 
     if (event->type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
-        nc_gui_set_window_pixel_density(app->gui, nc_renderer_get_window_pixel_density(app->renderer));
+        nc_gui_set_window_display_scale(app->gui, nc_renderer_get_window_display_scale(app->renderer));
     }
 
     const bool gui_captured = nc_gui_handle_event(app->gui, event);

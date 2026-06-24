@@ -63,7 +63,9 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer);
 bool nc_renderer_end_frame(nc_renderer_t* renderer);
 bool nc_renderer_set_relative_mouse_mode(nc_renderer_t* renderer, bool enabled);
 bool nc_renderer_is_foreground(const nc_renderer_t* renderer);
+vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer);
 vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer);
+float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer);
 nc_renderer_buffer_t* nc_renderer_create_buffer(
     nc_renderer_t* renderer,
     nc_renderer_buffer_kind_t kind,

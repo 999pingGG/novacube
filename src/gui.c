@@ -39,6 +39,8 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__GUI_INITIAL_BUFFER_CAPACITY 65536
 #define NC__GUI_MAX_TOUCHES 8
 #define NC__TOUCH_CONTROLS_SWITCH_THRESHOLD 0.2f
+#define NC__GUI_BUTTON_SIZE_AT_SCALE_1 100.0f
+#define NC__GUI_CROSSHAIR_SIZE_AT_SCALE_1 28.0f
 
 typedef uint8_t nc__gui_control_id_t;
 enum {
@@ -78,7 +80,9 @@ typedef struct nc__gui_pointer_t {
 } nc__gui_pointer_t;
 
 typedef struct nc_gui_context_t {
-    vkm_usvec2 viewport;
+    vkm_usvec2 window_size;
+    vkm_usvec2 pixel_viewport;
+    float window_display_scale;
 
     struct nk_context nuklear_context;
     struct nk_font_atlas font_atlas;
@@ -107,8 +111,6 @@ typedef struct nc_gui_context_t {
     uint32_t draw_command_capacity;
     bool draw_ready;
     bool overlay_dirty;
-
-    float window_pixel_density;
 
     vkm_vec2 look_delta;
     float mode_switch_accumulator;
@@ -210,13 +212,9 @@ error:
 }
 
 static void nc__gui_layout_controls(nc_gui_context_t* context) {
-    const float viewport_width = (float)context->viewport.x;
-    const float viewport_height = (float)context->viewport.y;
-    const float window_pixel_density = context->window_pixel_density > 0.0f ? context->window_pixel_density : 1.0f;
-    // SDL reports input and window sizes in window coordinates, so convert our
-    // target physical pixel size back into that space to keep the controls
-    // physically stable across display densities.
-    const float button_size = 100.0f / window_pixel_density;
+    const float viewport_width = (float)context->pixel_viewport.x;
+    const float viewport_height = (float)context->pixel_viewport.y;
+    const float button_size = NC__GUI_BUTTON_SIZE_AT_SCALE_1 * context->window_display_scale;
     const float gap = button_size * 0.12f;
     const float margin = button_size * 0.35f;
 
@@ -281,8 +279,8 @@ static void nc__gui_refresh_controls(nc_gui_context_t* context) {
             continue;
         }
 
-        const float x = pointer->x * (float)context->viewport.x;
-        const float y = pointer->y * (float)context->viewport.y;
+        const float x = pointer->x * (float)context->pixel_viewport.x;
+        const float y = pointer->y * (float)context->pixel_viewport.y;
         if (nc__gui_point_in_rect(context->control_rects[pointer->captured_control], x, y)) {
             controls |= nc__gui_control_flag(pointer->captured_control);
         }
@@ -330,8 +328,8 @@ static void nc__gui_clear_touch_state(nc_gui_context_t* context) {
 static bool nc__gui_is_control_pressed(const nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
     for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
         const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        const float x = pointer->x * (float)context->viewport.x;
-        const float y = pointer->y * (float)context->viewport.y;
+        const float x = pointer->x * (float)context->pixel_viewport.x;
+        const float y = pointer->y * (float)context->pixel_viewport.y;
         if (pointer->active &&
                 pointer->captured_control == control_id &&
                 nc__gui_point_in_rect(context->control_rects[control_id], x, y)) {
@@ -370,13 +368,13 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
     if (nk_begin(
             nuklear,
             "hud-overlay",
-            nk_rect(0.0f, 0.0f, (float)context->viewport.x, (float)context->viewport.y),
+            nk_rect(0.0f, 0.0f, (float)context->pixel_viewport.x, (float)context->pixel_viewport.y),
             NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND | NK_WINDOW_NO_INPUT)) {
         struct nk_command_buffer* canvas = nk_window_get_canvas(nuklear);
-        const float crosshair_size = vkm_max(24.0f, (float)vkm_min(context->viewport.x, context->viewport.y) * 0.08f);
+        const float crosshair_size = NC__GUI_CROSSHAIR_SIZE_AT_SCALE_1 * context->window_display_scale;
         const struct nk_rect crosshair_rect = nk_rect(
-                ((float)context->viewport.x - crosshair_size) * 0.5f,
-                ((float)context->viewport.y - crosshair_size) * 0.5f,
+                ((float)context->pixel_viewport.x - crosshair_size) * 0.5f,
+                ((float)context->pixel_viewport.y - crosshair_size) * 0.5f,
                 crosshair_size,
                 crosshair_size);
 
@@ -435,7 +433,8 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     bool atlas_began = false;
     nc_gui_context_t* result = calloc(1, sizeof(*result));
 
-    result->viewport = nc_renderer_get_viewport(renderer);
+    result->window_size = nc_renderer_get_window_size(renderer);
+    result->pixel_viewport = nc_renderer_get_viewport(renderer);
 
     nk_buffer_init_default(&result->command_buffer);
     nk_buffer_init_default(&result->vertex_buffer);
@@ -494,10 +493,11 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
             NC__GUI_INITIAL_BUFFER_CAPACITY);
     NC_CHECK_RESULT(result->index_gpu_buffer, "Failed to create the GUI index buffer.");
 
-    result->window_pixel_density = nc_renderer_get_window_pixel_density(renderer);
+    result->window_display_scale = nc_renderer_get_window_display_scale(renderer);
     result->touch_controls_enabled = nc__is_touchscreen_available();
 
-    nc_gui_set_viewport(result, result->viewport.x, result->viewport.y);
+    nc_gui_set_window_size(result, result->window_size.x, result->window_size.y);
+    nc_gui_set_pixel_viewport(result, result->pixel_viewport.x, result->pixel_viewport.y);
 
     return result;
 
@@ -509,16 +509,21 @@ error:
     return NULL;
 }
 
-void nc_gui_set_viewport(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
-    context->viewport.x = width;
-    context->viewport.y = height;
+void nc_gui_set_window_size(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
+    context->window_size.x = width;
+    context->window_size.y = height;
+}
+
+void nc_gui_set_pixel_viewport(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
+    context->pixel_viewport.x = width;
+    context->pixel_viewport.y = height;
     nc__gui_layout_controls(context);
     nc__gui_refresh_controls(context);
     context->overlay_dirty = true;
 }
 
-void nc_gui_set_window_pixel_density(nc_gui_context_t* context, const float window_pixel_density) {
-    context->window_pixel_density = window_pixel_density;
+void nc_gui_set_window_display_scale(nc_gui_context_t* context, const float window_display_scale) {
+    context->window_display_scale = window_display_scale;
     nc__gui_layout_controls(context);
     nc__gui_refresh_controls(context);
     context->overlay_dirty = true;
@@ -533,8 +538,8 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
 
             const nc__gui_control_id_t control_id = nc__gui_hit_test_control(
                     context,
-                    event->tfinger.x * (float)context->viewport.x,
-                    event->tfinger.y * (float)context->viewport.y);
+                    event->tfinger.x * (float)context->pixel_viewport.x,
+                    event->tfinger.y * (float)context->pixel_viewport.y);
 
             nc__gui_pointer_t* pointer = nc__gui_alloc_touch(context);
             if (!pointer) {
@@ -571,8 +576,8 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
             pointer->x = event->tfinger.x;
             pointer->y = event->tfinger.y;
             if (pointer->captured_control == NC__GUI_CONTROL_NONE) {
-                context->look_delta.x += event->tfinger.dx;
-                context->look_delta.y += event->tfinger.dy;
+                context->look_delta.x += event->tfinger.dx * context->pixel_viewport.x / context->window_display_scale;
+                context->look_delta.y += event->tfinger.dy * context->pixel_viewport.y / context->window_display_scale;
             } else {
                 nc__gui_refresh_controls(context);
                 context->overlay_dirty = true;
@@ -592,8 +597,8 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
                     pointer->captured_control != NC__GUI_CONTROL_NONE &&
                     nc__gui_point_in_rect(
                             context->control_rects[pointer->captured_control],
-                            pointer->x * (float)context->viewport.x,
-                            pointer->y * (float)context->viewport.y)) {
+                            pointer->x * (float)context->pixel_viewport.x,
+                            pointer->y * (float)context->pixel_viewport.y)) {
                 nc__gui_push_action(context, pointer->captured_control);
             }
 
@@ -726,8 +731,8 @@ bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, co
 
         const int clip_x = (int)vkm_max(draw_command->clip_rect.x, 0.0f);
         const int clip_y = (int)vkm_max(draw_command->clip_rect.y, 0.0f);
-        const int clip_right = (int)vkm_min(draw_command->clip_rect.x + draw_command->clip_rect.w, (float)context->viewport.x);
-        const int clip_bottom = (int)vkm_min(draw_command->clip_rect.y + draw_command->clip_rect.h, (float)context->viewport.y);
+        const int clip_right = (int)vkm_min(draw_command->clip_rect.x + draw_command->clip_rect.w, (float)context->pixel_viewport.x);
+        const int clip_bottom = (int)vkm_min(draw_command->clip_rect.y + draw_command->clip_rect.h, (float)context->pixel_viewport.y);
 
         if (clip_right > clip_x && clip_bottom > clip_y) {
             nc__gui_reserve_draw_commands(context, 1);

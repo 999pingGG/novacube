@@ -80,6 +80,7 @@ typedef struct nc_renderer_t {
     SDL_Window* window;
     SDL_GPUTexture* depth_texture;
     SDL_GPUTextureFormat swapchain_format;
+    vkm_usvec2 window_size;
     vkm_usvec2 viewport;
     bool foreground;
 
@@ -646,6 +647,12 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     sdl_result = SDL_GetWindowSize(result->window, &width, &height);
     NC_CHECK_SDL_RESULT(sdl_result);
 
+    result->window_size.x = (uint16_t)width;
+    result->window_size.y = (uint16_t)height;
+
+    sdl_result = SDL_GetWindowSizeInPixels(result->window, &width, &height);
+    NC_CHECK_SDL_RESULT(sdl_result);
+
     result->viewport.x = (uint16_t)width;
     result->viewport.y = (uint16_t)height;
 
@@ -865,6 +872,12 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
             break;
         case SDL_EVENT_WINDOW_RESIZED:
             if (event->window.data1 > 0 && event->window.data2 > 0) {
+                renderer->window_size.x = (uint16_t)event->window.data1;
+                renderer->window_size.y = (uint16_t)event->window.data2;
+            }
+            break;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            if (event->window.data1 > 0 && event->window.data2 > 0) {
                 renderer->viewport.x = (uint16_t)event->window.data1;
                 renderer->viewport.y = (uint16_t)event->window.data2;
                 return nc__renderer_create_depth_texture(renderer);
@@ -929,6 +942,10 @@ bool nc_renderer_is_foreground(const nc_renderer_t* renderer) {
 
 vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer) {
     return renderer->viewport;
+}
+
+vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {
+    return renderer->window_size;
 }
 
 nc_renderer_buffer_t* nc_renderer_create_buffer(
@@ -1166,6 +1183,20 @@ float nc_renderer_get_window_pixel_density(const nc_renderer_t* renderer) {
                 SDL_GetError());
         SDL_ClearError();
         return 1.0f;
+    }
+
+    return result;
+}
+
+float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer) {
+    const float result = SDL_GetWindowDisplayScale(renderer->window);
+    if (result == 0.0f) {
+        SDL_LogWarn(
+                SDL_LOG_CATEGORY_APPLICATION,
+                "SDL_GetWindowDisplayScale() failed, falling back to pixel density: %s",
+                SDL_GetError());
+        SDL_ClearError();
+        return nc_renderer_get_window_pixel_density(renderer);
     }
 
     return result;
