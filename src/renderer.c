@@ -16,7 +16,7 @@
 #define NC__RENDERER_ASTC_TEXTURES 0
 #endif
 
-#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536u
+#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536
 #define NC__RENDERER_CLEAR_RED 0.53f
 #define NC__RENDERER_CLEAR_GREEN 0.81f
 #define NC__RENDERER_CLEAR_BLUE 0.92f
@@ -196,7 +196,7 @@ static void nc__renderer_reserve_upload_ops(nc_renderer_t* renderer, const uint3
         return;
     }
 
-    const uint32_t new_capacity = nc__renderer_next_capacity(renderer->upload_capacity, required, 16u);
+    const uint32_t new_capacity = nc__renderer_next_capacity(renderer->upload_capacity, required, 16);
     renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
     renderer->upload_capacity = new_capacity;
 }
@@ -272,7 +272,7 @@ static bool nc__renderer_queue_buffer_upload_internal(
 ) {
     NC_ASSERT(size);
 
-    nc__renderer_reserve_upload_ops(renderer, 1u);
+    nc__renderer_reserve_upload_ops(renderer, 1);
 
     uint32_t offset = 0;
     if (!nc__renderer_reserve_transfer_bytes(renderer, size, &offset)) {
@@ -301,7 +301,7 @@ static bool nc__renderer_queue_texture_upload(
 ) {
     NC_ASSERT(size);
 
-    nc__renderer_reserve_upload_ops(renderer, 1u);
+    nc__renderer_reserve_upload_ops(renderer, 1);
 
     uint32_t offset = 0;
     if (!nc__renderer_reserve_transfer_bytes(renderer, size, &offset)) {
@@ -466,7 +466,7 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
     }
 
     *out_texture = (nc__renderer_texture_file_data_t){
-        .size = (uint32_t)surface->w * (uint32_t)surface->h * 4u,
+        .size = (uint32_t)surface->w * (uint32_t)surface->h * 4,
         .width = (int16_t)surface->w,
         .height = (int16_t)surface->h,
         .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
@@ -705,7 +705,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
                 {
                     .slot = 0,
-                    .pitch = 4u,
+                    .pitch = 4,
                     .input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE,
                 },
             },
@@ -772,7 +772,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
                 {
                     .slot = 0,
-                    .pitch = sizeof(float) * 4u + sizeof(uint8_t) * 4u,
+                    .pitch = sizeof(float) * 4 + sizeof(uint8_t) * 4,
                     .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
                 },
             },
@@ -788,13 +788,13 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
                     .location = 1,
                     .buffer_slot = 0,
                     .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                    .offset = sizeof(float) * 2u,
+                    .offset = sizeof(float) * 2,
                 },
                 {
                     .location = 2,
                     .buffer_slot = 0,
                     .format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
-                    .offset = sizeof(float) * 4u,
+                    .offset = sizeof(float) * 4,
                 },
             },
             .num_vertex_attributes = 3,
@@ -1007,13 +1007,13 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
             SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
             width,
             height,
-            1u,
+            1,
             false);
     if (!result) {
         return NULL;
     }
 
-    const uint32_t size = width * height * 4u;
+    const uint32_t size = width * height * 4;
     if (!nc__renderer_queue_texture_upload(renderer, result, 0, pixels, size)) {
         nc__renderer_destroy_texture_object(renderer, result);
         return NULL;
@@ -1033,14 +1033,14 @@ nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(nc_renderer_t* re
             texture_data.format,
             texture_data.width,
             texture_data.height,
-            1u,
+            1,
             false);
     if (!texture) {
         nc__renderer_free_texture_file_data(&texture_data);
         return NULL;
     }
 
-    const bool upload_result = nc__renderer_queue_texture_upload(renderer, texture, 0u, texture_data.bytes, texture_data.size);
+    const bool upload_result = nc__renderer_queue_texture_upload(renderer, texture, 0, texture_data.bytes, texture_data.size);
     nc__renderer_free_texture_file_data(&texture_data);
     if (!upload_result) {
         nc__renderer_destroy_texture_object(renderer, texture);
@@ -1072,14 +1072,14 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
         return NULL;
     }
 
-    bool upload_result = nc__renderer_queue_texture_upload(renderer, result, 0u, texture_data.bytes, texture_data.size);
+    bool upload_result = nc__renderer_queue_texture_upload(renderer, result, 0, texture_data.bytes, texture_data.size);
     nc__renderer_free_texture_file_data(&texture_data);
     if (!upload_result) {
         nc__renderer_destroy_texture_object(renderer, result);
         return NULL;
     }
 
-    for (uint16_t i = 1u; i < path_count; i++) {
+    for (uint16_t i = 1; i < path_count; i++) {
         if (!nc__renderer_load_texture_file(paths[i], &texture_data)) {
             nc__renderer_destroy_texture_object(renderer, result);
             return NULL;

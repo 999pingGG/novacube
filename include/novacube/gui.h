@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <novacube/cvkm.h>
 #include <novacube/renderer.h>
 
 typedef uint8_t nc_gui_controls_t;
@@ -33,9 +34,9 @@ void nc_gui_set_window_pixel_density(nc_gui_context_t* context, float window_pix
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event);
 nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context);
 nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context);
-bool nc_gui_is_mouse_captured(const nc_gui_context_t* context);
+bool nc_gui_consume_look_delta(nc_gui_context_t* context, vkm_vec2* delta);
 bool nc_gui_is_touch_captured(const nc_gui_context_t* context, SDL_FingerID finger_id);
-bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer);
+bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, float delta_time);
 void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overlay_draw_t* draw);
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer);
 #endif

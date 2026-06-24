@@ -23,19 +23,10 @@
 #define NC__TOUCHSCREEN_SENSITIVITY 3.0f
 #define NC__MOVEMENT_SPEED 5.0f
 
-typedef struct nc__touch_event_t {
-    vkm_vec2 initial_pos;
-    vkm_vec2 current_pos;
-    SDL_FingerID finger_id;
-    Uint64 timestamp;
-} nc__touch_event_t;
-
 typedef struct nc__app_t {
     nc_renderer_t* renderer;
     nc_terrain_t* terrain;
     nc_gui_context_t* gui;
-    nc__touch_event_t look_touch;
-    nc__touch_event_t move_touch;
     nc_camera_t camera;
     nc_block_type_t selected_type;
 } nc__app_t;
@@ -134,14 +125,12 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     const double delta_time = last_ticks == 0 ? 1.0 / 60.0 : (double)(ticks - last_ticks) / 1000000000.0;
     last_ticks = ticks;
 
-    if (app->look_touch.finger_id) {
-        vkm_vec2 delta;
-        vkm_sub(&app->look_touch.current_pos, &app->look_touch.initial_pos, &delta);
+    vkm_vec2 touch_look_delta;
+    if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
         nc_camera_rotate(
                 &app->camera,
-                delta.x * NC__TOUCHSCREEN_SENSITIVITY,
-                -delta.y * NC__TOUCHSCREEN_SENSITIVITY);
-        app->look_touch.initial_pos = app->look_touch.current_pos;
+                touch_look_delta.x * NC__TOUCHSCREEN_SENSITIVITY,
+                -touch_look_delta.y * NC__TOUCHSCREEN_SENSITIVITY);
     }
 
     vkm_vec3 forward;
@@ -193,7 +182,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (!nc_terrain_prepare_render(app->terrain, app->renderer)) {
         goto error;
     }
-    if (!nc_gui_prepare_frame(app->gui, app->renderer)) {
+    if (!nc_gui_prepare_frame(app->gui, app->renderer, (float)delta_time)) {
         goto error;
     }
 
@@ -204,9 +193,9 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     if (!nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
             .opaque_draws = &opaque_draw,
-            .opaque_draw_count = 1u,
+            .opaque_draw_count = 1,
             .overlay_draws = &overlay_draw,
-            .overlay_draw_count = 1u,
+            .overlay_draw_count = 1,
         })) {
         goto error;
     }
@@ -263,52 +252,6 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
                 }
             } else if (event->key.scancode >= SDL_SCANCODE_1 && event->key.scancode <= SDL_SCANCODE_0) {
                 app->selected_type = (event->key.scancode - SDL_SCANCODE_1) % NC_BLOCK_TYPE_COUNT + 1;
-            }
-            break;
-        case SDL_EVENT_FINGER_DOWN:
-            if (gui_captured) {
-                break;
-            }
-
-            if (event->tfinger.x < 0.5f) {
-                if (!app->move_touch.finger_id) {
-                    app->move_touch = (nc__touch_event_t){
-                        .initial_pos = { { event->tfinger.x, event->tfinger.y } },
-                        .current_pos = { { event->tfinger.x, event->tfinger.y } },
-                        .finger_id = event->tfinger.fingerID,
-                        .timestamp = event->tfinger.timestamp,
-                    };
-                }
-            } else if (!app->look_touch.finger_id) {
-                app->look_touch = (nc__touch_event_t){
-                    .initial_pos = { { event->tfinger.x, event->tfinger.y } },
-                    .current_pos = { { event->tfinger.x, event->tfinger.y } },
-                    .finger_id = event->tfinger.fingerID,
-                    .timestamp = event->tfinger.timestamp,
-                };
-            }
-            break;
-        case SDL_EVENT_FINGER_UP:
-        case SDL_EVENT_FINGER_CANCELED:
-            if (gui_captured) {
-                break;
-            }
-
-            if (app->move_touch.finger_id == event->tfinger.fingerID) {
-                app->move_touch = (nc__touch_event_t){ 0 };
-            } else if (app->look_touch.finger_id == event->tfinger.fingerID) {
-                app->look_touch = (nc__touch_event_t){ 0 };
-            }
-            break;
-        case SDL_EVENT_FINGER_MOTION:
-            if (gui_captured) {
-                break;
-            }
-
-            if (app->move_touch.finger_id == event->tfinger.fingerID) {
-                app->move_touch.current_pos = (vkm_vec2){ { event->tfinger.x, event->tfinger.y } };
-            } else if (app->look_touch.finger_id == event->tfinger.fingerID) {
-                app->look_touch.current_pos = (vkm_vec2){ { event->tfinger.x, event->tfinger.y } };
             }
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C VERSION 0.2.2.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C VERSION 0.2.3.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

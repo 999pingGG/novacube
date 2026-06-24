@@ -21,6 +21,7 @@
 #define NK_INCLUDE_DEFAULT_FONT
 #define NK_BUTTON_TRIGGER_ON_RELEASE
 #define NK_KEYSTATE_BASED_INPUT
+#define NK_ASSERT NC_ASSERT
 
 #define NK_IMPLEMENTATION
 NC_IGNORE_ALL_WARNINGS_START
@@ -37,6 +38,7 @@ NC_IGNORE_ALL_WARNINGS_END
 
 #define NC__GUI_INITIAL_BUFFER_CAPACITY 65536
 #define NC__GUI_MAX_TOUCHES 8
+#define NC__TOUCH_CONTROLS_SWITCH_THRESHOLD 0.2f
 
 typedef uint8_t nc__gui_control_id_t;
 enum {
@@ -99,10 +101,6 @@ typedef struct nc_gui_context_t {
     nc_gui_controls_t controls;
     nc_gui_actions_t pending_actions;
     nc__gui_pointer_t touch_points[NC__GUI_MAX_TOUCHES];
-    bool mouse_down;
-    float mouse_x;
-    float mouse_y;
-    nc__gui_control_id_t mouse_control;
 
     nc_renderer_overlay_draw_command_t* draw_commands;
     uint32_t draw_command_count;
@@ -111,6 +109,10 @@ typedef struct nc_gui_context_t {
     bool overlay_dirty;
 
     float window_pixel_density;
+
+    vkm_vec2 look_delta;
+    float mode_switch_accumulator;
+    bool touch_controls_enabled;
 } nc_gui_context_t;
 
 static const struct nk_draw_vertex_layout_element nc__gui_vertex_layout[] = {
@@ -157,7 +159,7 @@ static nc_gui_controls_t nc__gui_control_flag(const nc__gui_control_id_t control
 }
 
 static uint32_t nc__gui_next_capacity(const uint32_t current, const uint32_t required) {
-    uint32_t capacity = current ? current : 16u;
+    uint32_t capacity = current ? current : 16;
     while (capacity < required) {
         if (capacity > UINT32_MAX / 2) {
             capacity = UINT32_MAX;
@@ -271,7 +273,7 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
 }
 
 static void nc__gui_refresh_controls(nc_gui_context_t* context) {
-    nc_gui_controls_t controls = 0u;
+    nc_gui_controls_t controls = 0;
 
     for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
         const nc__gui_pointer_t* pointer = &context->touch_points[i];
@@ -286,18 +288,11 @@ static void nc__gui_refresh_controls(nc_gui_context_t* context) {
         }
     }
 
-    if (context->mouse_down &&
-            context->mouse_control != NC__GUI_CONTROL_NONE &&
-            nc__gui_is_movement_control(context->mouse_control) &&
-            nc__gui_point_in_rect(context->control_rects[context->mouse_control], context->mouse_x, context->mouse_y)) {
-        controls |= nc__gui_control_flag(context->mouse_control);
-    }
-
     context->controls = controls;
 }
 
 static nc__gui_control_id_t nc__gui_hit_test_control(const nc_gui_context_t* context, const float x, const float y) {
-    for (uint8_t i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
+    for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
         if (nc__gui_point_in_rect(context->control_rects[i], x, y)) {
             return i;
         }
@@ -326,6 +321,12 @@ static nc__gui_pointer_t* nc__gui_alloc_touch(nc_gui_context_t* context) {
     return NULL;
 }
 
+static void nc__gui_clear_touch_state(nc_gui_context_t* context) {
+    memset(context->touch_points, 0, sizeof(context->touch_points));
+    context->look_delta = (vkm_vec2){ { 0.0f, 0.0f } };
+    nc__gui_refresh_controls(context);
+}
+
 static bool nc__gui_is_control_pressed(const nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
     for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
         const nc__gui_pointer_t* pointer = &context->touch_points[i];
@@ -338,9 +339,7 @@ static bool nc__gui_is_control_pressed(const nc_gui_context_t* context, const nc
         }
     }
 
-    return context->mouse_down &&
-        context->mouse_control == control_id &&
-        nc__gui_point_in_rect(context->control_rects[control_id], context->mouse_x, context->mouse_y);
+    return false;
 }
 
 static void nc__gui_push_action(nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
@@ -383,23 +382,34 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
 
         nk_draw_image(canvas, crosshair_rect, &context->crosshair_texture.nuklear_image, nk_rgba(255, 255, 255, 255));
 
-        for (uint8_t i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
-            const struct nk_rect rect = context->control_rects[i];
-            const bool pressed = nc__gui_is_control_pressed(context, i);
-            const float inset = rect.w * 0.18f;
-            const struct nk_rect image_rect = nk_rect(
-                    rect.x + inset,
-                    rect.y + inset,
-                    rect.w - inset * 2.0f,
-                    rect.h - inset * 2.0f);
+        if (context->touch_controls_enabled) {
+            for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
+                const struct nk_rect rect = context->control_rects[i];
+                const bool pressed = nc__gui_is_control_pressed(context, i);
+                const float inset = rect.w * 0.18f;
+                const struct nk_rect image_rect = nk_rect(
+                        rect.x + inset,
+                        rect.y + inset,
+                        rect.w - inset * 2.0f,
+                        rect.h - inset * 2.0f);
 
-            nk_fill_rect(canvas, rect, rect.w * 0.22f, pressed ? nk_rgba(255, 255, 255, 52) : nk_rgba(0, 0, 0, 96));
-            nk_stroke_rect(canvas, rect, rect.w * 0.22f, 2.0f, pressed ? nk_rgba(255, 255, 255, 160) : nk_rgba(255, 255, 255, 64));
-            nk_draw_image(
-                    canvas,
-                    image_rect,
-                    &context->control_textures[i].nuklear_image,
-                    pressed ? nk_rgba(255, 255, 255, 255) : nk_rgba(255, 255, 255, 224));
+                nk_fill_rect(
+                        canvas,
+                        rect,
+                        rect.w * 0.22f,
+                        pressed ? nk_rgba(255, 255, 255, 52) : nk_rgba(0, 0, 0, 96));
+                nk_stroke_rect(
+                        canvas,
+                        rect,
+                        rect.w * 0.22f,
+                        2.0f,
+                        pressed ? nk_rgba(255, 255, 255, 160) : nk_rgba(255, 255, 255, 64));
+                nk_draw_image(
+                        canvas,
+                        image_rect,
+                        &context->control_textures[i].nuklear_image,
+                        pressed ? nk_rgba(255, 255, 255, 255) : nk_rgba(255, 255, 255, 224));
+            }
         }
     }
     nk_end(nuklear);
@@ -407,12 +417,25 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
     nuklear->style.window = saved_window_style;
 }
 
+static bool nc__is_touchscreen_available(void) {
+    int count = 0;
+    SDL_TouchID* devices = SDL_GetTouchDevices(&count);
+
+    if (devices) {
+        SDL_free(devices);
+    } else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "%s", SDL_GetError());
+        SDL_ClearError();
+    }
+
+    return count > 0;
+}
+
 nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     bool atlas_began = false;
     nc_gui_context_t* result = calloc(1, sizeof(*result));
 
     result->viewport = nc_renderer_get_viewport(renderer);
-    result->mouse_control = NC__GUI_CONTROL_NONE;
 
     nk_buffer_init_default(&result->command_buffer);
     nk_buffer_init_default(&result->vertex_buffer);
@@ -453,7 +476,7 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
         goto error;
     }
 
-    for (uint8_t i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
+    for (int i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
         if (!nc__gui_load_texture(renderer, nc__gui_control_texture_paths[i], &result->control_textures[i])) {
             goto error;
         }
@@ -472,6 +495,7 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     NC_CHECK_RESULT(result->index_gpu_buffer, "Failed to create the GUI index buffer.");
 
     result->window_pixel_density = nc_renderer_get_window_pixel_density(renderer);
+    result->touch_controls_enabled = nc__is_touchscreen_available();
 
     nc_gui_set_viewport(result, result->viewport.x, result->viewport.y);
 
@@ -503,13 +527,14 @@ void nc_gui_set_window_pixel_density(nc_gui_context_t* context, const float wind
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
     switch (event->type) {
         case SDL_EVENT_FINGER_DOWN: {
+            if (!context->touch_controls_enabled) {
+                return false;
+            }
+
             const nc__gui_control_id_t control_id = nc__gui_hit_test_control(
                     context,
                     event->tfinger.x * (float)context->viewport.x,
                     event->tfinger.y * (float)context->viewport.y);
-            if (control_id == NC__GUI_CONTROL_NONE) {
-                return false;
-            }
 
             nc__gui_pointer_t* pointer = nc__gui_alloc_touch(context);
             if (!pointer) {
@@ -523,11 +548,21 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
                 .captured_control = control_id,
                 .active = true,
             };
-            nc__gui_refresh_controls(context);
-            context->overlay_dirty = true;
+            if (control_id != NC__GUI_CONTROL_NONE) {
+                nc__gui_refresh_controls(context);
+                context->overlay_dirty = true;
+            }
             return true;
         }
         case SDL_EVENT_FINGER_MOTION: {
+            if (!context->touch_controls_enabled) {
+                const vkm_vec2 delta = { { event->tfinger.dx, event->tfinger.dy } };
+                const float length = vkm_length(&delta);
+                // Some arbitrary factor to increase sensitivity.
+                context->mode_switch_accumulator += length * 2.0f;
+                return false;
+            }
+
             nc__gui_pointer_t* pointer = nc__gui_find_touch(context, event->tfinger.fingerID);
             if (!pointer) {
                 return false;
@@ -535,8 +570,13 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
 
             pointer->x = event->tfinger.x;
             pointer->y = event->tfinger.y;
-            nc__gui_refresh_controls(context);
-            context->overlay_dirty = true;
+            if (pointer->captured_control == NC__GUI_CONTROL_NONE) {
+                context->look_delta.x += event->tfinger.dx;
+                context->look_delta.y += event->tfinger.dy;
+            } else {
+                nc__gui_refresh_controls(context);
+                context->overlay_dirty = true;
+            }
             return true;
         }
         case SDL_EVENT_FINGER_UP:
@@ -548,10 +588,12 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
 
             pointer->x = event->tfinger.x;
             pointer->y = event->tfinger.y;
-            if (event->type == SDL_EVENT_FINGER_UP && nc__gui_point_in_rect(
-                    context->control_rects[pointer->captured_control],
-                    pointer->x * (float)context->viewport.x,
-                    pointer->y * (float)context->viewport.y)) {
+            if (event->type == SDL_EVENT_FINGER_UP &&
+                    pointer->captured_control != NC__GUI_CONTROL_NONE &&
+                    nc__gui_point_in_rect(
+                            context->control_rects[pointer->captured_control],
+                            pointer->x * (float)context->viewport.x,
+                            pointer->y * (float)context->viewport.y)) {
                 nc__gui_push_action(context, pointer->captured_control);
             }
 
@@ -560,49 +602,27 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
             context->overlay_dirty = true;
             return true;
         }
-        case SDL_EVENT_MOUSE_MOTION:
-            context->mouse_x = (float)event->motion.x;
-            context->mouse_y = (float)event->motion.y;
-            if (context->mouse_control != NC__GUI_CONTROL_NONE) {
-                nc__gui_refresh_controls(context);
-                context->overlay_dirty = true;
-                return true;
-            }
-            return false;
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            if (event->button.button != SDL_BUTTON_LEFT) {
-                return false;
-            }
-
-            context->mouse_x = (float)event->button.x;
-            context->mouse_y = (float)event->button.y;
-            context->mouse_control = nc__gui_hit_test_control(context, context->mouse_x, context->mouse_y);
-            context->mouse_down = context->mouse_control != NC__GUI_CONTROL_NONE;
-            if (context->mouse_down) {
-                nc__gui_refresh_controls(context);
-                context->overlay_dirty = true;
-                return true;
-            }
-            return false;
         case SDL_EVENT_MOUSE_BUTTON_UP:
-            if (event->button.button != SDL_BUTTON_LEFT) {
+        case SDL_EVENT_MOUSE_WHEEL:
+            nc__gui_clear_touch_state(context);
+            context->overlay_dirty = true;
+            context->touch_controls_enabled = false;
+            context->mode_switch_accumulator = 0.0f;
+            return false;
+        case SDL_EVENT_MOUSE_MOTION: {
+            if (!context->touch_controls_enabled) {
                 return false;
             }
 
-            const bool was_captured = context->mouse_down;
-            context->mouse_x = (float)event->button.x;
-            context->mouse_y = (float)event->button.y;
-            if (context->mouse_down &&
-                    context->mouse_control != NC__GUI_CONTROL_NONE &&
-                    nc__gui_point_in_rect(context->control_rects[context->mouse_control], context->mouse_x, context->mouse_y)) {
-                nc__gui_push_action(context, context->mouse_control);
-            }
-
-            context->mouse_down = false;
-            context->mouse_control = NC__GUI_CONTROL_NONE;
-            nc__gui_refresh_controls(context);
-            context->overlay_dirty = true;
-            return was_captured;
+            const vkm_vec2 delta = { { event->motion.xrel, event->motion.yrel } };
+            const float length = vkm_length(&delta);
+            // Some arbitrary factor to reduce sensitivity.
+            context->mode_switch_accumulator += length * 0.002f;
+            return false;
+        }
         default:
             return false;
     }
@@ -614,16 +634,21 @@ nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context) {
 
 nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context) {
     const nc_gui_actions_t actions = context->pending_actions;
-    context->pending_actions = 0u;
+    context->pending_actions = 0;
     return actions;
 }
 
-bool nc_gui_is_mouse_captured(const nc_gui_context_t* context) {
-    return context->mouse_control != NC__GUI_CONTROL_NONE;
+bool nc_gui_consume_look_delta(nc_gui_context_t* context, vkm_vec2* delta) {
+    const bool result = context->look_delta.x != 0.0f || context->look_delta.y != 0.0f;
+
+    *delta = context->look_delta;
+    context->look_delta = (vkm_vec2){ { 0.0f, 0.0f } };
+
+    return result;
 }
 
 bool nc_gui_is_touch_captured(const nc_gui_context_t* context, const SDL_FingerID finger_id) {
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
+    for (int i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
         if (context->touch_points[i].active && context->touch_points[i].finger_id == finger_id) {
             return true;
         }
@@ -632,7 +657,29 @@ bool nc_gui_is_touch_captured(const nc_gui_context_t* context, const SDL_FingerI
     return false;
 }
 
-bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer) {
+bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, const float delta_time) {
+    // Automagically enable or disable touchscreen controls when the player starts using a touchscreen
+    // or keyboard & mouse, respectively. But only do so when the player looks around fast enough,
+    // additionally to directly pressing a key or using the mouse wheel.
+    // Looking around increases the accumulator (see the event handler in this file).
+    // Every frame the accumulator is decreased by the delta time.
+    // Do the switching when the input accumulator reaches the threshold.
+
+    context->mode_switch_accumulator -= delta_time;
+
+    if (context->mode_switch_accumulator > NC__TOUCH_CONTROLS_SWITCH_THRESHOLD) {
+        context->touch_controls_enabled = !context->touch_controls_enabled;
+        context->mode_switch_accumulator = 0.0f;
+        context->overlay_dirty = true;
+
+        if (!context->touch_controls_enabled) {
+            // Clear all current touch actions.
+            nc__gui_clear_touch_state(context);
+        }
+    } else if (context->mode_switch_accumulator < 0.0f) {
+        context->mode_switch_accumulator = 0.0f;
+    }
+
     if (!context->overlay_dirty && context->draw_ready) {
         return true;
     }
@@ -683,7 +730,7 @@ bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer) {
         const int clip_bottom = (int)vkm_min(draw_command->clip_rect.y + draw_command->clip_rect.h, (float)context->viewport.y);
 
         if (clip_right > clip_x && clip_bottom > clip_y) {
-            nc__gui_reserve_draw_commands(context, 1u);
+            nc__gui_reserve_draw_commands(context, 1);
             context->draw_commands[context->draw_command_count++] = (nc_renderer_overlay_draw_command_t){
                 .texture = (const nc_renderer_texture_t*)draw_command->texture.ptr,
                 .clip_rect = {
@@ -737,7 +784,7 @@ void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overla
         .vertex_buffer = context->vertex_gpu_buffer,
         .index_buffer = context->index_gpu_buffer,
         .draw_commands = context->draw_commands,
-        .draw_command_count = context->draw_ready ? context->draw_command_count : 0u,
+        .draw_command_count = context->draw_ready ? context->draw_command_count : 0,
     };
 }
 
