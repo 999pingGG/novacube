@@ -576,8 +576,10 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
             pointer->x = event->tfinger.x;
             pointer->y = event->tfinger.y;
             if (pointer->captured_control == NC__GUI_CONTROL_NONE) {
-                context->look_delta.x += event->tfinger.dx * context->pixel_viewport.x / context->window_display_scale;
-                context->look_delta.y += event->tfinger.dy * context->pixel_viewport.y / context->window_display_scale;
+                context->look_delta.x +=
+                        event->tfinger.dx * (float)context->pixel_viewport.x / context->window_display_scale;
+                context->look_delta.y +=
+                        event->tfinger.dy * (float)context->pixel_viewport.y / context->window_display_scale;
             } else {
                 nc__gui_refresh_controls(context);
                 context->overlay_dirty = true;

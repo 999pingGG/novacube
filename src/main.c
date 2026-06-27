@@ -6,14 +6,15 @@
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL_main.h>
 
+#include <novacube/build_info.h>
 #include <novacube/camera.h>
+#include <novacube/configuration.h>
 #include <novacube/cvkm.h>
 #include <novacube/error_handling.h>
 #include <novacube/gui.h>
 #include <novacube/macros.h>
 #include <novacube/renderer.h>
 #include <novacube/terrain.h>
-#include <novacube/version.h>
 
 #ifndef ANDROID
 #define NC__BACKGROUND_DELAY 100
@@ -66,6 +67,18 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     (void)argc;
     (void)argv;
 
+    SDL_SetAppMetadata(NC_PRODUCT_NAME, NC_VERSION, NC_PACKAGE_NAME);
+
+    SDL_Log(NC_PRODUCT_NAME " " NC_VERSION "\n"
+        "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
+        "Git: " NC_GIT_DESCRIBE "\n"
+        "Commit: " NC_GIT_HASH);
+
+    if (!nc_configuration_load()) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load configuration: %s", SDL_GetError());
+        SDL_ClearError();
+    }
+
     nc__app_t* app = calloc(1, sizeof(*app));
     *app_state = app;
 
@@ -74,20 +87,12 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
-    SDL_Log("Novacube " NC__VERSION "\n"
-            "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
-            "Git: " NC__GIT_DESCRIBE "\n"
-            "Commit: " NC__GIT_HASH);
-
     app->renderer = nc_renderer_init(&(nc_renderer_create_info_t){
-        .window_title = "Novacube " NC__VERSION,
-        .window_width = 640,
-        .window_height = 480,
-#ifdef ANDROID
-        .fullscreen = true,
-#else
-        .fullscreen = false,
-#endif
+        .window_title = NC_PRODUCT_NAME " " NC_VERSION,
+        .window_width = nc_config_get_resolution().x,
+        .window_height = nc_config_get_resolution().y,
+        .refresh_rate = nc_config_get_refresh_rate(),
+        .video_mode = nc_config_get_video_mode(),
     });
     if (!app->renderer) {
         goto error;

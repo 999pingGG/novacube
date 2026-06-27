@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <novacube/configuration.h>
 #include <novacube/cvkm.h>
 
 typedef struct nc_renderer_texture_t nc_renderer_texture_t;
@@ -18,7 +19,8 @@ typedef struct nc_renderer_create_info_t {
     const char* window_title;
     uint16_t window_width;
     uint16_t window_height;
-    bool fullscreen;
+    uint16_t refresh_rate;
+    nc_video_mode_t video_mode;
 } nc_renderer_create_info_t;
 
 typedef enum nc_renderer_buffer_kind_t {

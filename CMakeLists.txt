@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C VERSION 0.2.4.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C VERSION 0.3.0.0 HOMEPAGE_URL "https://novacubegame.net")
+
+set(NC_COMPANY_NAME CoupledSystems)
+set(NC_PRODUCT_NAME Novacube)
+set(NC_PACKAGE_NAME me.elinge.novacube)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -10,6 +14,7 @@ set(NC_SOURCES
         libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
         src/camera.c
+        src/configuration.c
         src/error_handling.c
         src/gui.c
         src/renderer.c
@@ -78,8 +83,8 @@ else()
 endif()
 
 configure_file(
-        ${CMAKE_SOURCE_DIR}/include/novacube/version.h.in
-        ${CMAKE_SOURCE_DIR}/include/novacube/version.h
+        ${CMAKE_SOURCE_DIR}/include/novacube/build_info.h.in
+        ${CMAKE_SOURCE_DIR}/include/novacube/build_info.h
         @ONLY)
 
 set_property(

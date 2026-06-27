@@ -635,15 +635,52 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     NC_CHECK_SDL_RESULT(result->gpu_device);
 
     SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    if (info->fullscreen) {
-        window_flags |= SDL_WINDOW_FULLSCREEN;
+
+#ifdef ANDROID
+    window_flags |= SDL_WINDOW_FULLSCREEN;
+#else
+    bool exclusive = false;
+    switch (info->video_mode) {
+        case NC_VIDEO_MODE_WINDOW:
+            break;
+        case NC_VIDEO_MODE_BORDERLESS:
+            window_flags |= SDL_WINDOW_BORDERLESS;
+            break;
+        case NC_VIDEO_MODE_EXCLUSIVE_FULLSCREEN:
+            exclusive = true;
+        case NC_VIDEO_MODE_FULLSCREEN:
+            window_flags |= SDL_WINDOW_FULLSCREEN;
+            break;
     }
+#endif
 
     result->window = SDL_CreateWindow(info->window_title, info->window_width, info->window_height, window_flags);
     NC_CHECK_SDL_RESULT(result->window);
 
-    int width = 0;
-    int height = 0;
+#ifndef ANDROID
+    if (exclusive) {
+        SDL_DisplayMode display_mode;
+        sdl_result = SDL_GetClosestFullscreenDisplayMode(
+                SDL_GetDisplayForWindow(result->window),
+                info->window_width,
+                info->window_height,
+                (float)info->refresh_rate,
+                true, &display_mode);
+        if (!sdl_result) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_GetClosestFullscreenDisplayMode() failed: %s", SDL_GetError());
+            SDL_ClearError();
+        } else {
+            sdl_result = SDL_SetWindowFullscreenMode(result->window, &display_mode);
+            if (!sdl_result) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_SetWindowFullscreenMode() failed: %s", SDL_GetError());
+                SDL_ClearError();
+            }
+        }
+    }
+#endif
+
+    int width;
+    int height;
     sdl_result = SDL_GetWindowSize(result->window, &width, &height);
     NC_CHECK_SDL_RESULT(sdl_result);
 
