@@ -415,11 +415,19 @@ static void nc__write_configuration_value(
 static char* nc__configuration_load_file(char out_path[FILENAME_MAX]) {
     out_path[0] = '\0';
 
+#ifdef ANDROID
+    const char* storage_path = SDL_GetAndroidExternalStoragePath();
+    NC_CHECK_SDL_RESULT(storage_path);
+
+    const int printed_length = snprintf(out_path, FILENAME_MAX, "%s/%s", storage_path, NC__CONFIGURATION_FILE);
+#else
     char* pref_path = SDL_GetPrefPath(NC_COMPANY_NAME, NC_PRODUCT_NAME);
     NC_CHECK_SDL_RESULT(pref_path);
 
     const int printed_length = snprintf(out_path, FILENAME_MAX, "%s%s", pref_path, NC__CONFIGURATION_FILE);
     SDL_free(pref_path);
+#endif
+
     if (printed_length < 0 || printed_length >= FILENAME_MAX) {
         NC_SET_ERROR("The configuration file path is too long.");
         goto error;
