@@ -34,10 +34,13 @@ void nc_gui_set_pixel_viewport(nc_gui_context_t* context, uint16_t width, uint16
 void nc_gui_set_window_display_scale(nc_gui_context_t* context, float window_display_scale);
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event);
 nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context);
+void nc_gui_get_movement_delta(const nc_gui_context_t* context, vkm_vec2* delta);
+void nc_gui_get_camera_delta(const nc_gui_context_t* context, vkm_vec2* delta);
 nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context);
 bool nc_gui_consume_look_delta(nc_gui_context_t* context, vkm_vec2* delta);
 bool nc_gui_is_touch_captured(const nc_gui_context_t* context, SDL_FingerID finger_id);
 bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, float delta_time);
 void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overlay_draw_t* draw);
+void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw);
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer);
 #endif

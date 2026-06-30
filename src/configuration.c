@@ -1,3 +1,4 @@
+#include <float.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,6 +12,8 @@
 #include <novacube/standard_functions.h>
 
 #define NC__CONFIGURATION_FILE "config.ini"
+#define NC__DOUBLE_DECIMAL_PLACES 13
+#define NC__DOUBLE_ROUNDING_UNIT 0.0000000000001
 
 // meh, just to relinquish "suggest braces around initialization of subobject"
 NC_IGNORE_ALL_WARNINGS_START
@@ -289,6 +292,69 @@ static bool nc__parse_usvec2(nc__string_slice_t* slice, vkm_usvec2* result) {
     return slice->length == 0;
 }
 
+static bool nc__parse_double(nc__string_slice_t* slice, double* result) {
+    if (slice->length == 0) {
+        return false;
+    }
+
+    *result = 0.0;
+    double fractional_divisor = 1.0;
+    double sign = 1.0;
+    bool has_digit = false;
+    bool has_dot = false;
+    unsigned decimal_places = 0;
+
+    if (*slice->start == '-') {
+        sign = -1.0;
+        nc__skip_char_slice(slice);
+        nc__skip_whitespace_slice(slice);
+    } else if (*slice->start == '+') {
+        nc__skip_char_slice(slice);
+        nc__skip_whitespace_slice(slice);
+    }
+
+    while (slice->length && (nc__is_digit(*slice->start) || *slice->start == '.')) {
+        if (*slice->start == '.') {
+            if (has_dot) {
+                // Dot is allowed just once.
+                return false;
+            }
+            has_dot = true;
+            nc__skip_char_slice(slice);
+            continue;
+        }
+
+        has_digit = true;
+
+        if (has_dot) {
+            decimal_places++;
+            if (decimal_places <= NC__DOUBLE_DECIMAL_PLACES) {
+                fractional_divisor *= 10.0;
+                *result += (double)(*slice->start - '0') / fractional_divisor;
+            }
+        } else {
+            const double digit = (double)(*slice->start - '0');
+            if (*result > (DBL_MAX - digit) / 10.0) {
+                return false;
+            }
+
+            *result *= 10.0;
+            *result += digit;
+        }
+
+        nc__skip_char_slice(slice);
+    }
+
+    nc__skip_whitespace_slice(slice);
+    if (slice->length != 0) {
+        return false;
+    }
+
+    *result *= sign;
+
+    return has_digit;
+}
+
 static bool nc__parse_enum(nc__string_slice_t* slice, const nc__enum_entry_t* entries, int* result) {
     nc__right_trim_slice(slice);
 
@@ -324,8 +390,30 @@ static const nc__enum_entry_t nc__video_mode_entries[] = {
     { 0 },
 };
 
+static const nc__enum_entry_t nc__touch_movement_mode_entries[] = {
+#define X(id, string) { string, sizeof(string) - 1, NC_TOUCH_MOVEMENT_MODE_##id },
+    NC_TOUCH_MOVEMENT_MODE_TABLE(X)
+#undef X
+    { 0 },
+};
+
+static const nc__enum_entry_t nc__touch_camera_mode_entries[] = {
+#define X(id, string) { string, sizeof(string) - 1, NC_TOUCH_CAMERA_MODE_##id },
+    NC_TOUCH_CAMERA_MODE_TABLE(X)
+#undef X
+    { 0 },
+};
+
 static bool nc__parse_video_mode(nc__string_slice_t* slice, nc_video_mode_t* result) {
     return nc__parse_enum(slice, nc__video_mode_entries, (int*)result);
+}
+
+static bool nc__parse_touch_movement_mode(nc__string_slice_t* slice, nc_touch_movement_mode_t* result) {
+    return nc__parse_enum(slice, nc__touch_movement_mode_entries, (int*)result);
+}
+
+static bool nc__parse_touch_camera_mode(nc__string_slice_t* slice, nc_touch_camera_mode_t* result) {
+    return nc__parse_enum(slice, nc__touch_camera_mode_entries, (int*)result);
 }
 
 static void nc__string_builder_reserve(nc__string_builder_t* string_builder, const size_t additional_length) {
@@ -373,9 +461,8 @@ static void nc__print_int(nc__string_builder_t* string_builder, int value) {
     value = positive ? value : -value;
 
     int i;
-    for (i = sizeof(buffer) - 2; value; i--) {
+    for (i = sizeof(buffer) - 2; value; i--, value /= 10) {
         buffer[i] = (value % 10) + '0';
-        value /= 10;
     }
 
     if (!positive) {
@@ -387,6 +474,68 @@ static void nc__print_int(nc__string_builder_t* string_builder, int value) {
     nc__string_builder_append(string_builder, buffer + i, sizeof(buffer) - 1 - i);
 }
 
+static void nc__print_double(nc__string_builder_t* string_builder, const double value) {
+    if (value != value || value > DBL_MAX || value < -DBL_MAX) {
+        NC_ASSERT(false);
+        nc__string_builder_append(string_builder, "0.0", 3);
+        return;
+    }
+
+    double absolute_value = value < 0.0 ? -value : value;
+    absolute_value += NC__DOUBLE_ROUNDING_UNIT * 0.5;
+
+    if (absolute_value < NC__DOUBLE_ROUNDING_UNIT) {
+        nc__string_builder_append(string_builder, "0.0", 3);
+        return;
+    }
+
+    if (value < 0.0) {
+        nc__string_builder_append(string_builder, "-", 1);
+    }
+
+    double power = 1.0;
+    while (power <= absolute_value / 10.0) {
+        power *= 10.0;
+    }
+
+    while (power >= 1.0) {
+        int digit = (int)(absolute_value / power);
+        if (digit > 9) {
+            digit = 9;
+        }
+
+        const char character = (char)digit + '0';
+        nc__string_builder_append(string_builder, &character, 1);
+        absolute_value -= (double)digit * power;
+        power /= 10.0;
+    }
+
+    char fractional_digits[NC__DOUBLE_DECIMAL_PLACES];
+    unsigned fractional_length = 0;
+    for (unsigned i = 0; i < NC__DOUBLE_DECIMAL_PLACES; i++) {
+        absolute_value *= 10.0;
+        int digit = (int)absolute_value;
+        if (digit > 9) {
+            digit = 9;
+        }
+
+        fractional_digits[i] = (char)digit + '0';
+        absolute_value -= (double)digit;
+
+        if (digit != 0) {
+            fractional_length = i + 1;
+        }
+    }
+
+    if (fractional_length == 0) {
+        nc__string_builder_append(string_builder, ".0", 2);
+        return;
+    }
+
+    nc__string_builder_append(string_builder, ".", 1);
+    nc__string_builder_append(string_builder, fractional_digits, fractional_length);
+}
+
 static void nc__print_usvec2(nc__string_builder_t* string_builder, const vkm_usvec2 value) {
     nc__print_int(string_builder, value.x);
     nc__string_builder_append(string_builder, ", ", 2);
@@ -395,6 +544,14 @@ static void nc__print_usvec2(nc__string_builder_t* string_builder, const vkm_usv
 
 static void nc__print_video_mode(nc__string_builder_t* string_builder, const nc_video_mode_t value) {
     nc__print_enum(string_builder, nc__video_mode_entries, value);
+}
+
+static void nc__print_touch_movement_mode(nc__string_builder_t* string_builder, const nc_touch_movement_mode_t value) {
+    nc__print_enum(string_builder, nc__touch_movement_mode_entries, value);
+}
+
+static void nc__print_touch_camera_mode(nc__string_builder_t* string_builder, const nc_touch_camera_mode_t value) {
+    nc__print_enum(string_builder, nc__touch_camera_mode_entries, value);
 }
 
 static void nc__write_configuration_value(
@@ -517,6 +674,9 @@ bool nc_configuration_save(void) {
     }
 
     nc__string_builder_append_string(&string_builder, next_unmodified_position);
+
+    // TODO: Add the configurations that aren't in the file if they're currently different from the default.
+
     const bool sdl_result = SDL_SaveFile(path, string_builder.data, string_builder.length);
     NC_CHECK_SDL_RESULT(sdl_result);
 

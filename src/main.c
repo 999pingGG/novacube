@@ -20,8 +20,6 @@
 #define NC__BACKGROUND_DELAY 100
 #endif
 
-#define NC__MOUSE_SENSITIVITY vkm_deg2rad(0.2f)
-#define NC__TOUCHSCREEN_RADIANS_PER_UNIT (3.0f / 640.0f)
 #define NC__MOVEMENT_SPEED 5.0f
 
 typedef struct nc__app_t {
@@ -130,12 +128,23 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     const double delta_time = last_ticks == 0 ? 1.0 / 60.0 : (double)(ticks - last_ticks) / 1000000000.0;
     last_ticks = ticks;
 
-    vkm_vec2 touch_look_delta;
-    if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
+    vkm_vec2 touch_camera_delta;
+    nc_gui_get_camera_delta(app->gui, &touch_camera_delta);
+    if (touch_camera_delta.x != 0.0f || touch_camera_delta.y != 0.0f) {
+        const float sensitivity = (float)nc_config_get_touch_camera_stick_sensitivity();
         nc_camera_rotate(
                 &app->camera,
-                touch_look_delta.x * NC__TOUCHSCREEN_RADIANS_PER_UNIT,
-                -touch_look_delta.y * NC__TOUCHSCREEN_RADIANS_PER_UNIT);
+                touch_camera_delta.x * sensitivity * (float)delta_time,
+                touch_camera_delta.y * sensitivity * (float)delta_time);
+    }
+
+    vkm_vec2 touch_look_delta;
+    if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
+        const float sensitivity = (float)nc_config_get_touch_camera_drag_sensitivity();
+        nc_camera_rotate(
+                &app->camera,
+                touch_look_delta.x * sensitivity,
+                -touch_look_delta.y * sensitivity);
     }
 
     vkm_vec3 forward;
@@ -152,6 +161,11 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     input.x += (float)((gui_controls & NC_GUI_CONTROL_MOVE_RIGHT) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_LEFT) != 0);
     input.y += (float)((gui_controls & NC_GUI_CONTROL_MOVE_UP) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_DOWN) != 0);
     input.z += (float)((gui_controls & NC_GUI_CONTROL_MOVE_FORWARD) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_BACKWARD) != 0);
+
+    vkm_vec2 gui_movement_delta;
+    nc_gui_get_movement_delta(app->gui, &gui_movement_delta);
+    input.x += gui_movement_delta.x;
+    input.z += gui_movement_delta.y;
 
     const float input_length = vkm_length(&input);
     if (input_length > 1.0f) {
@@ -193,14 +207,17 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     nc_renderer_opaque_draw_t opaque_draw;
     nc_renderer_overlay_draw_t overlay_draw;
+    nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
     nc_terrain_get_opaque_draw(app->terrain, &view_projection, &opaque_draw);
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
+    nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
 
     if (!nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
             .opaque_draws = &opaque_draw,
             .opaque_draw_count = 1,
             .overlay_draws = &overlay_draw,
             .overlay_draw_count = 1,
+            .procedural_overlay_draw = &procedural_overlay_draw,
         })) {
         goto error;
     }
@@ -251,8 +268,8 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
             if (!gui_captured) {
                 nc_camera_rotate(
                         &app->camera,
-                        event->motion.xrel * NC__MOUSE_SENSITIVITY,
-                        -event->motion.yrel * NC__MOUSE_SENSITIVITY);
+                        event->motion.xrel * vkm_deg2rad((float)nc_config_get_mouse_sensitivity()),
+                        -event->motion.yrel * vkm_deg2rad((float)nc_config_get_mouse_sensitivity()));
             }
             break;
         case SDL_EVENT_KEY_DOWN:

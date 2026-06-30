@@ -63,7 +63,7 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
 
     if (!((result->instance_buffer = nc_renderer_create_buffer(
             renderer,
-            NC_RENDERER_BUFFER_KIND_TERRAIN_INSTANCES,
+            NC_RENDERER_BUFFER_USAGE_VERTEX,
             NC__CHUNK_COUNT * sizeof(nc__terrain_block_t))))) {
         goto error;
     }

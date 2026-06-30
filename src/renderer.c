@@ -12,14 +12,21 @@
 
 #ifdef ANDROID
 #define NC__RENDERER_ASTC_TEXTURES 1
+#define NC__RENDERER_ASSETS_BASE_PATH ""
+#define NC__RENDERER_TEXTURE_EXTENSION ".astc"
 #else
 #define NC__RENDERER_ASTC_TEXTURES 0
+#define NC__RENDERER_ASSETS_BASE_PATH "assets/"
+#define NC__RENDERER_TEXTURE_EXTENSION ".png"
 #endif
 
 #define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536
 #define NC__RENDERER_CLEAR_RED 0.53f
 #define NC__RENDERER_CLEAR_GREEN 0.81f
 #define NC__RENDERER_CLEAR_BLUE 0.92f
+
+static const char* nc__renderer_crosshair_texture_path =
+    NC__RENDERER_ASSETS_BASE_PATH "textures/gui/crosshair" NC__RENDERER_TEXTURE_EXTENSION;
 
 typedef struct nc__renderer_texture_file_data_t {
     uint8_t* bytes;
@@ -75,6 +82,12 @@ typedef struct nc_renderer_buffer_t {
     uint64_t queued_upload_frame;
 } nc_renderer_buffer_t;
 
+typedef struct nc__renderer_procedural_overlay_uniforms_t {
+    float rings[2][4];
+    float sticks[2][4];
+    float crosshair[4];
+} nc__renderer_procedural_overlay_uniforms_t;
+
 typedef struct nc_renderer_t {
     SDL_GPUDevice* gpu_device;
     SDL_Window* window;
@@ -84,10 +97,13 @@ typedef struct nc_renderer_t {
     vkm_usvec2 viewport;
     bool foreground;
 
-    SDL_GPUGraphicsPipeline* terrain_pipeline;
+    SDL_GPUGraphicsPipeline* opaque_pipeline;
     SDL_GPUGraphicsPipeline* gui_pipeline;
-    SDL_GPUSampler* terrain_sampler;
+    SDL_GPUGraphicsPipeline* procedural_overlay_invert_pipeline;
+    SDL_GPUGraphicsPipeline* procedural_overlay_stick_pipeline;
+    SDL_GPUSampler* opaque_sampler;
     SDL_GPUSampler* gui_sampler;
+    nc_renderer_texture_t* procedural_overlay_crosshair_texture;
 
     SDL_GPUTransferBuffer* transfer_buffer;
     void* mapped_transfer_buffer;
@@ -531,14 +547,14 @@ static void nc__renderer_draw_opaque(
 
     NC_ASSERT(draw->texture->is_array);
 
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->terrain_pipeline);
+    SDL_BindGPUGraphicsPipeline(render_pass, renderer->opaque_pipeline);
     SDL_BindGPUVertexBuffers(render_pass, 0, &(SDL_GPUBufferBinding){
         .buffer = draw->instance_buffer->gpu_buffer,
         .offset = 0,
     }, 1);
     SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
         .texture = draw->texture->gpu_texture,
-        .sampler = renderer->terrain_sampler,
+        .sampler = renderer->opaque_sampler,
     }, 1);
     SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, draw->view_projection, sizeof(*draw->view_projection));
     SDL_DrawGPUPrimitives(render_pass, 36, draw->instance_count, 0, 0);
@@ -583,14 +599,58 @@ static void nc__renderer_draw_overlay(
             .sampler = renderer->gui_sampler,
         }, 1);
         SDL_SetGPUScissor(render_pass, &draw_command->clip_rect);
-        SDL_DrawGPUIndexedPrimitives(
-                render_pass,
-                draw_command->element_count,
-                1,
-                draw_command->first_index,
-                0,
-                0);
+        SDL_DrawGPUIndexedPrimitives(render_pass, draw_command->element_count, 1, draw_command->first_index, 0, 0);
     }
+}
+
+static void nc__renderer_draw_procedural_overlay(
+    nc_renderer_t* renderer,
+    SDL_GPURenderPass* render_pass,
+    const nc_renderer_procedural_overlay_draw_t* draw
+) {
+    if (!draw) {
+        return;
+    }
+
+    nc__renderer_procedural_overlay_uniforms_t uniforms = { 0 };
+    for (uint8_t i = 0; i < 2; i++) {
+        if (!draw->analog_sticks_active[i]) {
+            continue;
+        }
+
+        uniforms.rings[i][0] = draw->analog_stick_ring_positions[i].x;
+        uniforms.rings[i][1] = draw->analog_stick_ring_positions[i].y;
+        uniforms.rings[i][2] = draw->analog_stick_ring_radius;
+        uniforms.rings[i][3] = draw->analog_stick_ring_thickness;
+
+        uniforms.sticks[i][0] = draw->analog_stick_positions[i].x;
+        uniforms.sticks[i][1] = draw->analog_stick_positions[i].y;
+        uniforms.sticks[i][2] = draw->analog_stick_radius;
+    }
+
+    uniforms.crosshair[0] = ((float)renderer->viewport.x - draw->crosshair_size) * 0.5f;
+    uniforms.crosshair[1] = ((float)renderer->viewport.y - draw->crosshair_size) * 0.5f;
+    uniforms.crosshair[2] = draw->crosshair_size;
+    uniforms.crosshair[3] = draw->crosshair_size;
+
+    SDL_SetGPUScissor(render_pass, &(SDL_Rect){
+        .x = 0,
+        .y = 0,
+        .w = renderer->viewport.x,
+        .h = renderer->viewport.y,
+    });
+
+    SDL_PushGPUFragmentUniformData(renderer->frame_command_buffer, 0, &uniforms, sizeof(uniforms));
+
+    SDL_BindGPUGraphicsPipeline(render_pass, renderer->procedural_overlay_invert_pipeline);
+    SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
+        .texture = renderer->procedural_overlay_crosshair_texture->gpu_texture,
+        .sampler = renderer->gui_sampler,
+    }, 1);
+    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
+
+    SDL_BindGPUGraphicsPipeline(render_pass, renderer->procedural_overlay_stick_pipeline);
+    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
 }
 
 nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
@@ -708,7 +768,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     });
     NC_CHECK_SDL_RESULT(result->transfer_buffer);
 
-    result->terrain_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
+    result->opaque_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
         .min_filter = SDL_GPU_FILTER_NEAREST,
         .mag_filter = SDL_GPU_FILTER_NEAREST,
         .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
@@ -716,7 +776,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
         .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
         .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
     });
-    NC_CHECK_SDL_RESULT(result->terrain_sampler);
+    NC_CHECK_SDL_RESULT(result->opaque_sampler);
 
     result->gui_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
         .min_filter = SDL_GPU_FILTER_NEAREST,
@@ -730,19 +790,19 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
 
     vertex_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASTC_TEXTURES ? "shaders/cube-vert.spv" : "assets/shaders/cube-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/cube-vert.spv",
             SDL_GPU_SHADERSTAGE_VERTEX,
             0,
             1);
     fragment_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASTC_TEXTURES ? "shaders/cube-frag.spv" : "assets/shaders/cube-frag.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/cube-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
             1,
             0);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the terrain shaders.");
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the opaque shaders.");
 
-    result->terrain_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
+    result->opaque_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
         .vertex_shader = vertex_shader,
         .fragment_shader = fragment_shader,
         .vertex_input_state = {
@@ -788,7 +848,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             .has_depth_stencil_target = true,
         },
     });
-    NC_CHECK_SDL_RESULT(result->terrain_pipeline);
+    NC_CHECK_SDL_RESULT(result->opaque_pipeline);
 
     SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
     fragment_shader = NULL;
@@ -797,13 +857,13 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
 
     vertex_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASTC_TEXTURES ? "shaders/gui-vert.spv" : "assets/shaders/gui-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
             SDL_GPU_SHADERSTAGE_VERTEX,
             0,
             1);
     fragment_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASTC_TEXTURES ? "shaders/gui-frag.spv" : "assets/shaders/gui-frag.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
             1,
             0);
@@ -882,7 +942,114 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     NC_CHECK_SDL_RESULT(result->gui_pipeline);
 
     SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+    fragment_shader = NULL;
     SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
+    vertex_shader = NULL;
+
+    result->procedural_overlay_crosshair_texture =
+            nc_renderer_create_texture_2d_from_file(result, nc__renderer_crosshair_texture_path);
+    NC_CHECK_RESULT(result->procedural_overlay_crosshair_texture, "Failed to load the procedural crosshair texture.");
+
+    vertex_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
+            SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
+            0);
+    fragment_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            1,
+            1);
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the procedural overlay invert shaders.");
+
+    result->procedural_overlay_invert_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
+        .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        .rasterizer_state = {
+            .fill_mode = SDL_GPU_FILLMODE_FILL,
+            .cull_mode = SDL_GPU_CULLMODE_NONE,
+            .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
+            .enable_depth_clip = true,
+        },
+        .multisample_state = {
+            .sample_count = SDL_GPU_SAMPLECOUNT_1,
+        },
+        .depth_stencil_state = {
+            .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+            .enable_depth_test = false,
+            .enable_depth_write = false,
+            .enable_stencil_test = false,
+        },
+        .target_info = {
+            .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
+                {
+                    .format = result->swapchain_format,
+                    .blend_state = {
+                        .src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
+                        .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
+                        .color_blend_op = SDL_GPU_BLENDOP_SUBTRACT,
+                        .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO,
+                        .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
+                        .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
+                        .enable_blend = true,
+                    },
+                },
+            },
+            .num_color_targets = 1,
+            .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM,
+            .has_depth_stencil_target = true,
+        },
+    });
+    NC_CHECK_SDL_RESULT(result->procedural_overlay_invert_pipeline);
+
+    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+    fragment_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0,
+            1);
+    NC_CHECK_RESULT(fragment_shader, "Failed to load the procedural overlay stick shader.");
+
+    result->procedural_overlay_stick_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &(SDL_GPUGraphicsPipelineCreateInfo){
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
+        .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        .rasterizer_state = {
+            .fill_mode = SDL_GPU_FILLMODE_FILL,
+            .cull_mode = SDL_GPU_CULLMODE_NONE,
+            .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
+            .enable_depth_clip = true,
+        },
+        .multisample_state = {
+            .sample_count = SDL_GPU_SAMPLECOUNT_1,
+        },
+        .depth_stencil_state = {
+            .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+            .enable_depth_test = false,
+            .enable_depth_write = false,
+            .enable_stencil_test = false,
+        },
+        .target_info = {
+            .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
+                {
+                    .format = result->swapchain_format,
+                },
+            },
+            .num_color_targets = 1,
+            .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM,
+            .has_depth_stencil_target = true,
+        },
+    });
+    NC_CHECK_SDL_RESULT(result->procedural_overlay_stick_pipeline);
+
+    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+    fragment_shader = NULL;
+    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
+    vertex_shader = NULL;
     SDL_DestroyProperties(props);
     return result;
 
@@ -987,25 +1154,24 @@ vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {
 
 nc_renderer_buffer_t* nc_renderer_create_buffer(
     nc_renderer_t* renderer,
-    const nc_renderer_buffer_kind_t kind,
-    const uint32_t initial_capacity
+    const nc_renderer_buffer_usage_t usage,
+    const uint32_t initial_size
 ) {
-    static const uint8_t buffer_usage[] = {
-        [NC_RENDERER_BUFFER_KIND_TERRAIN_INSTANCES] = SDL_GPU_BUFFERUSAGE_VERTEX,
-        [NC_RENDERER_BUFFER_KIND_GUI_VERTICES] = SDL_GPU_BUFFERUSAGE_VERTEX,
-        [NC_RENDERER_BUFFER_KIND_GUI_INDICES] = SDL_GPU_BUFFERUSAGE_INDEX,
+    static const uint8_t nc_to_sdl_usage[] = {
+        [NC_RENDERER_BUFFER_USAGE_VERTEX] = SDL_GPU_BUFFERUSAGE_VERTEX,
+        [NC_RENDERER_BUFFER_USAGE_INDEX] = SDL_GPU_BUFFERUSAGE_INDEX,
     };
 
-    NC_ASSERT(kind > 0 && kind <= NC_RENDERER_BUFFER_KIND_MAX);
+    NC_ASSERT(usage > 0 && usage <= NC_RENDERER_BUFFER_USAGE_COUNT);
 
     nc_renderer_buffer_t* result = malloc(sizeof(*result));
     *result = (nc_renderer_buffer_t){
         .gpu_buffer = SDL_CreateGPUBuffer(renderer->gpu_device, &(SDL_GPUBufferCreateInfo){
-            .usage = buffer_usage[kind],
-            .size = initial_capacity,
+            .usage = nc_to_sdl_usage[usage],
+            .size = initial_size,
         }),
-        .usage = buffer_usage[kind],
-        .capacity = initial_capacity,
+        .usage = nc_to_sdl_usage[usage],
+        .capacity = initial_size,
     };
     NC_CHECK_SDL_RESULT(result->gpu_buffer);
 
@@ -1203,6 +1369,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     for (uint32_t i = 0; i < frame->overlay_draw_count; i++) {
         nc__renderer_draw_overlay(renderer, render_pass, &frame->overlay_draws[i]);
     }
+    nc__renderer_draw_procedural_overlay(renderer, render_pass, frame->procedural_overlay_draw);
 
     SDL_EndGPURenderPass(render_pass);
     return true;
@@ -1251,10 +1418,13 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
             SDL_UnmapGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
         }
 
+        nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
+        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_stick_pipeline);
+        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_invert_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->gui_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->terrain_pipeline);
+        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->opaque_pipeline);
         SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->gui_sampler);
-        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->terrain_sampler);
+        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->opaque_sampler);
         SDL_ReleaseGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
         SDL_ReleaseGPUTexture(renderer->gpu_device, renderer->depth_texture);
         SDL_ReleaseWindowFromGPUDevice(renderer->gpu_device, renderer->window);

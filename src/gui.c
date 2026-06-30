@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include <novacube/configuration.h>
 #include <novacube/cvkm.h>
 #include <novacube/gui.h>
 #include <novacube/error_handling.h>
@@ -41,6 +42,9 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__TOUCH_CONTROLS_SWITCH_THRESHOLD 0.2f
 #define NC__GUI_BUTTON_SIZE_AT_SCALE_1 100.0f
 #define NC__GUI_CROSSHAIR_SIZE_AT_SCALE_1 28.0f
+#define NC__GUI_ANALOG_STICK_RING_RADIUS_AT_SCALE_1 64.0f
+#define NC__GUI_ANALOG_STICK_RING_THICKNESS_AT_SCALE_1 4.0f
+#define NC__GUI_ANALOG_STICK_RADIUS_AT_SCALE_1 28.0f
 
 typedef uint8_t nc__gui_control_id_t;
 enum {
@@ -60,6 +64,16 @@ enum {
     NC__GUI_CONTROL_NONE = NC__GUI_CONTROL_COUNT,
 };
 
+typedef uint8_t nc__gui_touch_action_t;
+enum {
+    NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK,
+    NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK,
+    NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG,
+
+    NC__GUI_TOUCH_ACTION_COUNT,
+    NC__GUI_TOUCH_ACTION_NONE = NC__GUI_TOUCH_ACTION_COUNT,
+};
+
 typedef struct nc__gui_texture_t {
     nc_renderer_texture_t* texture;
     struct nk_image nuklear_image;
@@ -73,9 +87,10 @@ typedef struct nc__gui_vertex_t {
 
 typedef struct nc__gui_pointer_t {
     SDL_FingerID finger_id;
-    float x;
-    float y;
+    vkm_vec2 position;
+    vkm_vec2 initial_position;
     nc__gui_control_id_t captured_control;
+    nc__gui_touch_action_t touch_action;
     bool active;
 } nc__gui_pointer_t;
 
@@ -98,7 +113,6 @@ typedef struct nc_gui_context_t {
     nc_renderer_buffer_t* index_gpu_buffer;
 
     nc__gui_texture_t font_texture;
-    nc__gui_texture_t crosshair_texture;
     nc__gui_texture_t control_textures[NC__GUI_CONTROL_COUNT];
 
     struct nk_rect control_rects[NC__GUI_CONTROL_COUNT];
@@ -134,9 +148,6 @@ static const char* nc__gui_control_texture_paths[NC__GUI_CONTROL_COUNT] = {
     NC__GUI_ASSETS_BASE_PATH "textures/gui/place"       NC__GUI_TEXTURE_EXTENSION,
     NC__GUI_ASSETS_BASE_PATH "textures/gui/remove"      NC__GUI_TEXTURE_EXTENSION,
 };
-
-static const char* nc__gui_crosshair_texture_path =
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/crosshair"   NC__GUI_TEXTURE_EXTENSION;
 
 static bool nc__gui_point_in_rect(const struct nk_rect rect, const float x, const float y) {
     return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
@@ -270,6 +281,8 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
             button_size);
 }
 
+static bool nc__gui_is_control_visible(nc__gui_control_id_t control_id);
+
 static void nc__gui_refresh_controls(nc_gui_context_t* context) {
     nc_gui_controls_t controls = 0;
 
@@ -279,8 +292,8 @@ static void nc__gui_refresh_controls(nc_gui_context_t* context) {
             continue;
         }
 
-        const float x = pointer->x * (float)context->pixel_viewport.x;
-        const float y = pointer->y * (float)context->pixel_viewport.y;
+        const float x = pointer->position.x * (float)context->pixel_viewport.x;
+        const float y = pointer->position.y * (float)context->pixel_viewport.y;
         if (nc__gui_point_in_rect(context->control_rects[pointer->captured_control], x, y)) {
             controls |= nc__gui_control_flag(pointer->captured_control);
         }
@@ -291,7 +304,7 @@ static void nc__gui_refresh_controls(nc_gui_context_t* context) {
 
 static nc__gui_control_id_t nc__gui_hit_test_control(const nc_gui_context_t* context, const float x, const float y) {
     for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
-        if (nc__gui_point_in_rect(context->control_rects[i], x, y)) {
+        if (nc__gui_is_control_visible(i) && nc__gui_point_in_rect(context->control_rects[i], x, y)) {
             return i;
         }
     }
@@ -319,6 +332,121 @@ static nc__gui_pointer_t* nc__gui_alloc_touch(nc_gui_context_t* context) {
     return NULL;
 }
 
+static float nc__gui_analog_stick_ring_radius(const nc_gui_context_t* context) {
+    return NC__GUI_ANALOG_STICK_RING_RADIUS_AT_SCALE_1 * context->window_display_scale;
+}
+
+static bool nc__gui_uses_movement_buttons(void) {
+    return nc_config_get_touch_movement_mode() == NC_TOUCH_MOVEMENT_MODE_BUTTONS;
+}
+
+static bool nc__gui_uses_camera_analog_stick(void) {
+    return nc_config_get_touch_camera_mode() == NC_TOUCH_CAMERA_MODE_ANALOG;
+}
+
+static bool nc__gui_is_planar_movement_control(const nc__gui_control_id_t control_id) {
+    return     control_id == NC__GUI_CONTROL_LEFT
+            || control_id == NC__GUI_CONTROL_RIGHT
+            || control_id == NC__GUI_CONTROL_FORWARD
+            || control_id == NC__GUI_CONTROL_BACKWARD;
+}
+
+static bool nc__gui_is_control_visible(const nc__gui_control_id_t control_id) {
+    return nc__gui_uses_movement_buttons() || !nc__gui_is_planar_movement_control(control_id);
+}
+
+static bool nc__gui_is_touch_action_captured(
+    const nc_gui_context_t* context,
+    const nc__gui_touch_action_t touch_action
+) {
+    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
+        if (context->touch_points[i].active && context->touch_points[i].touch_action == touch_action) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static nc__gui_touch_action_t nc__gui_touch_action_for_touch(const nc_gui_context_t* context, const float x) {
+    nc__gui_touch_action_t touch_action = nc__gui_uses_camera_analog_stick()
+            ? NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK
+            : NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG;
+
+    if (!nc__gui_uses_movement_buttons() && x < (float)context->pixel_viewport.x * 0.5f) {
+        touch_action = NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK;
+    }
+
+    return nc__gui_is_touch_action_captured(context, touch_action) ?
+            NC__GUI_TOUCH_ACTION_NONE :
+            touch_action;
+}
+
+static vkm_vec2 nc__gui_pointer_pixel_position(const nc_gui_context_t* context, const nc__gui_pointer_t* pointer) {
+    return (vkm_vec2){ {
+        pointer->position.x * (float)context->pixel_viewport.x,
+        pointer->position.y * (float)context->pixel_viewport.y,
+    } };
+}
+
+static vkm_vec2 nc__gui_pointer_start_pixel_position(
+    const nc_gui_context_t* context,
+    const nc__gui_pointer_t* pointer
+) {
+    return (vkm_vec2){ {
+        pointer->initial_position.x * (float)context->pixel_viewport.x,
+        pointer->initial_position.y * (float)context->pixel_viewport.y,
+    } };
+}
+
+static vkm_vec2 nc__gui_get_clamped_analog_stick_position(
+    const nc_gui_context_t* context,
+    const nc__gui_pointer_t* pointer
+) {
+    const vkm_vec2 ring_position = nc__gui_pointer_start_pixel_position(context, pointer);
+    const vkm_vec2 pointer_position = nc__gui_pointer_pixel_position(context, pointer);
+    vkm_vec2 delta;
+    vkm_sub(&pointer_position, &ring_position, &delta);
+
+    const float radius = nc__gui_analog_stick_ring_radius(context);
+    const float length = vkm_length(&delta);
+    if (length > radius && length > 0.0f) {
+        vkm_mul(&delta, radius / length, &delta);
+    }
+
+    vkm_vec2 result;
+    vkm_add(&ring_position, &delta, &result);
+    return result;
+}
+
+static bool nc__gui_get_analog_stick_delta(
+        const nc_gui_context_t* context,
+        const nc__gui_touch_action_t touch_action,
+        vkm_vec2* delta
+) {
+    *delta = (vkm_vec2){ { 0.0f, 0.0f } };
+
+    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
+        const nc__gui_pointer_t* pointer = &context->touch_points[i];
+        if (!pointer->active || pointer->touch_action != touch_action) {
+            continue;
+        }
+
+        const vkm_vec2 ring_position = nc__gui_pointer_start_pixel_position(context, pointer);
+        const vkm_vec2 stick_position = nc__gui_get_clamped_analog_stick_position(context, pointer);
+        vkm_sub(&stick_position, &ring_position, delta);
+
+        const float radius = nc__gui_analog_stick_ring_radius(context);
+        if (radius > 0.0f) {
+            delta->x /= radius;
+            delta->y /= -radius;
+        }
+        return true;
+    }
+
+    return false;
+}
+
 static void nc__gui_clear_touch_state(nc_gui_context_t* context) {
     memset(context->touch_points, 0, sizeof(context->touch_points));
     context->look_delta = (vkm_vec2){ { 0.0f, 0.0f } };
@@ -328,8 +456,8 @@ static void nc__gui_clear_touch_state(nc_gui_context_t* context) {
 static bool nc__gui_is_control_pressed(const nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
     for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
         const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        const float x = pointer->x * (float)context->pixel_viewport.x;
-        const float y = pointer->y * (float)context->pixel_viewport.y;
+        const float x = pointer->position.x * (float)context->pixel_viewport.x;
+        const float y = pointer->position.y * (float)context->pixel_viewport.y;
         if (pointer->active &&
                 pointer->captured_control == control_id &&
                 nc__gui_point_in_rect(context->control_rects[control_id], x, y)) {
@@ -371,17 +499,13 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
             nk_rect(0.0f, 0.0f, (float)context->pixel_viewport.x, (float)context->pixel_viewport.y),
             NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND | NK_WINDOW_NO_INPUT)) {
         struct nk_command_buffer* canvas = nk_window_get_canvas(nuklear);
-        const float crosshair_size = NC__GUI_CROSSHAIR_SIZE_AT_SCALE_1 * context->window_display_scale;
-        const struct nk_rect crosshair_rect = nk_rect(
-                ((float)context->pixel_viewport.x - crosshair_size) * 0.5f,
-                ((float)context->pixel_viewport.y - crosshair_size) * 0.5f,
-                crosshair_size,
-                crosshair_size);
-
-        nk_draw_image(canvas, crosshair_rect, &context->crosshair_texture.nuklear_image, nk_rgba(255, 255, 255, 255));
 
         if (context->touch_controls_enabled) {
             for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
+                if (!nc__gui_is_control_visible(i)) {
+                    continue;
+                }
+
                 const struct nk_rect rect = context->control_rects[i];
                 const bool pressed = nc__gui_is_control_pressed(context, i);
                 const float inset = rect.w * 0.18f;
@@ -471,10 +595,6 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     NC_CHECK_RESULT(nuklear_result, "nk_init_default() failed.");
     result->nuklear_initialized = true;
 
-    if (!nc__gui_load_texture(renderer, nc__gui_crosshair_texture_path, &result->crosshair_texture)) {
-        goto error;
-    }
-
     for (int i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
         if (!nc__gui_load_texture(renderer, nc__gui_control_texture_paths[i], &result->control_textures[i])) {
             goto error;
@@ -483,13 +603,13 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
 
     result->vertex_gpu_buffer = nc_renderer_create_buffer(
             renderer,
-            NC_RENDERER_BUFFER_KIND_GUI_VERTICES,
+            NC_RENDERER_BUFFER_USAGE_VERTEX,
             NC__GUI_INITIAL_BUFFER_CAPACITY);
     NC_CHECK_RESULT(result->vertex_gpu_buffer, "Failed to create the GUI vertex buffer.");
 
     result->index_gpu_buffer = nc_renderer_create_buffer(
             renderer,
-            NC_RENDERER_BUFFER_KIND_GUI_INDICES,
+            NC_RENDERER_BUFFER_USAGE_INDEX,
             NC__GUI_INITIAL_BUFFER_CAPACITY);
     NC_CHECK_RESULT(result->index_gpu_buffer, "Failed to create the GUI index buffer.");
 
@@ -536,10 +656,18 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
                 return false;
             }
 
+            const float x = event->tfinger.x * (float)context->pixel_viewport.x;
+            const float y = event->tfinger.y * (float)context->pixel_viewport.y;
             const nc__gui_control_id_t control_id = nc__gui_hit_test_control(
                     context,
-                    event->tfinger.x * (float)context->pixel_viewport.x,
-                    event->tfinger.y * (float)context->pixel_viewport.y);
+                    x,
+                    y);
+            const nc__gui_touch_action_t touch_action = control_id == NC__GUI_CONTROL_NONE
+                    ? nc__gui_touch_action_for_touch(context, x)
+                    : NC__GUI_TOUCH_ACTION_NONE;
+            if (control_id == NC__GUI_CONTROL_NONE && touch_action == NC__GUI_TOUCH_ACTION_NONE) {
+                return false;
+            }
 
             nc__gui_pointer_t* pointer = nc__gui_alloc_touch(context);
             if (!pointer) {
@@ -548,9 +676,10 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
 
             *pointer = (nc__gui_pointer_t){
                 .finger_id = event->tfinger.fingerID,
-                .x = event->tfinger.x,
-                .y = event->tfinger.y,
+                .position = { { event->tfinger.x, event->tfinger.y } },
+                .initial_position = { { event->tfinger.x, event->tfinger.y } },
                 .captured_control = control_id,
+                .touch_action = touch_action,
                 .active = true,
             };
             if (control_id != NC__GUI_CONTROL_NONE) {
@@ -573,14 +702,14 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
                 return false;
             }
 
-            pointer->x = event->tfinger.x;
-            pointer->y = event->tfinger.y;
-            if (pointer->captured_control == NC__GUI_CONTROL_NONE) {
+            pointer->position.x = event->tfinger.x;
+            pointer->position.y = event->tfinger.y;
+            if (pointer->touch_action == NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG) {
                 context->look_delta.x +=
                         event->tfinger.dx * (float)context->pixel_viewport.x / context->window_display_scale;
                 context->look_delta.y +=
                         event->tfinger.dy * (float)context->pixel_viewport.y / context->window_display_scale;
-            } else {
+            } else if (pointer->captured_control != NC__GUI_CONTROL_NONE) {
                 nc__gui_refresh_controls(context);
                 context->overlay_dirty = true;
             }
@@ -593,14 +722,14 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
                 return false;
             }
 
-            pointer->x = event->tfinger.x;
-            pointer->y = event->tfinger.y;
+            pointer->position.x = event->tfinger.x;
+            pointer->position.y = event->tfinger.y;
             if (event->type == SDL_EVENT_FINGER_UP &&
                     pointer->captured_control != NC__GUI_CONTROL_NONE &&
                     nc__gui_point_in_rect(
                             context->control_rects[pointer->captured_control],
-                            pointer->x * (float)context->pixel_viewport.x,
-                            pointer->y * (float)context->pixel_viewport.y)) {
+                            pointer->position.x * (float)context->pixel_viewport.x,
+                            pointer->position.y * (float)context->pixel_viewport.y)) {
                 nc__gui_push_action(context, pointer->captured_control);
             }
 
@@ -637,6 +766,14 @@ bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
 
 nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context) {
     return context->controls;
+}
+
+void nc_gui_get_movement_delta(const nc_gui_context_t* context, vkm_vec2* delta) {
+    nc__gui_get_analog_stick_delta(context, NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK, delta);
+}
+
+void nc_gui_get_camera_delta(const nc_gui_context_t* context, vkm_vec2* delta) {
+    nc__gui_get_analog_stick_delta(context, NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK, delta);
 }
 
 nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context) {
@@ -795,6 +932,42 @@ void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overla
     };
 }
 
+void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw) {
+    *draw = (nc_renderer_procedural_overlay_draw_t){
+        .analog_stick_ring_radius = nc__gui_analog_stick_ring_radius(context),
+        .analog_stick_ring_thickness = NC__GUI_ANALOG_STICK_RING_THICKNESS_AT_SCALE_1 * context->window_display_scale,
+        .analog_stick_radius = NC__GUI_ANALOG_STICK_RADIUS_AT_SCALE_1 * context->window_display_scale,
+        .crosshair_size = NC__GUI_CROSSHAIR_SIZE_AT_SCALE_1 * context->window_display_scale,
+    };
+
+    if (!context->touch_controls_enabled) {
+        return;
+    }
+
+    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
+        const nc__gui_pointer_t* pointer = &context->touch_points[i];
+        if (!pointer->active) {
+            continue;
+        }
+
+        uint8_t analog_stick = 0;
+        switch (pointer->touch_action) {
+            case NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK:
+                analog_stick = 0;
+                break;
+            case NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK:
+                analog_stick = 1;
+                break;
+            default:
+                continue;
+        }
+
+        draw->analog_sticks_active[analog_stick] = true;
+        draw->analog_stick_ring_positions[analog_stick] = nc__gui_pointer_start_pixel_position(context, pointer);
+        draw->analog_stick_positions[analog_stick] = nc__gui_get_clamped_analog_stick_position(context, pointer);
+    }
+}
+
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer) {
     if (!context) {
         return;
@@ -806,7 +979,6 @@ void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer) {
     for (int i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
         nc__gui_destroy_texture(renderer, &context->control_textures[i]);
     }
-    nc__gui_destroy_texture(renderer, &context->crosshair_texture);
     nc__gui_destroy_texture(renderer, &context->font_texture);
 
     free(context->draw_commands);
