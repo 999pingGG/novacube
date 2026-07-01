@@ -10,6 +10,7 @@
 #include <novacube/error_handling.h>
 #include <novacube/macros.h>
 #include <novacube/standard_functions.h>
+#include <novacube/string_builder.h>
 
 #define NC__CONFIGURATION_FILE "config.ini"
 #define NC__DOUBLE_DECIMAL_PLACES 13
@@ -50,19 +51,11 @@ typedef struct nc__config_key_value_t {
     nc__string_slice_t value;
 } nc__config_key_value_t;
 
-typedef struct nc__string_builder_t {
-    char* data;
-    size_t length;
-    size_t capacity;
-} nc__string_builder_t;
-
 typedef struct nc__enum_entry_t {
     const char* string;
     unsigned length;
     int value;
 } nc__enum_entry_t;
-
-static void nc__string_builder_append(nc__string_builder_t* string_builder, const char* string, size_t length);
 
 static bool nc__is_whitespace(const char character) {
     return  character == ' '
@@ -370,10 +363,10 @@ static bool nc__parse_enum(nc__string_slice_t* slice, const nc__enum_entry_t* en
     return false;
 }
 
-static void nc__print_enum(nc__string_builder_t* string_builder, const nc__enum_entry_t* entries, const int value) {
+static void nc__print_enum(nc_string_builder_t* string_builder, const nc__enum_entry_t* entries, const int value) {
     while (entries->string) {
         if (entries->value == value) {
-            nc__string_builder_append(string_builder, entries->string, entries->length);
+            nc_string_builder_append(string_builder, entries->string, entries->length);
             return;
         }
 
@@ -416,41 +409,29 @@ static bool nc__parse_touch_camera_mode(nc__string_slice_t* slice, nc_touch_came
     return nc__parse_enum(slice, nc__touch_camera_mode_entries, (int*)result);
 }
 
-static void nc__string_builder_reserve(nc__string_builder_t* string_builder, const size_t additional_length) {
-    const size_t minimum_capacity = string_builder->length + additional_length + 1;
-    if (minimum_capacity <= string_builder->capacity) {
-        return;
+static bool nc__parse_bool(nc__string_slice_t* slice, bool* result) {
+    nc__right_trim_slice(slice);
+
+    if (       nc__string_slice_equals_string(slice, "true")
+            || nc__string_slice_equals_string(slice, "yes")
+            || nc__string_slice_equals_string(slice, "please")
+            || nc__string_slice_equals_string(slice, "ofc")) {
+        *result = true;
+        return true;
+    } else if (nc__string_slice_equals_string(slice, "false")
+            || nc__string_slice_equals_string(slice, "no")
+            || nc__string_slice_equals_string(slice, "nope")
+            || nc__string_slice_equals_string(slice, "nah")) {
+        *result = false;
+        return true;
     }
 
-    size_t new_capacity = string_builder->capacity ? string_builder->capacity : 64;
-    while (new_capacity < minimum_capacity) {
-        if (new_capacity > SIZE_MAX / 2) {
-            new_capacity = minimum_capacity;
-            break;
-        }
-
-        new_capacity *= 2;
-    }
-
-    string_builder->data = realloc(string_builder->data, new_capacity);
-    string_builder->capacity = new_capacity;
+    return false;
 }
 
-static void nc__string_builder_append(nc__string_builder_t* string_builder, const char* string, const size_t length) {
-    nc__string_builder_reserve(string_builder, length);
-
-    NC_MEMCPY(string_builder->data + string_builder->length, string, length);
-    string_builder->length += length;
-    string_builder->data[string_builder->length] = '\0';
-}
-
-static void nc__string_builder_append_string(nc__string_builder_t* string_builder, const char* string) {
-    nc__string_builder_append(string_builder, string, strlen(string));
-}
-
-static void nc__print_int(nc__string_builder_t* string_builder, int value) {
+static void nc__print_int(nc_string_builder_t* string_builder, int value) {
     if (value == 0) {
-        nc__string_builder_append(string_builder, "0", 1);
+        nc_string_builder_append(string_builder, "0", 1);
         return;
     }
 
@@ -471,13 +452,13 @@ static void nc__print_int(nc__string_builder_t* string_builder, int value) {
     }
     i++;
 
-    nc__string_builder_append(string_builder, buffer + i, sizeof(buffer) - 1 - i);
+    nc_string_builder_append(string_builder, buffer + i, sizeof(buffer) - 1 - i);
 }
 
-static void nc__print_double(nc__string_builder_t* string_builder, const double value) {
+static void nc__print_double(nc_string_builder_t* string_builder, const double value) {
     if (value != value || value > DBL_MAX || value < -DBL_MAX) {
         NC_ASSERT(false);
-        nc__string_builder_append(string_builder, "0.0", 3);
+        nc_string_builder_append(string_builder, "0.0", 3);
         return;
     }
 
@@ -485,12 +466,12 @@ static void nc__print_double(nc__string_builder_t* string_builder, const double 
     absolute_value += NC__DOUBLE_ROUNDING_UNIT * 0.5;
 
     if (absolute_value < NC__DOUBLE_ROUNDING_UNIT) {
-        nc__string_builder_append(string_builder, "0.0", 3);
+        nc_string_builder_append(string_builder, "0.0", 3);
         return;
     }
 
     if (value < 0.0) {
-        nc__string_builder_append(string_builder, "-", 1);
+        nc_string_builder_append(string_builder, "-", 1);
     }
 
     double power = 1.0;
@@ -505,7 +486,7 @@ static void nc__print_double(nc__string_builder_t* string_builder, const double 
         }
 
         const char character = (char)digit + '0';
-        nc__string_builder_append(string_builder, &character, 1);
+        nc_string_builder_append(string_builder, &character, 1);
         absolute_value -= (double)digit * power;
         power /= 10.0;
     }
@@ -528,35 +509,43 @@ static void nc__print_double(nc__string_builder_t* string_builder, const double 
     }
 
     if (fractional_length == 0) {
-        nc__string_builder_append(string_builder, ".0", 2);
+        nc_string_builder_append(string_builder, ".0", 2);
         return;
     }
 
-    nc__string_builder_append(string_builder, ".", 1);
-    nc__string_builder_append(string_builder, fractional_digits, fractional_length);
+    nc_string_builder_append(string_builder, ".", 1);
+    nc_string_builder_append(string_builder, fractional_digits, fractional_length);
 }
 
-static void nc__print_usvec2(nc__string_builder_t* string_builder, const vkm_usvec2 value) {
+static void nc__print_usvec2(nc_string_builder_t* string_builder, const vkm_usvec2 value) {
     nc__print_int(string_builder, value.x);
-    nc__string_builder_append(string_builder, ", ", 2);
+    nc_string_builder_append(string_builder, ", ", 2);
     nc__print_int(string_builder, value.y);
 }
 
-static void nc__print_video_mode(nc__string_builder_t* string_builder, const nc_video_mode_t value) {
+static void nc__print_video_mode(nc_string_builder_t* string_builder, const nc_video_mode_t value) {
     nc__print_enum(string_builder, nc__video_mode_entries, value);
 }
 
-static void nc__print_touch_movement_mode(nc__string_builder_t* string_builder, const nc_touch_movement_mode_t value) {
+static void nc__print_touch_movement_mode(nc_string_builder_t* string_builder, const nc_touch_movement_mode_t value) {
     nc__print_enum(string_builder, nc__touch_movement_mode_entries, value);
 }
 
-static void nc__print_touch_camera_mode(nc__string_builder_t* string_builder, const nc_touch_camera_mode_t value) {
+static void nc__print_touch_camera_mode(nc_string_builder_t* string_builder, const nc_touch_camera_mode_t value) {
     nc__print_enum(string_builder, nc__touch_camera_mode_entries, value);
+}
+
+static void nc__print_bool(nc_string_builder_t* string_builder, const bool value) {
+    if (value) {
+        nc_string_builder_append(string_builder, "yes", 3);
+    } else {
+        nc_string_builder_append(string_builder, "no", 2);
+    }
 }
 
 static void nc__write_configuration_value(
     const nc__config_key_value_t* key_value,
-    nc__string_builder_t* string_builder
+    nc_string_builder_t* string_builder
 ) {
 #define X(type, name, _1, _2, _3, print_function, ...) \
     if (nc__string_slice_equals_string(&key_value->key, #name)) { \
@@ -564,7 +553,7 @@ static void nc__write_configuration_value(
         return; \
     } else
     NC_CONFIG_TABLE(X) {
-        nc__string_builder_append(string_builder, key_value->value.start, key_value->value.length);
+        nc_string_builder_append(string_builder, key_value->value.start, key_value->value.length);
     }
 #undef X
 }
@@ -636,7 +625,7 @@ bool nc_configuration_load(void) {
 bool nc_configuration_save(void) {
     char path[FILENAME_MAX];
     char* file_contents = nc__configuration_load_file(path);
-    nc__string_builder_t string_builder = { 0 };
+    nc_string_builder_t string_builder = { 0 };
     bool result = false;
 
     if (!path[0]) {
@@ -660,10 +649,11 @@ bool nc_configuration_save(void) {
     // Patch existing configuration.
     const char* current_position = file_contents;
     const char* next_unmodified_position = file_contents;
+    nc_string_builder_init(&string_builder);
 
     nc__config_key_value_t key_value;
     while (nc__scan_configuration_line(&current_position, &key_value)) {
-        nc__string_builder_append(
+        nc_string_builder_append(
                 &string_builder,
                 next_unmodified_position,
                 key_value.value.start - next_unmodified_position);
@@ -673,7 +663,7 @@ bool nc_configuration_save(void) {
         next_unmodified_position = key_value.value.start + key_value.value.length;
     }
 
-    nc__string_builder_append_string(&string_builder, next_unmodified_position);
+    nc_string_builder_append(&string_builder, next_unmodified_position, strlen(next_unmodified_position));
 
     // TODO: Add the configurations that aren't in the file if they're currently different from the default.
 
@@ -683,7 +673,7 @@ bool nc_configuration_save(void) {
     result = true;
 
 error:
-    free(string_builder.data);
+    nc_string_builder_fini(&string_builder);
     SDL_free(file_contents);
     return result;
 }

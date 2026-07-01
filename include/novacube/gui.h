@@ -42,5 +42,6 @@ bool nc_gui_is_touch_captured(const nc_gui_context_t* context, SDL_FingerID fing
 bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, float delta_time);
 void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overlay_draw_t* draw);
 void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw);
+void nc_gui_append_debug_text(nc_gui_context_t* context, const char* text, size_t length);
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer);
 #endif

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C VERSION 0.5.1.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C VERSION 0.6.0.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
@@ -18,6 +18,7 @@ set(NC_SOURCES
         src/error_handling.c
         src/gui.c
         src/renderer.c
+        src/string_builder.c
         src/terrain.c
         src/main.c)
 

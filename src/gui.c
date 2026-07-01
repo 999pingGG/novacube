@@ -10,6 +10,7 @@
 #include <novacube/macros.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
+#include <novacube/string_builder.h>
 
 #define NK_PRIVATE
 #define NK_INCLUDE_FIXED_TYPES
@@ -129,6 +130,8 @@ typedef struct nc_gui_context_t {
     vkm_vec2 look_delta;
     float mode_switch_accumulator;
     bool touch_controls_enabled;
+
+    nc_string_builder_t debug_string_builder;
 } nc_gui_context_t;
 
 static const struct nk_draw_vertex_layout_element nc__gui_vertex_layout[] = {
@@ -481,6 +484,34 @@ static void nc__gui_push_action(nc_gui_context_t* context, const nc__gui_control
     }
 }
 
+// This function issues one draw text command for every line contained in the debug text buffer.
+static void nc__gui_draw_debug_text(nc_gui_context_t* context, struct nk_command_buffer* canvas, struct nk_rect rect) {
+    for (size_t current_beginning = 0, current_position = 0; context->debug_string_builder.data[current_position];) {
+        while (    context->debug_string_builder.data[current_position]
+                && context->debug_string_builder.data[current_position] != '\n') {
+            current_position++;
+        }
+
+        const int length = (int)(current_position - current_beginning);
+        nk_draw_text(
+                canvas,
+                rect,
+                &context->debug_string_builder.data[current_beginning],
+                length,
+                &context->default_font->handle,
+                nk_black,
+                nk_white);
+        rect.y += context->default_font->info.height;
+
+        if (context->debug_string_builder.data[current_position] == '\n') {
+            current_position++;
+            current_beginning += length + 1;
+        }
+    }
+
+    nc_string_builder_clear(&context->debug_string_builder);
+}
+
 static void nc__gui_build_overlay(nc_gui_context_t* context) {
     struct nk_context* nuklear = &context->nuklear_context;
     const struct nk_style_window saved_window_style = nuklear->style.window;
@@ -493,10 +524,15 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
     nuklear->style.window.group_padding = nk_vec2(0.0f, 0.0f);
     nuklear->style.window.border = 0.0f;
 
+    const struct nk_rect pixel_viewport_rect = nk_rect(
+            0.0f,
+            0.0f,
+            (float)context->pixel_viewport.x,
+            (float)context->pixel_viewport.y);
     if (nk_begin(
             nuklear,
             "hud-overlay",
-            nk_rect(0.0f, 0.0f, (float)context->pixel_viewport.x, (float)context->pixel_viewport.y),
+            pixel_viewport_rect,
             NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND | NK_WINDOW_NO_INPUT)) {
         struct nk_command_buffer* canvas = nk_window_get_canvas(nuklear);
 
@@ -532,6 +568,10 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
                         &context->control_textures[i].nuklear_image,
                         pressed ? nk_rgba(255, 255, 255, 255) : nk_rgba(255, 255, 255, 224));
             }
+        }
+
+        if (context->debug_string_builder.length) {
+            nc__gui_draw_debug_text(context, canvas, pixel_viewport_rect);
         }
     }
     nk_end(nuklear);
@@ -618,6 +658,8 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
 
     nc_gui_set_window_size(result, result->window_size.x, result->window_size.y);
     nc_gui_set_pixel_viewport(result, result->pixel_viewport.x, result->pixel_viewport.y);
+
+    nc_string_builder_init(&result->debug_string_builder);
 
     return result;
 
@@ -968,10 +1010,17 @@ void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_rend
     }
 }
 
+void nc_gui_append_debug_text(nc_gui_context_t* context, const char* text, const size_t length) {
+    nc_string_builder_append(&context->debug_string_builder, text, length ? length : strlen(text));
+    context->overlay_dirty = true;
+}
+
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer) {
     if (!context) {
         return;
     }
+
+    nc_string_builder_fini(&context->debug_string_builder);
 
     nc_renderer_destroy_buffer(renderer, context->index_gpu_buffer);
     nc_renderer_destroy_buffer(renderer, context->vertex_gpu_buffer);

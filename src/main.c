@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <SDL3/SDL.h>
 #define SDL_MAIN_USE_CALLBACKS
@@ -68,9 +69,9 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     SDL_SetAppMetadata(NC_PRODUCT_NAME, NC_VERSION, NC_PACKAGE_NAME);
 
     SDL_Log(NC_PRODUCT_NAME " " NC_VERSION "\n"
-        "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
-        "Git: " NC_GIT_DESCRIBE "\n"
-        "Commit: " NC_GIT_HASH);
+            "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
+            "Git: " NC_GIT_DESCRIBE "\n"
+            "Commit: " NC_GIT_HASH);
 
     if (!nc_configuration_load()) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load configuration: %s", SDL_GetError());
@@ -188,6 +189,18 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             0.2f,
             500.0f,
             &view_projection);
+
+    char debug_buffer[100];
+
+    if (nc_config_get_show_fps()) {
+        const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, length);
+    }
+
+    if (nc_config_get_show_frame_time()) {
+        const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, length);
+    }
 
 #ifndef ANDROID
     if (!nc_renderer_is_foreground(app->renderer)) {
