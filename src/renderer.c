@@ -154,6 +154,10 @@ static SDL_GPUShader* nc__renderer_load_shader(
     code = SDL_LoadFile(path, &code_size);
     NC_CHECK_SDL_RESULT(code);
 
+#ifndef NDEBUG
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, path);
+#endif
     shader = SDL_CreateGPUShader(renderer->gpu_device, &(SDL_GPUShaderCreateInfo){
         .code_size = code_size,
         .code = code,
@@ -162,7 +166,13 @@ static SDL_GPUShader* nc__renderer_load_shader(
         .stage = stage,
         .num_samplers = sampler_count,
         .num_uniform_buffers = uniform_buffer_count,
+#ifndef NDEBUG
+        .props = props,
+#endif
     });
+#ifndef NDEBUG
+    SDL_DestroyProperties(props);
+#endif
     NC_CHECK_SDL_RESULT(shader);
 
     free(code);
