@@ -229,7 +229,7 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
     const float safe_top = safe_area.y;
     const float safe_right = safe_area.x + safe_area.w;
     const float safe_bottom = safe_area.y + safe_area.h;
-    const float button_size = nc_config_get_gui_button_size() * context->window_display_scale;
+    const float button_size = (float)nc_config_get_gui_button_size() * context->window_display_scale;
     const float gap = button_size * 0.12f;
     const float margin = button_size * 0.35f;
     const float dpad_width = button_size * 3.0f + gap * 2.0f;
