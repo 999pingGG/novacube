@@ -1406,6 +1406,19 @@ float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer) {
     return result;
 }
 
+void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect) {
+    int count;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    if (count == 0 || !windows[0] || !SDL_GetWindowSafeArea(windows[0], rect)) {
+        SDL_LogWarn(
+                SDL_LOG_CATEGORY_APPLICATION,
+                "Failed to get the window's safe area. Falling back to the entire window.");
+        const vkm_usvec2 window_size = nc_renderer_get_window_size(renderer);
+        *rect = (SDL_Rect){ .x = 0, .y = 0, .w = window_size.x, .h = window_size.y };
+    }
+    SDL_free(windows);
+}
+
 void nc_renderer_fini(nc_renderer_t* renderer) {
     if (!renderer) {
         return;

@@ -132,6 +132,8 @@ typedef struct nc_gui_context_t {
     bool touch_controls_enabled;
 
     nc_string_builder_t debug_string_builder;
+
+    struct nk_rect safe_area;
 } nc_gui_context_t;
 
 static const struct nk_draw_vertex_layout_element nc__gui_vertex_layout[] = {
@@ -524,15 +526,10 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
     nuklear->style.window.group_padding = nk_vec2(0.0f, 0.0f);
     nuklear->style.window.border = 0.0f;
 
-    const struct nk_rect pixel_viewport_rect = nk_rect(
-            0.0f,
-            0.0f,
-            (float)context->pixel_viewport.x,
-            (float)context->pixel_viewport.y);
     if (nk_begin(
             nuklear,
             "hud-overlay",
-            pixel_viewport_rect,
+            context->safe_area,
             NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND | NK_WINDOW_NO_INPUT)) {
         struct nk_command_buffer* canvas = nk_window_get_canvas(nuklear);
 
@@ -571,7 +568,7 @@ static void nc__gui_build_overlay(nc_gui_context_t* context) {
         }
 
         if (context->debug_string_builder.length) {
-            nc__gui_draw_debug_text(context, canvas, pixel_viewport_rect);
+            nc__gui_draw_debug_text(context, canvas, context->safe_area);
         }
     }
     nk_end(nuklear);
@@ -660,6 +657,15 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     nc_gui_set_pixel_viewport(result, result->pixel_viewport.x, result->pixel_viewport.y);
 
     nc_string_builder_init(&result->debug_string_builder);
+
+    SDL_Rect rect;
+    nc_renderer_get_window_safe_area(renderer, &rect);
+    result->safe_area = (struct nk_rect){
+        .x = (float)rect.x,
+        .y = (float)rect.y,
+        .w = (float)rect.w,
+        .h = (float)rect.h,
+    };
 
     return result;
 
