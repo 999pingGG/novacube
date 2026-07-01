@@ -19,7 +19,7 @@
 // meh, just to relinquish "suggest braces around initialization of subobject"
 NC_IGNORE_ALL_WARNINGS_START
 
-#define X(type, name, _1, _2, _3, _4, ...) \
+#define X(type, name, _1, _2, _3, _4, _5, ...) \
     static type nc__##name = { __VA_ARGS__ }; \
     type nc_config_get_##name(void) { \
         return nc__##name; \
@@ -33,11 +33,11 @@ NC_CONFIG_TABLE(X)
 
 NC_IGNORE_ALL_WARNINGS_END
 
-#define NC__CONFIG_STR_YES(name, comment, ...) comment #name " = " #__VA_ARGS__ "\n"
-#define NC__CONFIG_STR_NO(name, comment, ...) ""
+#define NC__CONFIG_STR_YES(name, comment, default_value_string) comment #name " = " default_value_string "\n"
+#define NC__CONFIG_STR_NO(name, comment, default_value_string) ""
 
-#define NC__DEFAULT_CONFIG_FILE(_1, name, in_file_by_default, comment, _2, _3, ...) \
-    NC__CONCAT(NC__CONFIG_STR_, in_file_by_default)(name, comment, __VA_ARGS__)
+#define NC__DEFAULT_CONFIG_FILE(_1, name, in_file_by_default, comment, _2, _3, default_value_string, ...) \
+    NC__CONCAT(NC__CONFIG_STR_, in_file_by_default)(name, comment, default_value_string)
 
 #define NC_DEFAULT_CONFIG_FILE_CONTENTS NC_CONFIG_TABLE(NC__DEFAULT_CONFIG_FILE)
 

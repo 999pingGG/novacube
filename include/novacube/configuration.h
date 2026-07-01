@@ -39,16 +39,18 @@ typedef enum nc_touch_camera_mode_t {
 #undef X
 } nc_touch_camera_mode_t;
 
-// type, name, visible in file by default (YES or NO), comment (can be omitted!), parse function, print function, default value.
+// type, name, visible in file by default (YES or NO), comment (can be omitted!), parse function, print function,
+// default value string (can be omitted if it's not in the file by default), default value.
 #define NC_CONFIG_TABLE(X) \
-    X(vkm_usvec2, resolution, YES, "; width, height\n", nc__parse_usvec2, nc__print_usvec2, 640, 480) \
-    X(uint16_t, refresh_rate, YES, "\n; 0 = match desktop refresh rate\n", nc__parse_uint16, nc__print_int, 0) \
+    X(vkm_usvec2, resolution, YES, "; width, height\n", nc__parse_usvec2, nc__print_usvec2, "640, 480", 640, 480) \
+    X(uint16_t, refresh_rate, YES, "\n; 0 = match desktop refresh rate\n", nc__parse_uint16, nc__print_int, "0", 0) \
     X(nc_video_mode_t, \
             video_mode, \
             YES, \
             "\n; window, borderless, fullscreen, exclusive_fullscreen\n", \
             nc__parse_video_mode, \
             nc__print_video_mode, \
+            "window", \
             NC_VIDEO_MODE_WINDOW) \
     X(nc_touch_movement_mode_t, \
             touch_movement_mode, \
@@ -56,6 +58,7 @@ typedef enum nc_touch_camera_mode_t {
             "\n; analog, buttons\n", \
             nc__parse_touch_movement_mode, \
             nc__print_touch_movement_mode, \
+            "analog", \
             NC_TOUCH_MOVEMENT_MODE_ANALOG) \
     X(nc_touch_camera_mode_t, \
             touch_camera_mode, \
@@ -63,14 +66,16 @@ typedef enum nc_touch_camera_mode_t {
             "\n; analog, free_drag\n", \
             nc__parse_touch_camera_mode, \
             nc__print_touch_camera_mode, \
+            "analog", \
             NC_TOUCH_CAMERA_MODE_ANALOG) \
-    X(double, mouse_sensitivity, YES, "\n; degrees per pixel\n", nc__parse_double, nc__print_double, 0.2) \
+    X(double, mouse_sensitivity, YES, "\n; degrees per pixel\n", nc__parse_double, nc__print_double, "0.2", 0.2) \
     X(double, \
             touch_camera_drag_sensitivity, \
             YES, \
             "\n; radians per physical pixel\n", \
             nc__parse_double, \
             nc__print_double, \
+            "0.0046875", \
             0.0046875) \
     X(double, \
             touch_camera_stick_sensitivity, \
@@ -78,6 +83,7 @@ typedef enum nc_touch_camera_mode_t {
             "\n; radians per second at full stick tilt\n", \
             nc__parse_double, \
             nc__print_double, \
+            "3.0", \
             3.0) \
     X(bool, \
             show_fps, \
@@ -85,6 +91,7 @@ typedef enum nc_touch_camera_mode_t {
             , \
             nc__parse_bool, \
             nc__print_bool, \
+            , \
             false) \
     X(bool, \
             show_frame_time, \
@@ -92,6 +99,7 @@ typedef enum nc_touch_camera_mode_t {
             , \
             nc__parse_bool, \
             nc__print_bool, \
+            , \
             false) \
 
 #define X(type, name, ...) \
