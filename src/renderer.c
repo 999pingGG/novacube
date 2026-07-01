@@ -1411,7 +1411,9 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         return;
     }
 
-    SDL_CancelGPUCommandBuffer(renderer->frame_command_buffer);
+    if (renderer->frame_command_buffer) {
+        SDL_CancelGPUCommandBuffer(renderer->frame_command_buffer);
+    }
 
     if (renderer->gpu_device) {
         if (renderer->mapped_transfer_buffer) {
