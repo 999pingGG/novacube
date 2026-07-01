@@ -101,6 +101,46 @@ typedef enum nc_touch_camera_mode_t {
             nc__print_bool, \
             , \
             false) \
+    X(double, \
+            gui_button_size, \
+            NO, \
+            , \
+            nc__parse_double, \
+            nc__print_double, \
+            , \
+            50.0) \
+    X(double, \
+            crosshair_size, \
+            NO, \
+            , \
+            nc__parse_double, \
+            nc__print_double, \
+            , \
+            28.0) \
+    X(double, \
+            analog_stick_ring_radius, \
+            NO, \
+            , \
+            nc__parse_double, \
+            nc__print_double, \
+            , \
+            64.0) \
+    X(double, \
+            analog_stick_ring_thickness, \
+            NO, \
+            , \
+            nc__parse_double, \
+            nc__print_double, \
+            , \
+            4.0) \
+    X(double, \
+            analog_stick_radius, \
+            NO, \
+            , \
+            nc__parse_double, \
+            nc__print_double, \
+            , \
+            28.0) \
 
 #define X(type, name, ...) \
     type nc_config_get_##name(void); \
