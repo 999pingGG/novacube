@@ -228,14 +228,27 @@ error:
 }
 
 static void nc__gui_layout_controls(nc_gui_context_t* context) {
-    const float viewport_width = (float)context->pixel_viewport.x;
-    const float viewport_height = (float)context->pixel_viewport.y;
+    struct nk_rect safe_area = context->safe_area;
+
+    const float safe_left = safe_area.x;
+    const float safe_top = safe_area.y;
+    const float safe_right = safe_area.x + safe_area.w;
+    const float safe_bottom = safe_area.y + safe_area.h;
     const float button_size = NC__GUI_BUTTON_SIZE_AT_SCALE_1 * context->window_display_scale;
     const float gap = button_size * 0.12f;
     const float margin = button_size * 0.35f;
+    const float dpad_width = button_size * 3.0f + gap * 2.0f;
+    const float dpad_height = dpad_width;
+    const float action_row_width = button_size * 2.0f + gap;
+    const float right_column_height = button_size * 2.0f + gap;
+    const float action_row_bottom_gap = button_size * 0.45f + gap * 2.0f;
 
-    const float dpad_left = margin;
-    const float dpad_top = viewport_height - margin - button_size * 3.0f - gap * 2.0f;
+    const float dpad_left = vkm_min(
+            vkm_max(safe_left + margin, safe_left),
+            vkm_max(safe_right - margin - dpad_width, safe_left));
+    const float dpad_top = vkm_min(
+            vkm_max(safe_bottom - margin - dpad_height, safe_top),
+            vkm_max(safe_bottom - button_size, safe_top));
 
     context->control_rects[NC__GUI_CONTROL_FORWARD] = nk_rect(
             dpad_left + button_size + gap,
@@ -258,10 +271,14 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
             button_size,
             button_size);
 
-    const float right_column_left = viewport_width - margin - button_size;
-    const float right_column_top = viewport_height - margin - button_size * 2.0f - gap;
-    const float action_row_left = viewport_width - margin - button_size * 2.0f - gap;
-    const float action_row_top = right_column_top - button_size * 1.45f - gap * 2.0f;
+    const float right_column_left = vkm_max(safe_right - margin - button_size, safe_left);
+    const float right_column_top = vkm_min(
+            vkm_max(safe_bottom - margin - right_column_height, safe_top),
+            vkm_max(safe_bottom - button_size, safe_top));
+    const float action_row_left = vkm_max(safe_right - margin - action_row_width, safe_left);
+    const float action_row_top = vkm_max(
+            right_column_top - button_size - action_row_bottom_gap,
+            safe_top);
 
     context->control_rects[NC__GUI_CONTROL_PLACE_BLOCK] = nk_rect(
             action_row_left,
@@ -286,8 +303,6 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
             button_size);
 }
 
-static bool nc__gui_is_control_visible(nc__gui_control_id_t control_id);
-
 static void nc__gui_refresh_controls(nc_gui_context_t* context) {
     nc_gui_controls_t controls = 0;
 
@@ -306,6 +321,32 @@ static void nc__gui_refresh_controls(nc_gui_context_t* context) {
 
     context->controls = controls;
 }
+
+static void nc__gui_update_safe_area(nc_gui_context_t* context, nc_renderer_t* renderer) {
+    SDL_Rect rect;
+    nc_renderer_get_window_safe_area(renderer, &rect);
+
+    const struct nk_rect safe_area = {
+        .x = (float)rect.x,
+        .y = (float)rect.y,
+        .w = (float)rect.w,
+        .h = (float)rect.h,
+    };
+
+    if (       context->safe_area.x == safe_area.x
+            && context->safe_area.y == safe_area.y
+            && context->safe_area.w == safe_area.w
+            && context->safe_area.h == safe_area.h) {
+        return;
+    }
+
+    context->safe_area = safe_area;
+    nc__gui_layout_controls(context);
+    nc__gui_refresh_controls(context);
+    context->overlay_dirty = true;
+}
+
+static bool nc__gui_is_control_visible(nc__gui_control_id_t control_id);
 
 static nc__gui_control_id_t nc__gui_hit_test_control(const nc_gui_context_t* context, const float x, const float y) {
     for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
@@ -652,20 +693,12 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
 
     result->window_display_scale = nc_renderer_get_window_display_scale(renderer);
     result->touch_controls_enabled = nc__is_touchscreen_available();
+    nc__gui_update_safe_area(result, renderer);
 
     nc_gui_set_window_size(result, result->window_size.x, result->window_size.y);
     nc_gui_set_pixel_viewport(result, result->pixel_viewport.x, result->pixel_viewport.y);
 
     nc_string_builder_init(&result->debug_string_builder);
-
-    SDL_Rect rect;
-    nc_renderer_get_window_safe_area(renderer, &rect);
-    result->safe_area = (struct nk_rect){
-        .x = (float)rect.x,
-        .y = (float)rect.y,
-        .w = (float)rect.w,
-        .h = (float)rect.h,
-    };
 
     return result;
 
@@ -871,6 +904,8 @@ bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, co
     } else if (context->mode_switch_accumulator < 0.0f) {
         context->mode_switch_accumulator = 0.0f;
     }
+
+    nc__gui_update_safe_area(context, renderer);
 
     if (!context->overlay_dirty && context->draw_ready) {
         return true;
