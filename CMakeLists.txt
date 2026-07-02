@@ -60,40 +60,23 @@ if(NOT ANDROID AND (WIN32 OR UNIX))
             COMMENT "Creating assets symlink next to executable.")
 endif()
 
-execute_process(
-        COMMAND git describe --tags --dirty --always
-        OUTPUT_VARIABLE GIT_DESCRIBE
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(NC_BUILD_INFO_TEMPLATE "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h.in")
+set(NC_BUILD_INFO_HEADER "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h")
 
-execute_process(
-        COMMAND git rev-parse HEAD
-        OUTPUT_VARIABLE GIT_HASH
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-execute_process(
-        COMMAND git symbolic-ref -q HEAD
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_HEAD_REF
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-if(GIT_HEAD_REF)
-        set(GIT_HEAD_FILE "${CMAKE_SOURCE_DIR}/.git/${GIT_HEAD_REF}")
-else()
-        # Detached HEAD (e.g. checkout a commit or tag)
-        set(GIT_HEAD_FILE "${CMAKE_SOURCE_DIR}/.git/HEAD")
-endif()
-
-configure_file(
-        ${CMAKE_SOURCE_DIR}/include/novacube/build_info.h.in
-        ${CMAKE_SOURCE_DIR}/include/novacube/build_info.h
-        @ONLY)
-
-set_property(
-        DIRECTORY
-        APPEND
-        PROPERTY CMAKE_CONFIGURE_DEPENDS
-        ${CMAKE_SOURCE_DIR}/.git/HEAD
-        ${GIT_HEAD_FILE})
+add_custom_target(novacube_build_info ALL
+        COMMAND ${CMAKE_COMMAND}
+                "-DNC_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                "-DNC_BUILD_INFO_TEMPLATE=${NC_BUILD_INFO_TEMPLATE}"
+                "-DNC_BUILD_INFO_HEADER=${NC_BUILD_INFO_HEADER}"
+                "-DPROJECT_VERSION=${PROJECT_VERSION}"
+                "-DNC_COMPANY_NAME=${NC_COMPANY_NAME}"
+                "-DNC_PRODUCT_NAME=${NC_PRODUCT_NAME}"
+                "-DNC_PACKAGE_NAME=${NC_PACKAGE_NAME}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/generate_build_info.cmake"
+        BYPRODUCTS ${NC_BUILD_INFO_HEADER}
+        COMMENT "Generating build info header."
+        VERBATIM)
+add_dependencies(novacube novacube_build_info)
 
 set_target_properties(novacube PROPERTIES
         DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>"
