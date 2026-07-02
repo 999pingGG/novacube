@@ -6,7 +6,7 @@
 #include <SDL3/SDL.h>
 
 #include <novacube/build_info.h>
-#include <novacube/configuration.h>
+#include <novacube/cvar.h>
 #include <novacube/error_handling.h>
 #include <novacube/macros.h>
 #include <novacube/standard_functions.h>
@@ -21,25 +21,25 @@ NC_IGNORE_ALL_WARNINGS_START
 
 #define X(type, name, _1, _2, _3, _4, _5, ...) \
     static type nc__##name = { __VA_ARGS__ }; \
-    type nc_config_get_##name(void) { \
+    type nc_cvar_get_##name(void) { \
         return nc__##name; \
     } \
 \
-    void nc_config_set_##name(type new_##name) { \
+    void nc_cvar_set_##name(type new_##name) { \
         nc__##name = new_##name; \
     }
-NC_CONFIG_TABLE(X)
+NC_CVAR_TABLE(X)
 #undef X
 
 NC_IGNORE_ALL_WARNINGS_END
 
-#define NC__CONFIG_STR_YES(name, comment, default_value_string) comment #name " = " default_value_string "\n"
-#define NC__CONFIG_STR_NO(name, comment, default_value_string) ""
+#define NC__CVAR_STR_YES(name, comment, default_value_string) comment #name " = " default_value_string "\n"
+#define NC__CVAR_STR_NO(name, comment, default_value_string) ""
 
 #define NC__DEFAULT_CONFIG_FILE(_1, name, in_file_by_default, comment, _2, _3, default_value_string, ...) \
-    NC__CONCAT(NC__CONFIG_STR_, in_file_by_default)(name, comment, default_value_string)
+    NC__CONCAT(NC__CVAR_STR_, in_file_by_default)(name, comment, default_value_string)
 
-#define NC_DEFAULT_CONFIG_FILE_CONTENTS NC_CONFIG_TABLE(NC__DEFAULT_CONFIG_FILE)
+#define NC_DEFAULT_CONFIG_FILE_CONTENTS NC_CVAR_TABLE(NC__DEFAULT_CONFIG_FILE)
 
 typedef struct nc__string_slice_t {
     const char* start;
@@ -630,10 +630,10 @@ static void nc__write_configuration_value(
 ) {
 #define X(type, name, _1, _2, _3, print_function, ...) \
     if (nc__string_slice_equals_string(&key_value->key, #name)) { \
-        print_function(string_builder, nc_config_get_##name()); \
+        print_function(string_builder, nc_cvar_get_##name()); \
         return; \
     } else
-    NC_CONFIG_TABLE(X) {
+    NC_CVAR_TABLE(X) {
         nc_string_builder_append(string_builder, key_value->value.start, key_value->value.length);
     }
 #undef X
@@ -683,7 +683,7 @@ bool nc_configuration_load(void) {
             nc__##name = parsed_value; \
         } \
     } else
-            NC_CONFIG_TABLE(NC__CONFIG_CASE);
+            NC_CVAR_TABLE(NC__CONFIG_CASE);
 #undef NC__CONFIG_CASE
         }
 

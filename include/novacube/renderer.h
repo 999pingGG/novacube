@@ -7,7 +7,7 @@
 
 #include <SDL3/SDL.h>
 
-#include <novacube/configuration.h>
+#include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 
 typedef struct nc_renderer_texture_t nc_renderer_texture_t;

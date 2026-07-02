@@ -9,7 +9,7 @@
 
 #include <novacube/build_info.h>
 #include <novacube/camera.h>
-#include <novacube/configuration.h>
+#include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 #include <novacube/error_handling.h>
 #include <novacube/gui.h>
@@ -83,10 +83,10 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 
     app->renderer = nc_renderer_init(&(nc_renderer_create_info_t){
         .window_title = NC_PRODUCT_NAME " " NC_VERSION,
-        .window_width = nc_config_get_resolution().x,
-        .window_height = nc_config_get_resolution().y,
-        .refresh_rate = nc_config_get_refresh_rate(),
-        .video_mode = nc_config_get_video_mode(),
+        .window_width = nc_cvar_get_resolution().x,
+        .window_height = nc_cvar_get_resolution().y,
+        .refresh_rate = nc_cvar_get_refresh_rate(),
+        .video_mode = nc_cvar_get_video_mode(),
     });
     if (!app->renderer) {
         goto error;
@@ -129,7 +129,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_vec2 touch_camera_delta;
     nc_gui_get_camera_delta(app->gui, &touch_camera_delta);
     if (touch_camera_delta.x != 0.0f || touch_camera_delta.y != 0.0f) {
-        const float sensitivity = (float)nc_config_get_touch_camera_stick_sensitivity();
+        const float sensitivity = (float)nc_cvar_get_touch_camera_stick_sensitivity();
         nc_camera_rotate(
                 &app->camera,
                 touch_camera_delta.x * sensitivity * (float)delta_time,
@@ -138,7 +138,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     vkm_vec2 touch_look_delta;
     if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
-        const float sensitivity = (float)nc_config_get_touch_camera_drag_sensitivity();
+        const float sensitivity = (float)nc_cvar_get_touch_camera_drag_sensitivity();
         nc_camera_rotate(
                 &app->camera,
                 touch_look_delta.x * sensitivity,
@@ -189,12 +189,12 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     char debug_buffer[100];
 
-    if (nc_config_get_show_fps()) {
+    if (nc_cvar_get_show_fps()) {
         const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
         nc_gui_append_debug_text(app->gui, debug_buffer, length);
     }
 
-    if (nc_config_get_show_frame_time()) {
+    if (nc_cvar_get_show_frame_time()) {
         const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
         nc_gui_append_debug_text(app->gui, debug_buffer, length);
     }
@@ -281,8 +281,8 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
             if (!gui_captured) {
                 nc_camera_rotate(
                         &app->camera,
-                        event->motion.xrel * vkm_deg2rad((float)nc_config_get_mouse_sensitivity()),
-                        -event->motion.yrel * vkm_deg2rad((float)nc_config_get_mouse_sensitivity()));
+                        event->motion.xrel * vkm_deg2rad((float)nc_cvar_get_mouse_sensitivity()),
+                        -event->motion.yrel * vkm_deg2rad((float)nc_cvar_get_mouse_sensitivity()));
             }
             break;
         case SDL_EVENT_KEY_DOWN:

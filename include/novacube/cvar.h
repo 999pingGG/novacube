@@ -1,6 +1,6 @@
 #pragma once
-#ifndef NOVACUBE_CONFIGURATION_H_
-#define NOVACUBE_CONFIGURATION_H_
+#ifndef NOVACUBE_CVAR_H_
+#define NOVACUBE_CVAR_H_
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -52,7 +52,7 @@ typedef enum nc_block_highlight_effect_t {
 
 // type, name, visible in file by default (YES or NO), comment (can be omitted!), parse function, print function,
 // default value string (can be omitted if it's not in the file by default), default value.
-#define NC_CONFIG_TABLE(X) \
+#define NC_CVAR_TABLE(X) \
     X(vkm_usvec2, resolution, YES, "; width, height\n", nc__parse_usvec2, nc__print_usvec2, "640, 480", 640, 480) \
     X(uint16_t, refresh_rate, YES, "\n; 0 = match desktop refresh rate\n", nc__parse_uint16, nc__print_int, "0", 0) \
     X(nc_video_mode_t, \
@@ -121,9 +121,9 @@ typedef enum nc_block_highlight_effect_t {
             0, 0, 0, 127) \
 
 #define X(type, name, ...) \
-    type nc_config_get_##name(void); \
-    void nc_config_set_##name(type new_##name);
-NC_CONFIG_TABLE(X)
+    type nc_cvar_get_##name(void); \
+    void nc_cvar_set_##name(type new_##name);
+NC_CVAR_TABLE(X)
 #undef X
 
 bool nc_configuration_load(void);

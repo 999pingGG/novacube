@@ -597,7 +597,7 @@ static void nc__renderer_draw_block_highlight(
         .block_position_and_scale = { { draw->position.x, draw->position.y, draw->position.z, 1.02f } },
     };
 
-    const vkm_ubvec4 color = nc_config_get_block_highlight_color();
+    const vkm_ubvec4 color = nc_cvar_get_block_highlight_color();
     const nc__renderer_block_highlight_fragment_uniforms_t fragment_uniforms = {
         .color = { 
             .r = (float)color.r / 255.0f,
@@ -609,7 +609,7 @@ static void nc__renderer_draw_block_highlight(
     };
 
     SDL_GPUGraphicsPipeline* pipeline;
-    switch (nc_config_get_block_highlight_effect()) {
+    switch (nc_cvar_get_block_highlight_effect()) {
         case NC_BLOCK_HIGHLIGHT_EFFECT_OUTLINE:
             pipeline = renderer->outline_block_highlight_pipeline;
             break;

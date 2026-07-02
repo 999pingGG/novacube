@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <novacube/configuration.h>
+#include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 #include <novacube/gui.h>
 #include <novacube/error_handling.h>
@@ -229,7 +229,7 @@ static void nc__gui_layout_controls(nc_gui_context_t* context) {
     const float safe_top = safe_area.y;
     const float safe_right = safe_area.x + safe_area.w;
     const float safe_bottom = safe_area.y + safe_area.h;
-    const float button_size = (float)nc_config_get_gui_button_size() * context->window_display_scale;
+    const float button_size = (float)nc_cvar_get_gui_button_size() * context->window_display_scale;
     const float gap = button_size * 0.12f;
     const float margin = button_size * 0.35f;
     const float dpad_width = button_size * 3.0f + gap * 2.0f;
@@ -374,15 +374,15 @@ static nc__gui_pointer_t* nc__gui_alloc_touch(nc_gui_context_t* context) {
 }
 
 static float nc__gui_analog_stick_ring_radius(const nc_gui_context_t* context) {
-    return (float)nc_config_get_analog_stick_ring_radius() * context->window_display_scale;
+    return (float)nc_cvar_get_analog_stick_ring_radius() * context->window_display_scale;
 }
 
 static bool nc__gui_uses_movement_buttons(void) {
-    return nc_config_get_touch_movement_mode() == NC_TOUCH_MOVEMENT_MODE_BUTTONS;
+    return nc_cvar_get_touch_movement_mode() == NC_TOUCH_MOVEMENT_MODE_BUTTONS;
 }
 
 static bool nc__gui_uses_camera_analog_stick(void) {
-    return nc_config_get_touch_camera_mode() == NC_TOUCH_CAMERA_MODE_ANALOG;
+    return nc_cvar_get_touch_camera_mode() == NC_TOUCH_CAMERA_MODE_ANALOG;
 }
 
 static bool nc__gui_is_planar_movement_control(const nc__gui_control_id_t control_id) {
@@ -1013,9 +1013,9 @@ void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overla
 void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw) {
     *draw = (nc_renderer_procedural_overlay_draw_t){
         .analog_stick_ring_radius = nc__gui_analog_stick_ring_radius(context),
-        .analog_stick_ring_thickness = (float)nc_config_get_analog_stick_ring_thickness() * context->window_display_scale,
-        .analog_stick_radius = (float)nc_config_get_analog_stick_radius() * context->window_display_scale,
-        .crosshair_size = (float)nc_config_get_crosshair_size() * context->window_display_scale,
+        .analog_stick_ring_thickness = (float)nc_cvar_get_analog_stick_ring_thickness() * context->window_display_scale,
+        .analog_stick_radius = (float)nc_cvar_get_analog_stick_radius() * context->window_display_scale,
+        .crosshair_size = (float)nc_cvar_get_crosshair_size() * context->window_display_scale,
     };
 
     if (!context->touch_controls_enabled) {
