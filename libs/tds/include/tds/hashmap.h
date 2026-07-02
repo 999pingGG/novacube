@@ -30,16 +30,96 @@ typedef struct TDS_JOIN2(TDS_TYPE, _iter_t) {
 } TDS_JOIN2(TDS_TYPE, _iter_t);
 
 TDS_VALUE_T* TDS_FUNCTION(get)(const TDS_TYPE* map, TDS_KEY_T key);
+void TDS_FUNCTION(reserve)(TDS_TYPE* map, TDS_SIZE_T capacity);
 void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value);
 TDS_JOIN2(TDS_TYPE, _iter_t) TDS_FUNCTION(iter)(const TDS_TYPE* map);
 char TDS_FUNCTION(next)(TDS_JOIN2(TDS_TYPE, _iter_t)* iter);
 void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key);
 TDS_SIZE_T TDS_FUNCTION(count)(const TDS_TYPE* map);
 void TDS_FUNCTION(clear)(TDS_TYPE* map);
+void TDS_FUNCTION(reclaim)(TDS_TYPE* map);
 void TDS_FUNCTION(fini)(TDS_TYPE* map);
 #endif
 
 #ifdef TDS_IMPLEMENT
+static TDS_SIZE_T TDS_FUNCTION(usable_capacity)(const TDS_SIZE_T count) {
+    TDS_SIZE_T capacity = count;
+    while (count * 4 > capacity * 3) {
+        capacity++;
+    }
+
+    return capacity;
+}
+
+static TDS_SIZE_T TDS_FUNCTION(prime_capacity)(TDS_SIZE_T capacity) {
+    static const unsigned long long prime_list[] = {
+        2, 3, 5, 11, 17, 37, 67, 131, 257, 521, 1031, 2053, 4099, 8209, 16411, 32771, 65537, 131101, 262147,
+        524309, 1048583, 2097169, 4194319, 8388617, 16777259, 33554467, 67108879, 134217757, 268435459, 536870923,
+        1073741827, 2147483659, 4294967311, 8589934609, 17179869209, 34359738421, 68719476767, 137438953481,
+        274877906951, 549755813911, 1099511627791, 2199023255579, 4398046511119, 8796093022237, 17592186044423,
+        35184372088891, 70368744177679, 140737488355333, 281474976710677, 562949953421381, 1125899906842679,
+        2251799813685269, 4503599627370517, 9007199254740997, 18014398509482143, 36028797018963971,
+        72057594037928017, 144115188075855881, 288230376151711813, 576460752303423619, 1152921504606847009,
+        2305843009213693967, 4611686018427388039, 9223372036854775837ull,
+    };
+
+    for (unsigned i = 0; i < TDS_COUNTOF(prime_list); i++) {
+        if (prime_list[i] < capacity) {
+            continue;
+        }
+
+        TDS_SIZE_T result = (TDS_SIZE_T)prime_list[i];
+        if (result < capacity) {
+            // Guard against overflow.
+            result = TDS_MAX_VALUE(TDS_SIZE_T);
+        }
+
+        return result;
+    }
+
+    return TDS_MAX_VALUE(TDS_SIZE_T);
+}
+
+static void TDS_FUNCTION(rehash)(TDS_TYPE* map, const TDS_SIZE_T capacity) {
+    TDS_ASSERT(map->count <= capacity);
+
+    TDS_ENTRY_T* new_buckets = TDS_CALLOC(capacity, sizeof(TDS_ENTRY_T));
+    if (map->buckets) {
+        for (TDS_SIZE_T i = 0; i < map->capacity; i++) {
+            TDS_ENTRY_T entry = map->buckets[i];
+            if (!entry.occupied) {
+                continue;
+            }
+
+            entry.probe_sequence_length = 0;
+
+            // Insert entry.
+            TDS_SIZE_T index = entry.hash % capacity;
+            while (1) {
+                TDS_ENTRY_T* cur = new_buckets + index;
+                if (!cur->occupied) {
+                    new_buckets[index] = entry;
+                    break;
+                }
+
+                // Robin Hood: Swap if our probe distance is higher.
+                if (cur->probe_sequence_length < entry.probe_sequence_length) {
+                    const TDS_ENTRY_T temp = *cur;
+                    *cur = entry;
+                    entry = temp;
+                }
+                index = (index + 1) % capacity;
+                entry.probe_sequence_length++;
+                TDS_ASSERT(entry.probe_sequence_length < capacity);
+            }
+        }
+    }
+
+    TDS_FREE(map->buckets);
+    map->buckets = new_buckets;
+    map->capacity = capacity;
+}
+
 TDS_VALUE_T* TDS_FUNCTION(get)(const TDS_TYPE* map, TDS_KEY_T key) {
     if (!map->buckets) {
         return NULL;
@@ -72,80 +152,31 @@ TDS_VALUE_T* TDS_FUNCTION(get)(const TDS_TYPE* map, TDS_KEY_T key) {
     return NULL;
 }
 
-void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
-    if (!map->buckets) {
-        // Yeah, we ignore TDS_INITIAL_CAPACITY here because we need the capacity to be a prime number.
-        // TODO: Well, use the next prime then.
-        map->capacity = 11;
-        map->buckets = TDS_CALLOC(map->capacity, sizeof(TDS_ENTRY_T));
+void TDS_FUNCTION(reserve)(TDS_TYPE* map, const TDS_SIZE_T capacity) {
+    TDS_ASSERT(map->count <= map->capacity);
+
+    if (capacity <= map->capacity) {
+        return;
     }
 
-    TDS_SIZE_T index;
+    TDS_FUNCTION(rehash)(map, TDS_FUNCTION(prime_capacity)(capacity));
+}
 
+void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
     // Ensure the map has room for at least one more entry.
     // Check load factor > 0.75 by using integer math instead of floating-point math.
+    // TODO: Use floating point math instead, for cases where we're approaching TDS_SIZE_T limits.
+    if (!map->buckets) {
+        TDS_FUNCTION(reserve)(map, TDS_INITIAL_CAPACITY);
+    }
     if ((map->count + 1) * 4 > map->capacity * 3) {
-        // Find the smaller prime number that is at least as big as the required capacity.
-        static const unsigned long long prime_list[] = {
-            2, 3, 5, 11, 17, 37, 67, 131, 257, 521, 1031, 2053, 4099, 8209, 16411, 32771, 65537, 131101, 262147,
-            524309, 1048583, 2097169, 4194319, 8388617, 16777259, 33554467, 67108879, 134217757, 268435459, 536870923,
-            1073741827, 2147483659, 4294967311, 8589934609, 17179869209, 34359738421, 68719476767, 137438953481,
-            274877906951, 549755813911, 1099511627791, 2199023255579, 4398046511119, 8796093022237, 17592186044423,
-            35184372088891, 70368744177679, 140737488355333, 281474976710677, 562949953421381, 1125899906842679,
-            2251799813685269, 4503599627370517, 9007199254740997, 18014398509482143, 36028797018963971,
-            72057594037928017, 144115188075855881, 288230376151711813, 576460752303423619, 1152921504606847009,
-            2305843009213693967, 4611686018427388039, 9223372036854775837ull,
-        };
-
         TDS_SIZE_T new_capacity = map->capacity * 2;
         if (new_capacity < map->capacity) {
             // Handle overflow.
             new_capacity = TDS_MAX_VALUE(TDS_SIZE_T);
-        } else {
-            for (unsigned i = 0; i < TDS_COUNTOF(prime_list); i++) {
-                if (prime_list[i] < new_capacity) {
-                    continue;
-                }
-
-                new_capacity = (TDS_SIZE_T)prime_list[i];
-                break;
-            }
         }
 
-        // Rehashing.
-        TDS_ENTRY_T* new_buckets = TDS_CALLOC(new_capacity, sizeof(TDS_ENTRY_T));
-        for (TDS_SIZE_T i = 0; i < map->capacity; i++) {
-            TDS_ENTRY_T entry = map->buckets[i];
-            if (!entry.occupied) {
-                continue;
-            }
-
-            entry.probe_sequence_length = 0;
-
-            // Insert entry.
-            index = entry.hash % new_capacity;
-            while (1) {
-                TDS_ENTRY_T* cur = new_buckets + index;
-                if (!cur->occupied) {
-                    new_buckets[index] = entry;
-                    break;
-                }
-
-                // Robin Hood: Swap if our probe distance is higher.
-                if (cur->probe_sequence_length < entry.probe_sequence_length) {
-                    const TDS_ENTRY_T temp = *cur;
-                    *cur = entry;
-                    entry = temp;
-                }
-                index = (index + 1) % new_capacity;
-                entry.probe_sequence_length++;
-                TDS_ASSERT(entry.probe_sequence_length < new_capacity);
-            }
-        }
-
-        TDS_FREE(map->buckets);
-        map->buckets = new_buckets;
-        map->capacity = new_capacity;
+        TDS_FUNCTION(reserve)(map, new_capacity);
     }
 
     // Do the insertion.
@@ -157,7 +188,7 @@ void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
         .occupied = 1,
     };
 
-    index = new_entry.hash % map->capacity;
+    TDS_SIZE_T index = new_entry.hash % map->capacity;
     while (1) {
         TDS_ENTRY_T* cur = map->buckets + index;
         if (!cur->occupied) {
@@ -282,7 +313,7 @@ void TDS_FUNCTION(clear)(TDS_TYPE* map) {
         TDS_KEY_FINI((it.key));
 #endif
 #ifdef TDS_VALUE_FINI
-        TDS_VALUE_FINI((it.value));
+        TDS_VALUE_FINI((*it.value));
 #endif
     }
 #endif
@@ -290,6 +321,23 @@ void TDS_FUNCTION(clear)(TDS_TYPE* map) {
         TDS_MEMSET(map->buckets, 0, sizeof(TDS_ENTRY_T) * map->capacity);
     }
     map->count = 0;
+}
+
+void TDS_FUNCTION(reclaim)(TDS_TYPE* map) {
+    TDS_ASSERT(map->count <= map->capacity);
+
+    if (map->count == 0) {
+        TDS_FREE(map->buckets);
+        *map = (TDS_TYPE){ 0 };
+        return;
+    }
+
+    const TDS_SIZE_T capacity = TDS_FUNCTION(prime_capacity)(TDS_FUNCTION(usable_capacity)(map->count));
+    if (capacity == map->capacity) {
+        return;
+    }
+
+    TDS_FUNCTION(rehash)(map, capacity);
 }
 
 void TDS_FUNCTION(fini)(TDS_TYPE* map) {
