@@ -1,6 +1,7 @@
+#include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 
+#include <novacube/camera.h>
 #include <novacube/cvkm.h>
 #include <novacube/macros.h>
 #include <novacube/terrain.h>
@@ -112,37 +113,37 @@ void nc_terrain_get_opaque_draw(
     };
 }
 
-void nc_terrain_modify_block(
-    nc_terrain_t* terrain,
-    const vkm_vec3* camera_position,
-    const float camera_yaw,
-    const float camera_pitch,
-    const nc_block_type_t new_block
+static bool nc__terrain_get_target_block(
+    const nc_terrain_t* terrain,
+    const nc_camera_t* camera,
+    vkm_bvec3* normal,
+    uint32_t* closest_block_id,
+    float* closest_distance
 ) {
     // https://tavianator.com/2011/ray_box.html
     // https://tavianator.com/cgit/dimension.git/tree/libdimension/bvh/bvh.c#n178
     // struct dmnsn_optimized_ray and dmnsn_ray_box_intersection()
-    const float pitch_cosine = vkm_cos(camera_pitch);
+    const float pitch_cosine = vkm_cos(camera->pitch);
     vkm_vec3 inverse_ray_direction = { {
-        1.0f / (pitch_cosine * vkm_sin(camera_yaw)),
-        1.0f / vkm_sin(camera_pitch),
-        1.0f / (pitch_cosine * vkm_cos(camera_yaw)),
+        1.0f / (pitch_cosine * vkm_sin(camera->yaw)),
+        1.0f / vkm_sin(camera->pitch),
+        1.0f / (pitch_cosine * vkm_cos(camera->yaw)),
     } };
 
-    float closest_distance = INFINITY;
-    uint32_t closest_block_id = UINT32_MAX;
-    vkm_bvec3 normal = { 0 };
+    *closest_distance = INFINITY;
+    *closest_block_id = UINT32_MAX;
+    *normal = (vkm_bvec3){ 0 };
     for (uint32_t i = 0; i < terrain->chunk.count; i++) {
         const nc__terrain_block_t block = terrain->chunk.array[i];
         const vkm_vec3 box_min = { { block.position.x, block.position.y, block.position.z } };
         const vkm_vec3 box_max = { { box_min.x + 1.0f, box_min.y + 1.0f, box_min.z + 1.0f } };
 
         vkm_vec3 t0;
-        vkm_sub(&box_min, camera_position, &t0);
+        vkm_sub(&box_min, &camera->position, &t0);
         vkm_mul(&t0, &inverse_ray_direction, &t0);
 
         vkm_vec3 t1;
-        vkm_sub(&box_max, camera_position, &t1);
+        vkm_sub(&box_max, &camera->position, &t1);
         vkm_mul(&t1, &inverse_ray_direction, &t1);
 
         vkm_vec3 enter_distances;
@@ -156,10 +157,10 @@ void nc_terrain_modify_block(
 
         if (exit_distance >= vkm_max(enter_distance, 0.0f)) {
             const float hit_distance = vkm_max(enter_distance, 0.0f);
-            if (hit_distance < closest_distance) {
-                closest_distance = hit_distance;
-                closest_block_id = terrain->chunk.dense[i];
-                normal = (vkm_bvec3){ {
+            if (hit_distance < *closest_distance) {
+                *closest_distance = hit_distance;
+                *closest_block_id = terrain->chunk.dense[i];
+                *normal = (vkm_bvec3){ {
                     (int8_t)((enter_distance == enter_distances.x) * (inverse_ray_direction.x < 0.0f ? 1 : -1)),
                     (int8_t)((enter_distance == enter_distances.y) * (inverse_ray_direction.y < 0.0f ? 1 : -1)),
                     (int8_t)((enter_distance == enter_distances.z) * (inverse_ray_direction.z < 0.0f ? 1 : -1)),
@@ -168,7 +169,46 @@ void nc_terrain_modify_block(
         }
     }
 
-    if (closest_distance == INFINITY) {
+    if (*closest_distance == INFINITY) {
+        return false;
+    }
+
+    return true;
+}
+
+void nc_terrain_get_block_highlight_draw(
+    const nc_terrain_t* terrain,
+    const vkm_mat4* view_projection,
+    const float time,
+    const nc_camera_t* camera,
+    nc_renderer_block_highlight_draw_t* draw
+) {
+    vkm_bvec3 normal;
+    uint32_t closest_block_id;
+    float closest_distance;
+    if (!nc__terrain_get_target_block(terrain, camera, &normal, &closest_block_id, &closest_distance)) {
+        *draw = (nc_renderer_block_highlight_draw_t){
+            .shown = false,
+        };
+        return;
+    }
+
+    const vkm_ubvec3 block_position = nc__terrain_block_dense_pool_t_get(&terrain->chunk, closest_block_id).position;
+
+    *draw = (nc_renderer_block_highlight_draw_t){
+        .view_projection = view_projection,
+        .position = { { block_position.x, block_position.y, block_position.z } },
+        .normal = { { normal.x, normal.y, normal.z } },
+        .time = time,
+        .shown = true,
+    };
+}
+
+void nc_terrain_modify_block(nc_terrain_t* terrain, const nc_camera_t* camera, const nc_block_type_t new_block) {
+    vkm_bvec3 normal;
+    uint32_t closest_block_id;
+    float closest_distance;
+    if (!nc__terrain_get_target_block(terrain, camera, &normal, &closest_block_id, &closest_distance)) {
         return;
     }
 

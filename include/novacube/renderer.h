@@ -61,12 +61,21 @@ typedef struct nc_renderer_procedural_overlay_draw_t {
     float crosshair_size;
 } nc_renderer_procedural_overlay_draw_t;
 
+typedef struct nc_renderer_block_highlight_draw_t {
+    const vkm_mat4* view_projection;
+    vkm_vec3 position;
+    vkm_vec3 normal;
+    float time;
+    bool shown;
+} nc_renderer_block_highlight_draw_t;
+
 typedef struct nc_renderer_frame_t {
     const nc_renderer_opaque_draw_t* opaque_draws;
     uint32_t opaque_draw_count;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;
     const nc_renderer_procedural_overlay_draw_t* procedural_overlay_draw;
+    const nc_renderer_block_highlight_draw_t* block_highlight_draw;
 } nc_renderer_frame_t;
 
 nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info);
@@ -105,4 +114,5 @@ void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t*
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame);
 float nc_renderer_get_window_pixel_density(const nc_renderer_t* renderer);
 void nc_renderer_fini(nc_renderer_t* renderer);
+
 #endif

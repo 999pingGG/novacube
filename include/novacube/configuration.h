@@ -21,6 +21,11 @@
     X(ANALOG, "analog") \
     X(FREE_DRAG, "free_drag")
 
+#define NC_BLOCK_HIGHLIGHT_EFFECT_TABLE(X) \
+    X(OUTLINE, "outline") \
+    X(VIGNETTE, "vignette") \
+    X(PLASMA, "plasma") \
+
 typedef enum nc_video_mode_t {
 #define X(id, str) NC_VIDEO_MODE_##id,
     NC_VIDEO_MODE_TABLE(X)
@@ -38,6 +43,12 @@ typedef enum nc_touch_camera_mode_t {
     NC_TOUCH_CAMERA_MODE_TABLE(X)
 #undef X
 } nc_touch_camera_mode_t;
+
+typedef enum nc_block_highlight_effect_t {
+#define X(id, str) NC_BLOCK_HIGHLIGHT_EFFECT_##id,
+    NC_BLOCK_HIGHLIGHT_EFFECT_TABLE(X)
+#undef X
+} nc_block_highlight_effect_t;
 
 // type, name, visible in file by default (YES or NO), comment (can be omitted!), parse function, print function,
 // default value string (can be omitted if it's not in the file by default), default value.
@@ -85,62 +96,29 @@ typedef enum nc_touch_camera_mode_t {
             nc__print_double, \
             "3.0", \
             3.0) \
-    X(bool, \
-            show_fps, \
+    X(bool, show_fps, NO, , nc__parse_bool, nc__print_bool, , false) \
+    X(bool, show_frame_time, NO, , nc__parse_bool, nc__print_bool, , false) \
+    X(double, gui_button_size, NO, , nc__parse_double, nc__print_double, , 50.0) \
+    X(double, crosshair_size, NO, , nc__parse_double, nc__print_double, , 28.0) \
+    X(double, analog_stick_ring_radius, NO, , nc__parse_double, nc__print_double, , 64.0) \
+    X(double, analog_stick_ring_thickness, NO, , nc__parse_double, nc__print_double, , 4.0) \
+    X(double, analog_stick_radius, NO, , nc__parse_double, nc__print_double, , 28.0) \
+    X(nc_block_highlight_effect_t, \
+            block_highlight_effect, \
             NO, \
             , \
-            nc__parse_bool, \
-            nc__print_bool, \
+            nc__parse_block_highlight_effect, \
+            nc__print_block_highlight_effect, \
             , \
-            false) \
-    X(bool, \
-            show_frame_time, \
+            NC_BLOCK_HIGHLIGHT_EFFECT_OUTLINE) \
+    X(vkm_ubvec4, \
+            block_highlight_color, \
             NO, \
             , \
-            nc__parse_bool, \
-            nc__print_bool, \
-            , \
-            false) \
-    X(double, \
-            gui_button_size, \
-            NO, \
-            , \
-            nc__parse_double, \
-            nc__print_double, \
-            , \
-            50.0) \
-    X(double, \
-            crosshair_size, \
-            NO, \
-            , \
-            nc__parse_double, \
-            nc__print_double, \
-            , \
-            28.0) \
-    X(double, \
-            analog_stick_ring_radius, \
-            NO, \
-            , \
-            nc__parse_double, \
-            nc__print_double, \
-            , \
-            64.0) \
-    X(double, \
-            analog_stick_ring_thickness, \
-            NO, \
-            , \
-            nc__parse_double, \
-            nc__print_double, \
-            , \
-            4.0) \
-    X(double, \
-            analog_stick_radius, \
-            NO, \
-            , \
-            nc__parse_double, \
-            nc__print_double, \
-            , \
-            28.0) \
+            nc__parse_ubvec4, \
+            nc__print_ubvec4, \
+            "0, 0, 0, 127", \
+            0, 0, 0, 127) \
 
 #define X(type, name, ...) \
     type nc_config_get_##name(void); \

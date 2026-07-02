@@ -33,16 +33,11 @@ typedef struct nc__app_t {
 
 static const bool* keyboard_state;
 
-static void nc__app_modify_block(nc__app_t* app, const nc_block_type_t block_type) {
-    nc_terrain_modify_block(
-            app->terrain,
-            &app->camera.position,
-            app->camera.yaw,
-            app->camera.pitch,
-            block_type);
+static void nc__app_modify_block(const nc__app_t* app, const nc_block_type_t block_type) {
+    nc_terrain_modify_block(app->terrain, &app->camera, block_type);
 }
 
-static void nc__app_handle_gui_actions(nc__app_t* app, const nc_gui_actions_t actions) {
+static void nc__app_handle_gui_actions(const nc__app_t* app, const nc_gui_actions_t actions) {
     if (actions & NC_GUI_ACTION_PLACE_BLOCK) {
         nc__app_modify_block(app, app->selected_type);
     }
@@ -126,7 +121,9 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     const Uint64 ticks = SDL_GetTicksNS();
     static Uint64 last_ticks = 0;
+    static double time = 0.0;
     const double delta_time = last_ticks == 0 ? 1.0 / 60.0 : (double)(ticks - last_ticks) / 1000000000.0;
+    time += delta_time;
     last_ticks = ticks;
 
     vkm_vec2 touch_camera_delta;
@@ -221,9 +218,11 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     nc_renderer_opaque_draw_t opaque_draw;
     nc_renderer_overlay_draw_t overlay_draw;
     nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
+    nc_renderer_block_highlight_draw_t highlight_draw;
     nc_terrain_get_opaque_draw(app->terrain, &view_projection, &opaque_draw);
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
     nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
+    nc_terrain_get_block_highlight_draw(app->terrain, &view_projection, (float)time, &app->camera, &highlight_draw);
 
     if (!nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
             .opaque_draws = &opaque_draw,
@@ -231,6 +230,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             .overlay_draws = &overlay_draw,
             .overlay_draw_count = 1,
             .procedural_overlay_draw = &procedural_overlay_draw,
+            .block_highlight_draw = &highlight_draw,
         })) {
         goto error;
     }

@@ -251,6 +251,16 @@ static bool nc__parse_int(nc__string_slice_t* slice, int* result) {
     return has_digit;
 }
 
+static bool nc__parse_uint8(nc__string_slice_t* slice, uint8_t* result) {
+    int n;
+    if (!nc__parse_int(slice, &n) || n < 0 || n > UINT8_MAX) {
+        return false;
+    }
+
+    *result = (uint8_t)n;
+    return true;
+}
+
 static bool nc__parse_uint16(nc__string_slice_t* slice, uint16_t* result) {
     int n;
     if (!nc__parse_int(slice, &n) || n < 0 || n > UINT16_MAX) {
@@ -280,6 +290,52 @@ static bool nc__parse_usvec2(nc__string_slice_t* slice, vkm_usvec2* result) {
     }
 
     nc__skip_whitespace_slice(slice);
+
+    // Ensure there's no trailing characters.
+    return slice->length == 0;
+}
+
+static bool nc__parse_ubvec4(nc__string_slice_t* slice, vkm_ubvec4* result) {
+    if (!nc__parse_uint8(slice, &result->x)) {
+        return false;
+    }
+
+    nc__skip_whitespace_slice(slice);
+    if (*slice->start != ',') {
+        return false;
+    }
+
+    // Consume the comma and skip to the next int.
+    nc__skip_char_slice(slice);
+    nc__skip_whitespace_slice(slice);
+
+    if (!nc__parse_uint8(slice, &result->y)) {
+        return false;
+    }
+
+    nc__skip_whitespace_slice(slice);
+    if (*slice->start != ',') {
+        return false;
+    }
+
+    nc__skip_char_slice(slice);
+    nc__skip_whitespace_slice(slice);
+
+    if (!nc__parse_uint8(slice, &result->z)) {
+        return false;
+    }
+
+    nc__skip_whitespace_slice(slice);
+    if (*slice->start != ',') {
+        return false;
+    }
+
+    nc__skip_char_slice(slice);
+    nc__skip_whitespace_slice(slice);
+
+    if (!nc__parse_uint8(slice, &result->w)) {
+        return false;
+    }
 
     // Ensure there's no trailing characters.
     return slice->length == 0;
@@ -397,6 +453,13 @@ static const nc__enum_entry_t nc__touch_camera_mode_entries[] = {
     { 0 },
 };
 
+static const nc__enum_entry_t nc__block_highlight_effect_entries[] = {
+#define X(id, string) { string, sizeof(string) - 1, NC_BLOCK_HIGHLIGHT_EFFECT_##id },
+    NC_BLOCK_HIGHLIGHT_EFFECT_TABLE(X)
+#undef X
+    { 0 },
+};
+
 static bool nc__parse_video_mode(nc__string_slice_t* slice, nc_video_mode_t* result) {
     return nc__parse_enum(slice, nc__video_mode_entries, (int*)result);
 }
@@ -407,6 +470,10 @@ static bool nc__parse_touch_movement_mode(nc__string_slice_t* slice, nc_touch_mo
 
 static bool nc__parse_touch_camera_mode(nc__string_slice_t* slice, nc_touch_camera_mode_t* result) {
     return nc__parse_enum(slice, nc__touch_camera_mode_entries, (int*)result);
+}
+
+static bool nc__parse_block_highlight_effect(nc__string_slice_t* slice, nc_block_highlight_effect_t* result) {
+    return nc__parse_enum(slice, nc__block_highlight_effect_entries, (int*)result);
 }
 
 static bool nc__parse_bool(nc__string_slice_t* slice, bool* result) {
@@ -523,6 +590,16 @@ static void nc__print_usvec2(nc_string_builder_t* string_builder, const vkm_usve
     nc__print_int(string_builder, value.y);
 }
 
+static void nc__print_ubvec4(nc_string_builder_t* string_builder, const vkm_ubvec4 value) {
+    nc__print_int(string_builder, value.x);
+    nc_string_builder_append(string_builder, ", ", 2);
+    nc__print_int(string_builder, value.y);
+    nc_string_builder_append(string_builder, ", ", 2);
+    nc__print_int(string_builder, value.z);
+    nc_string_builder_append(string_builder, ", ", 2);
+    nc__print_int(string_builder, value.w);
+}
+
 static void nc__print_video_mode(nc_string_builder_t* string_builder, const nc_video_mode_t value) {
     nc__print_enum(string_builder, nc__video_mode_entries, value);
 }
@@ -533,6 +610,10 @@ static void nc__print_touch_movement_mode(nc_string_builder_t* string_builder, c
 
 static void nc__print_touch_camera_mode(nc_string_builder_t* string_builder, const nc_touch_camera_mode_t value) {
     nc__print_enum(string_builder, nc__touch_camera_mode_entries, value);
+}
+
+static void nc__print_block_highlight_effect(nc_string_builder_t* string_builder, const nc_block_highlight_effect_t value) {
+    nc__print_enum(string_builder, nc__block_highlight_effect_entries, value);
 }
 
 static void nc__print_bool(nc_string_builder_t* string_builder, const bool value) {
