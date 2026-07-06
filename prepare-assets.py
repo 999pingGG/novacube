@@ -38,7 +38,7 @@ def run(cmd):
     )
 
     if result.returncode != 0:
-        print("⚠️ Command failed:")
+        print("Command failed:")
         print(" ".join(cmd))
         if result.stdout:
             print("---- stdout ----")
@@ -109,7 +109,7 @@ def process_textures(compress_android, strip_exif):
             strip_exif_if_requested(out, strip_exif)
 
 
-def compile_shaders():
+def compile_shaders(debug):
     out_dir = PC_ASSETS / 'shaders'
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir_android = ANDROID_ASSETS / 'shaders'
@@ -125,7 +125,14 @@ def compile_shaders():
             out_android = out_dir_android / f'{shader.stem}-{stage}.spv'
 
             print(f'[SHADER] Compiling {shader} -> {out}')
-            if run(['glslc', '--target-env=vulkan1.0', str(shader), '-o', str(out)]):
+            
+            params = ['glslc', '--target-env=vulkan1.1', str(shader), '-o', str(out)]
+            if debug:
+                params.append('-g')
+            else:
+                params.append('-O')
+
+            if run(params):
                 print(f'[SHADER] Copying {out} -> {out_android}')
                 shutil.copy2(out, out_android)
 
@@ -134,6 +141,7 @@ def main():
     parser = argparse.ArgumentParser(description='Unlit asset pipeline.')
     parser.add_argument('--compress-android', action='store_true')
     parser.add_argument('--strip-exif', action='store_true')
+    parser.add_argument('--debug', action='store_true')
 
     args = parser.parse_args()
 
@@ -145,7 +153,7 @@ def main():
     )
     print('Textures done.')
 
-    compile_shaders()
+    compile_shaders(debug=args.debug)
     print('Shaders compiled.')
 
 
