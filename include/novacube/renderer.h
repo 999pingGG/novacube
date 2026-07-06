@@ -26,8 +26,9 @@ typedef struct nc_renderer_create_info_t {
 typedef enum nc_renderer_buffer_usage_t {
     NC_RENDERER_BUFFER_USAGE_VERTEX = 1,
     NC_RENDERER_BUFFER_USAGE_INDEX,
+    NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
 
-    NC_RENDERER_BUFFER_USAGE_COUNT = NC_RENDERER_BUFFER_USAGE_INDEX,
+    NC_RENDERER_BUFFER_USAGE_COUNT = NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
 } nc_renderer_buffer_usage_t;
 
 typedef struct nc_renderer_overlay_draw_command_t {
@@ -37,12 +38,22 @@ typedef struct nc_renderer_overlay_draw_command_t {
     uint32_t first_index;
 } nc_renderer_overlay_draw_command_t;
 
-typedef struct nc_renderer_opaque_draw_t {
-    const nc_renderer_buffer_t* instance_buffer;
-    uint32_t instance_count;
+typedef struct nc_renderer_chunk_opaque_draw_t {
+    // SSBO containing an array of nc_mesh_quad_t.
+    nc_renderer_buffer_t* chunk_buffer;
+    // Number of generated triangle-list vertices in the greedy chunk.
+    uint32_t vertex_count;
+    // SSBO containing an array of nc_mesh_face_data_t.
+    nc_renderer_buffer_t* face_data_buffer;
     const nc_renderer_texture_t* texture;
     const vkm_mat4* view_projection;
-} nc_renderer_opaque_draw_t;
+    vkm_vec3 position;
+} nc_renderer_chunk_opaque_draw_t;
+
+#define TDS_DECLARE
+#define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
+#define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
+#include <tds/vector.h>
 
 typedef struct nc_renderer_overlay_draw_t {
     const nc_renderer_buffer_t* vertex_buffer;
@@ -70,8 +81,7 @@ typedef struct nc_renderer_block_highlight_draw_t {
 } nc_renderer_block_highlight_draw_t;
 
 typedef struct nc_renderer_frame_t {
-    const nc_renderer_opaque_draw_t* opaque_draws;
-    uint32_t opaque_draw_count;
+    const nc_renderer_chunk_opaque_draw_vec* opaque_draws;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;
     const nc_renderer_procedural_overlay_draw_t* procedural_overlay_draw;

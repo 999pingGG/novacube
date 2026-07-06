@@ -1,6 +1,5 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdio.h>
 
 #include <SDL3/SDL.h>
@@ -29,6 +28,7 @@ typedef struct nc__app_t {
     nc_gui_context_t* gui;
     nc_camera_t camera;
     nc_block_type_t selected_type;
+    nc_renderer_chunk_opaque_draw_vec chunk_opaque_draws;
 } nc__app_t;
 
 static const bool* keyboard_state;
@@ -54,6 +54,7 @@ static void nc__app_fini(nc__app_t* app) {
     nc_terrain_fini(app->terrain, app->renderer);
     nc_gui_fini(app->gui, app->renderer);
     nc_renderer_fini(app->renderer);
+    nc_renderer_chunk_opaque_draw_vec_fini(&app->chunk_opaque_draws);
     free(app);
 }
 
@@ -77,7 +78,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     *app_state = app;
 
     app->camera = (nc_camera_t){
-        .position = { { 127.5f, 127.5f, 124.0f } },
+        .position = { { 24.0f, 4.0f, 12.0f } },
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
@@ -215,23 +216,26 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         goto error;
     }
 
-    nc_renderer_opaque_draw_t opaque_draw;
     nc_renderer_overlay_draw_t overlay_draw;
     nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
     nc_renderer_block_highlight_draw_t highlight_draw;
-    nc_terrain_get_opaque_draw(app->terrain, &view_projection, &opaque_draw);
+    nc_terrain_get_opaque_draws(
+            app->terrain,
+            &view_projection,
+            &app->chunk_opaque_draws);
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
     nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
     nc_terrain_get_block_highlight_draw(app->terrain, &view_projection, (float)time, &app->camera, &highlight_draw);
 
-    if (!nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
-            .opaque_draws = &opaque_draw,
-            .opaque_draw_count = 1,
-            .overlay_draws = &overlay_draw,
-            .overlay_draw_count = 1,
-            .procedural_overlay_draw = &procedural_overlay_draw,
-            .block_highlight_draw = &highlight_draw,
-        })) {
+    const bool success = nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
+        .opaque_draws = &app->chunk_opaque_draws,
+        .overlay_draws = &overlay_draw,
+        .overlay_draw_count = 1,
+        .procedural_overlay_draw = &procedural_overlay_draw,
+        .block_highlight_draw = &highlight_draw,
+    });
+    nc_renderer_chunk_opaque_draw_vec_fini(&app->chunk_opaque_draws);
+    if (!success) {
         goto error;
     }
 

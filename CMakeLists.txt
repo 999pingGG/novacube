@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C VERSION 0.8.0.2 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C VERSION 0.9.0.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
@@ -13,14 +13,16 @@ set(NC_SOURCES
         libs/cvkm/cvkm.h
         libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
+        src/block_model_mesher.c
         src/camera.c
         src/cvar.c
         src/error_handling.c
         src/gui.c
+        src/main.c
+        src/mesher.c
         src/renderer.c
         src/string_builder.c
-        src/terrain.c
-        src/main.c)
+        src/terrain.c)
 
 if(ANDROID)
     add_library(novacube SHARED ${NC_SOURCES})
@@ -39,8 +41,26 @@ target_link_libraries(novacube PRIVATE SDL3::SDL3)
 find_package(Vulkan REQUIRED COMPONENTS glslc)
 target_include_directories(novacube PRIVATE ${Vulkan_INCLUDE_DIRS})
 
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH_LOWER)
+
+if(ARCH_LOWER MATCHES "arm" OR ARCH_LOWER MATCHES "aarch64")
+    message(STATUS "Target Architecture: ARM")
+    set(TARGET_ARM TRUE)
+elseif(ARCH_LOWER MATCHES "x86" OR ARCH_LOWER MATCHES "amd64" OR ARCH_LOWER MATCHES "i386")
+    message(STATUS "Target Architecture: x86/x64")
+    set(TARGET_X86 TRUE)
+else()
+    message(WARNING "Unknown architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 if(MSVC)
+    target_compile_definitions(novacube PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_options(novacube PRIVATE /W4 /WX /Zc:preprocessor)
+    if(TARGET_X86)
+        target_compile_options(novacube PRIVATE /arch:AVX2)
+    elseif(TARGET_ARM)
+        target_compile_options(novacube PRIVATE /arch:VFPv4)
+    endif()
 else()
     target_compile_options(novacube PRIVATE
             -Wall
@@ -48,6 +68,9 @@ else()
             -Wpedantic
             -Werror
             -Wno-gnu-zero-variadic-macro-arguments)
+    if(TARGET_X86)
+        target_compile_options(novacube PRIVATE -march=haswell)
+    endif()
 endif()
 
 target_include_directories(novacube PRIVATE include libs/cvkm libs/nuklear libs/tds/include libs/rapidhash)

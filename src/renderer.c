@@ -107,14 +107,14 @@ typedef struct nc_renderer_t {
     vkm_usvec2 viewport;
     bool foreground;
 
-    SDL_GPUGraphicsPipeline* opaque_pipeline;
+    SDL_GPUGraphicsPipeline* chunk_pipeline;
     SDL_GPUGraphicsPipeline* gui_pipeline;
     SDL_GPUGraphicsPipeline* procedural_overlay_invert_pipeline;
     SDL_GPUGraphicsPipeline* procedural_overlay_stick_pipeline;
     SDL_GPUGraphicsPipeline* outline_block_highlight_pipeline;
     SDL_GPUGraphicsPipeline* vignette_block_highlight_pipeline;
     SDL_GPUGraphicsPipeline* plasma_block_highlight_pipeline;
-    SDL_GPUSampler* opaque_sampler;
+    SDL_GPUSampler* chunk_sampler;
     SDL_GPUSampler* gui_sampler;
     nc_renderer_texture_t* procedural_overlay_crosshair_texture;
 
@@ -133,6 +133,16 @@ typedef struct nc_renderer_t {
     SDL_GPUTexture* frame_swapchain_texture;
     uint64_t frame_id;
 } nc_renderer_t;
+
+typedef struct nc__renderer_chunk_uniforms_t {
+    vkm_mat4 view_projection;
+    vkm_vec3 position;
+} nc__renderer_chunk_uniforms_t;
+
+#define TDS_IMPLEMENT
+#define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
+#define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
+#include <tds/vector.h>
 
 static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_t required, const uint32_t minimum) {
     uint32_t capacity = current ? current : minimum;
@@ -154,10 +164,11 @@ static void nc__renderer_free_texture_file_data(nc__renderer_texture_file_data_t
 }
 
 static SDL_GPUShader* nc__renderer_load_shader(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     const char* path,
     const SDL_GPUShaderStage stage,
     const Uint32 sampler_count,
+    const Uint32 storage_buffer_count,
     const Uint32 uniform_buffer_count
 ) {
     void* code = NULL;
@@ -178,6 +189,7 @@ static SDL_GPUShader* nc__renderer_load_shader(
         .format = SDL_GPU_SHADERFORMAT_SPIRV,
         .stage = stage,
         .num_samplers = sampler_count,
+        .num_storage_buffers = storage_buffer_count,
         .num_uniform_buffers = uniform_buffer_count,
 #ifndef NDEBUG
         .props = props,
@@ -196,7 +208,7 @@ error:
     return NULL;
 }
 
-static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
+static void nc__renderer_destroy_texture_object(const nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
     if (!texture) {
         return;
     }
@@ -522,7 +534,7 @@ error:
 #endif
 
 static nc_renderer_texture_t* nc__renderer_create_texture_object(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     const SDL_GPUTextureFormat format,
     const int16_t width,
     const int16_t height,
@@ -559,32 +571,35 @@ error:
     return NULL;
 }
 
-static void nc__renderer_draw_opaque(
-    nc_renderer_t* renderer,
+static void nc__renderer_draw_chunk_opaque(
+    const nc_renderer_t* renderer,
     SDL_GPURenderPass* render_pass,
-    const nc_renderer_opaque_draw_t* draw
+    const nc_renderer_chunk_opaque_draw_t* draw
 ) {
-    if (draw->instance_count == 0) {
+    if (draw->vertex_count == 0) {
         return;
     }
 
     NC_ASSERT(draw->texture->is_array);
 
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->opaque_pipeline);
-    SDL_BindGPUVertexBuffers(render_pass, 0, &(SDL_GPUBufferBinding){
-        .buffer = draw->instance_buffer->gpu_buffer,
-        .offset = 0,
-    }, 1);
+    // Quads are expanded into triangle-list vertices in the vertex shader.
+    SDL_BindGPUGraphicsPipeline(render_pass, renderer->chunk_pipeline);
+    SDL_BindGPUVertexStorageBuffers(render_pass, 0, &draw->chunk_buffer->gpu_buffer, 1);
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &draw->face_data_buffer->gpu_buffer, 1);
     SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
         .texture = draw->texture->gpu_texture,
-        .sampler = renderer->opaque_sampler,
+        .sampler = renderer->chunk_sampler,
     }, 1);
-    SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, draw->view_projection, sizeof(*draw->view_projection));
-    SDL_DrawGPUPrimitives(render_pass, 36, draw->instance_count, 0, 0);
+    const nc__renderer_chunk_uniforms_t uniforms = {
+        .view_projection = *draw->view_projection,
+        .position = draw->position,
+    };
+    SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, &uniforms, sizeof(uniforms));
+    SDL_DrawGPUPrimitives(render_pass, draw->vertex_count, 1, 0, 0);
 }
 
 static void nc__renderer_draw_block_highlight(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     SDL_GPURenderPass* render_pass,
     const nc_renderer_block_highlight_draw_t* draw
 ) {
@@ -632,7 +647,7 @@ static void nc__renderer_draw_block_highlight(
 }
 
 static void nc__renderer_draw_overlay(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     SDL_GPURenderPass* render_pass,
     const nc_renderer_overlay_draw_t* draw
 ) {
@@ -675,7 +690,7 @@ static void nc__renderer_draw_overlay(
 }
 
 static void nc__renderer_draw_procedural_overlay(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     SDL_GPURenderPass* render_pass,
     const nc_renderer_procedural_overlay_draw_t* draw
 ) {
@@ -839,15 +854,15 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     });
     NC_CHECK_SDL_RESULT(result->transfer_buffer);
 
-    result->opaque_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
+    result->chunk_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
         .min_filter = SDL_GPU_FILTER_NEAREST,
         .mag_filter = SDL_GPU_FILTER_NEAREST,
         .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
-        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
-        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
-        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
+        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
     });
-    NC_CHECK_SDL_RESULT(result->opaque_sampler);
+    NC_CHECK_SDL_RESULT(result->chunk_sampler);
 
     result->gui_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
         .min_filter = SDL_GPU_FILTER_NEAREST,
@@ -861,40 +876,23 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
 
     vertex_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/cube-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
             SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
             0,
             1);
     fragment_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/cube-frag.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
-            1,
-            0);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the opaque shaders.");
+            0,
+            0,
+            1);
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the outline block highlight shaders.");
 
     SDL_GPUGraphicsPipelineCreateInfo graphics_pipeline_create_info = {
         .vertex_shader = vertex_shader,
         .fragment_shader = fragment_shader,
-        .vertex_input_state = {
-            .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
-                {
-                    .slot = 0,
-                    .pitch = 4,
-                    .input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE,
-                },
-            },
-            .num_vertex_buffers = 1,
-            .vertex_attributes = (SDL_GPUVertexAttribute[]){
-                {
-                    .location = 0,
-                    .buffer_slot = 0,
-                    .format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4,
-                    .offset = 0,
-                },
-            },
-            .num_vertex_attributes = 1,
-        },
         .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         .rasterizer_state = {
             .fill_mode = SDL_GPU_FILLMODE_FILL,
@@ -905,13 +903,24 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
         .depth_stencil_state = {
             .compare_op = SDL_GPU_COMPAREOP_LESS,
             .enable_depth_test = true,
-            .enable_depth_write = true,
+            // Disabling depth write here *almost* doesn't matter since the block highlight is *almost* the same size as the block.
+            // It would be near unnoticeable. But if the highlight is ever of a larger scale, we don't want it occluding stuff.
+            .enable_depth_write = false,
             .enable_stencil_test = false,
         },
         .target_info = {
             .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
                 {
                     .format = result->swapchain_format,
+                    .blend_state = {
+                        .enable_blend = true,
+                        .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                        .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+                        .color_blend_op = SDL_GPU_BLENDOP_ADD,
+                        .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
+                        .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+                        .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
+                    },
                 },
             },
             .num_color_targets = 1,
@@ -919,31 +928,128 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             .has_depth_stencil_target = true,
         },
     };
-    result->opaque_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->opaque_pipeline);
+    result->outline_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
+    NC_CHECK_SDL_RESULT(result->outline_block_highlight_pipeline);
+
+    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+
+    fragment_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0,
+            0,
+            1);
+    NC_CHECK_RESULT(fragment_shader, "Failed to load the vignette block highlight shader.");
+
+    graphics_pipeline_create_info.fragment_shader = fragment_shader;
+    result->vignette_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
+    NC_CHECK_SDL_RESULT(result->vignette_block_highlight_pipeline);
+
+    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+
+    fragment_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0,
+            0,
+            1);
+    NC_CHECK_RESULT(fragment_shader, "Failed to load the plasma block highlight shader.");
+
+    graphics_pipeline_create_info.fragment_shader = fragment_shader;
+    result->plasma_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
+    NC_CHECK_SDL_RESULT(result->plasma_block_highlight_pipeline);
 
     SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
     SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
 
     vertex_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
             SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
+            1,
+            1);
+    fragment_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-frag.spv",
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            1,
+            1,
+            0);
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the chunk shaders.");
+
+    graphics_pipeline_create_info.vertex_shader = vertex_shader;
+    graphics_pipeline_create_info.fragment_shader = fragment_shader;
+    graphics_pipeline_create_info.depth_stencil_state.enable_depth_write = true;
+    graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
+        {
+            .format = result->swapchain_format,
+            .blend_state.enable_blend = false,
+        },
+    };
+    result->chunk_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
+    NC_CHECK_SDL_RESULT(result->chunk_pipeline);
+
+    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
+    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
+
+    vertex_shader = nc__renderer_load_shader(
+            result,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
+            SDL_GPU_SHADERSTAGE_VERTEX,
+            0,
             0,
             1);
     fragment_shader = nc__renderer_load_shader(
             result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
+            1,
             0,
-            1);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the outline block highlight shaders.");
+            0);
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the GUI shaders.");
 
     graphics_pipeline_create_info.vertex_shader = vertex_shader;
     graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    // Disabling depth write here *almost* doesn't matter since the block highlight is *almost* the same size as the block.
-    // It would be near unnoticeable. But if the highlight is ever of a larger scale, we don't want it occluding stuff.
-    graphics_pipeline_create_info.depth_stencil_state.enable_depth_write = false;
+    graphics_pipeline_create_info.vertex_input_state.vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
+        {
+            .slot = 0,
+            .pitch = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
+            .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
+        }
+    };
+    graphics_pipeline_create_info.vertex_input_state.num_vertex_buffers = 1;
+    graphics_pipeline_create_info.vertex_input_state.vertex_attributes = (SDL_GPUVertexAttribute[]){
+            {
+                .location = 0,
+                .buffer_slot = 0,
+                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+                .offset = 0,
+            },
+            {
+                .location = 1,
+                .buffer_slot = 0,
+                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+                .offset = sizeof(vkm_vec2),
+            },
+            {
+                .location = 2,
+                .buffer_slot = 0,
+                .format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+                .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
+            },
+    };
+    graphics_pipeline_create_info.vertex_input_state.num_vertex_attributes = 3;
+    // Overlay geometry comes from UI batches with mixed winding, so keep culling disabled here.
+    graphics_pipeline_create_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    graphics_pipeline_create_info.depth_stencil_state = (SDL_GPUDepthStencilState){
+        .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+        .enable_depth_test = false,
+        .enable_depth_write = false,
+        .enable_stencil_test = false,
+    };
     graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
         {
             .format = result->swapchain_format,
@@ -957,91 +1063,6 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
                 .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
             },
         },
-    };
-    result->outline_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->outline_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            0,
-            1);
-    NC_CHECK_RESULT(fragment_shader, "Failed to load the vignette block highlight shader.");
-
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    result->vignette_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->vignette_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-
-    fragment_shader = nc__renderer_load_shader(
-        result,
-        NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
-        SDL_GPU_SHADERSTAGE_FRAGMENT,
-        0,
-        1);
-    NC_CHECK_RESULT(fragment_shader, "Failed to load the plasma block highlight shader.");
-
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    result->plasma_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->plasma_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
-
-    vertex_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
-            SDL_GPU_SHADERSTAGE_VERTEX,
-            0,
-            1);
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            1,
-            0);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the GUI shaders.");
-
-    graphics_pipeline_create_info.vertex_shader = vertex_shader;
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    graphics_pipeline_create_info.vertex_input_state.vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
-        {
-            .slot = 0,
-            .pitch = sizeof(float) * 4 + sizeof(uint8_t) * 4,
-            .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
-        }
-    };
-    graphics_pipeline_create_info.vertex_input_state.vertex_attributes = (SDL_GPUVertexAttribute[]){
-            {
-                .location = 0,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                .offset = 0,
-            },
-            {
-                .location = 1,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                .offset = sizeof(float) * 2,
-            },
-            {
-                .location = 2,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
-                .offset = sizeof(float) * 4,
-            },
-    };
-    graphics_pipeline_create_info.vertex_input_state.num_vertex_attributes = 3;
-    graphics_pipeline_create_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-    graphics_pipeline_create_info.depth_stencil_state = (SDL_GPUDepthStencilState){
-        .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
-        .enable_depth_test = false,
-        .enable_depth_write = false,
-        .enable_stencil_test = false,
     };
     result->gui_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
     NC_CHECK_SDL_RESULT(result->gui_pipeline);
@@ -1060,12 +1081,14 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             SDL_GPU_SHADERSTAGE_VERTEX,
             0,
+            0,
             0);
     fragment_shader = nc__renderer_load_shader(
             result,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
             1,
+            0,
             1);
     NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the procedural overlay invert shaders.");
 
@@ -1085,6 +1108,8 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             },
         },
     };
+    graphics_pipeline_create_info.vertex_input_state.num_vertex_buffers = 0;
+    graphics_pipeline_create_info.vertex_input_state.num_vertex_attributes = 0;
     result->procedural_overlay_invert_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
     NC_CHECK_SDL_RESULT(result->procedural_overlay_invert_pipeline);
 
@@ -1094,6 +1119,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             result,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
             SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0,
             0,
             1);
     NC_CHECK_RESULT(fragment_shader, "Failed to load the procedural overlay stick shader.");
@@ -1219,6 +1245,7 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
     static const uint8_t nc_to_sdl_usage[] = {
         [NC_RENDERER_BUFFER_USAGE_VERTEX] = SDL_GPU_BUFFERUSAGE_VERTEX,
         [NC_RENDERER_BUFFER_USAGE_INDEX] = SDL_GPU_BUFFERUSAGE_INDEX,
+        [NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ] = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
     };
 
     NC_ASSERT(usage > 0 && usage <= NC_RENDERER_BUFFER_USAGE_COUNT);
@@ -1422,8 +1449,9 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             });
     NC_CHECK_SDL_RESULT(render_pass);
 
-    for (uint32_t i = 0; i < frame->opaque_draw_count; i++) {
-        nc__renderer_draw_opaque(renderer, render_pass, &frame->opaque_draws[i]);
+    for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
+        const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
+        nc__renderer_draw_chunk_opaque(renderer, render_pass, &draw);
     }
     nc__renderer_draw_block_highlight(renderer, render_pass, frame->block_highlight_draw);
     for (uint32_t i = 0; i < frame->overlay_draw_count; i++) {
@@ -1476,7 +1504,7 @@ void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* r
         const vkm_usvec2 window_size = nc_renderer_get_window_size(renderer);
         *rect = (SDL_Rect){ .x = 0, .y = 0, .w = window_size.x, .h = window_size.y };
     }
-    SDL_free(windows);
+    SDL_free((void*)windows);
 }
 
 void nc_renderer_fini(nc_renderer_t* renderer) {
@@ -1497,12 +1525,12 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_stick_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_invert_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->gui_pipeline);
+        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->chunk_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->plasma_block_highlight_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->vignette_block_highlight_pipeline);
         SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->outline_block_highlight_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->opaque_pipeline);
+        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->chunk_sampler);
         SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->gui_sampler);
-        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->opaque_sampler);
         SDL_ReleaseGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
         SDL_ReleaseGPUTexture(renderer->gpu_device, renderer->depth_texture);
         SDL_ReleaseWindowFromGPUDevice(renderer->gpu_device, renderer->window);
