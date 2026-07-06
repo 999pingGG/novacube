@@ -8,8 +8,11 @@ A guide for [coding agents](https://agents.md/).
   headers and `nc__` (double underscore) for static, private items.
 - `typedef` all structs.
 - Use 4-space indentation normally and 8-space indentation for continuations.
-- Never delete code comments. You may only improve them. As an AI model, you might not need them,
-  but flesh-and-bone engineers do need them. How primitive, isn't it?
+- Don't delete code comments, unless they're outdated or they're a "TODO" or "FIXME" that you have fixed. You may only
+  improve them. As an AI model, you might not need them, but flesh-and-bone engineers do need them. How primitive,
+  isn't it?
+- When passing and returning structs > 8 bytes, prefer to do it with pointers.
+- Use a 120 column limit.
 
 ## Testing
 
