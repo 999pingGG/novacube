@@ -71,9 +71,5 @@
 #endif
 #endif
 
-#ifndef TDS_INITIAL_CAPACITY
-#define TDS_INITIAL_CAPACITY 4
-#endif
-
 #define TDS_FUNCTION(name) TDS_JOIN3(TDS_TYPE, _, name)
 #endif

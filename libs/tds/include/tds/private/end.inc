@@ -5,6 +5,7 @@
 #undef TDS_KEY_T
 #undef TDS_VALUE_T
 #undef TDS_SIZE_T
+#undef TDS_INITIAL_CAPACITY
 #undef TDS_HASH_KEY
 #undef TDS_KEY_EQUALS
 #undef TDS_VALUE_EQUALS
