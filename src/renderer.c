@@ -189,7 +189,8 @@ typedef struct nc_renderer_t {
     VkCommandBuffer frame_command_buffer;
     VkFence frame_fence;
     VkSemaphore image_available_semaphore;
-    VkSemaphore render_finished_semaphore;
+    VkSemaphore* render_finished_semaphores;
+    bool frame_in_progress;
     bool frame_fence_pending;
     bool frame_has_swapchain_image;
     uint32_t frame_swapchain_image_index;
@@ -297,17 +298,14 @@ static void nc__renderer_free_texture_file_data(nc__renderer_texture_file_data_t
     *data = (nc__renderer_texture_file_data_t){ 0 };
 }
 
-static bool nc__renderer_wait_idle(nc_renderer_t* renderer) {
+static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
     if (!renderer->device) {
-        return true;
+        return;
     }
 
-    NC__CHECK_VK_RESULT(vkDeviceWaitIdle(renderer->device));
+    vkDeviceWaitIdle(renderer->device);
+    renderer->frame_in_progress = false;
     renderer->frame_fence_pending = false;
-    return true;
-
-error:
-    return false;
 }
 
 static void nc__renderer_destroy_retired_transfer_buffers(nc_renderer_t* renderer) {
@@ -392,7 +390,7 @@ static bool nc__renderer_grow_transfer_buffer(nc_renderer_t* renderer, const uin
         NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, old_allocation, 0, renderer->transfer_size));
     }
 
-    if (renderer->frame_command_buffer || renderer->frame_fence_pending) {
+    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
         nc__renderer_retire_transfer_buffer(renderer, old_buffer, old_allocation);
     } else if (old_buffer) {
         vmaDestroyBuffer(renderer->allocator, old_buffer, old_allocation);
@@ -916,9 +914,39 @@ error:
     return false;
 }
 
+static void nc__renderer_destroy_present_semaphores(nc_renderer_t* renderer) {
+    if (renderer->render_finished_semaphores) {
+        for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+            vkDestroySemaphore(renderer->device, renderer->render_finished_semaphores[i], NULL);
+        }
+        free(renderer->render_finished_semaphores);
+        renderer->render_finished_semaphores = NULL;
+    }
+}
+
+static bool nc__renderer_create_present_semaphores(nc_renderer_t* renderer) {
+    renderer->render_finished_semaphores = calloc(
+            renderer->swapchain_image_count,
+            sizeof(*renderer->render_finished_semaphores));
+    NC_CHECK_RESULT(renderer->render_finished_semaphores, "Failed to allocate Vulkan present semaphores.");
+    for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+        NC__CHECK_VK_RESULT(vkCreateSemaphore(
+                renderer->device,
+                &(VkSemaphoreCreateInfo){ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO },
+                NULL,
+                &renderer->render_finished_semaphores[i]));
+    }
+    return true;
+
+error:
+    nc__renderer_destroy_present_semaphores(renderer);
+    return false;
+}
+
 static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
     nc__renderer_destroy_framebuffers(renderer);
     nc__renderer_destroy_depth_image(renderer);
+    nc__renderer_destroy_present_semaphores(renderer);
 
     if (renderer->swapchain_image_views) {
         for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
@@ -1034,7 +1062,9 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     if (!renderer->render_pass && !nc__renderer_create_render_pass(renderer)) {
         goto error;
     }
-    if (!nc__renderer_create_depth_image(renderer) || !nc__renderer_create_framebuffers(renderer)) {
+    if (!nc__renderer_create_present_semaphores(renderer) ||
+            !nc__renderer_create_depth_image(renderer) ||
+            !nc__renderer_create_framebuffers(renderer)) {
         goto error;
     }
 
@@ -1050,9 +1080,7 @@ error:
 }
 
 static bool nc__renderer_recreate_swapchain(nc_renderer_t* renderer) {
-    if (!nc__renderer_wait_idle(renderer)) {
-        return false;
-    }
+    nc__renderer_wait_idle(renderer);
 
     if (renderer->surface_dirty && !nc__renderer_create_surface(renderer)) {
         return false;
@@ -1514,6 +1542,15 @@ static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer) {
             },
             NULL,
             &renderer->command_pool));
+    NC__CHECK_VK_RESULT(vkAllocateCommandBuffers(
+            renderer->device,
+            &(VkCommandBufferAllocateInfo){
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = renderer->command_pool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1,
+            },
+            &renderer->frame_command_buffer));
     NC__CHECK_VK_RESULT(vkCreateFence(
             renderer->device,
             &(VkFenceCreateInfo){
@@ -1527,11 +1564,6 @@ static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer) {
             &(VkSemaphoreCreateInfo){ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO },
             NULL,
             &renderer->image_available_semaphore));
-    NC__CHECK_VK_RESULT(vkCreateSemaphore(
-            renderer->device,
-            &(VkSemaphoreCreateInfo){ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO },
-            NULL,
-            &renderer->render_finished_semaphore));
     return true;
 
 error:
@@ -2114,7 +2146,7 @@ static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_rend
         return;
     }
 
-    if (!renderer->frame_command_buffer && renderer->frame_fence_pending) {
+    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
         nc__renderer_wait_idle(renderer);
     }
 
@@ -2483,8 +2515,6 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
 }
 
 bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
-    NC_ASSERT(!renderer->frame_command_buffer);
-
     renderer->frame_id++;
     NC__CHECK_VK_RESULT(vkWaitForFences(renderer->device, 1, &renderer->frame_fence, VK_TRUE, UINT64_MAX));
     renderer->frame_fence_pending = false;
@@ -2502,23 +2532,17 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
         goto error;
     }
 
-    NC__CHECK_VK_RESULT(vkAllocateCommandBuffers(
-            renderer->device,
-            &(VkCommandBufferAllocateInfo){
-                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                .commandPool = renderer->command_pool,
-                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                .commandBufferCount = 1,
-            },
-            &renderer->frame_command_buffer));
+    vkResetCommandBuffer(renderer->frame_command_buffer, 0);
     NC__CHECK_VK_RESULT(vkBeginCommandBuffer(
             renderer->frame_command_buffer,
             &(VkCommandBufferBeginInfo){
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                 .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             }));
+    renderer->frame_in_progress = true;
 
     renderer->frame_has_swapchain_image = false;
+    renderer->frame_swapchain_image_index = 0;
     if (!renderer->foreground ||
             renderer->swapchain == VK_NULL_HANDLE ||
             renderer->viewport.x == 0 ||
@@ -2559,10 +2583,6 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     return true;
 
 error:
-    if (renderer->frame_command_buffer) {
-        vkFreeCommandBuffers(renderer->device, renderer->command_pool, 1, &renderer->frame_command_buffer);
-        renderer->frame_command_buffer = VK_NULL_HANDLE;
-    }
     return false;
 }
 
@@ -2581,6 +2601,9 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     NC__CHECK_VK_RESULT(vkResetFences(renderer->device, 1, &renderer->frame_fence));
 
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSemaphore* render_finished_semaphore = renderer->frame_has_swapchain_image
+            ? &renderer->render_finished_semaphores[renderer->frame_swapchain_image_index]
+            : NULL;
     const VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
@@ -2589,7 +2612,7 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
         .commandBufferCount = 1,
         .pCommandBuffers = &renderer->frame_command_buffer,
         .signalSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
-        .pSignalSemaphores = renderer->frame_has_swapchain_image ? &renderer->render_finished_semaphore : NULL,
+        .pSignalSemaphores = render_finished_semaphore,
     };
     NC__CHECK_VK_RESULT(vkQueueSubmit(renderer->queue, 1, &submit_info, renderer->frame_fence));
     renderer->frame_fence_pending = true;
@@ -2600,7 +2623,7 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
                 &(VkPresentInfoKHR){
                     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                     .waitSemaphoreCount = 1,
-                    .pWaitSemaphores = &renderer->render_finished_semaphore,
+                    .pWaitSemaphores = render_finished_semaphore,
                     .swapchainCount = 1,
                     .pSwapchains = &renderer->swapchain,
                     .pImageIndices = &renderer->frame_swapchain_image_index,
@@ -2608,24 +2631,19 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
         if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
             renderer->surface_dirty = true;
             renderer->swapchain_dirty = true;
-        } else if (present_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        } else if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
             renderer->swapchain_dirty = true;
-#ifndef ANDROID
-        } else if (present_result == VK_SUBOPTIMAL_KHR) {
-            renderer->swapchain_dirty = true;
-#endif
         } else {
             NC__CHECK_VK_RESULT(present_result);
         }
     }
 
-    vkFreeCommandBuffers(renderer->device, renderer->command_pool, 1, &renderer->frame_command_buffer);
-    renderer->frame_command_buffer = VK_NULL_HANDLE;
+    renderer->frame_in_progress = false;
     renderer->frame_has_swapchain_image = false;
     return true;
 
 error:
-    renderer->frame_command_buffer = VK_NULL_HANDLE;
+    renderer->frame_in_progress = false;
     return false;
 }
 
@@ -2694,7 +2712,7 @@ void nc_renderer_destroy_buffer(nc_renderer_t* renderer, nc_renderer_buffer_t* b
         return;
     }
 
-    if (!renderer->frame_command_buffer && renderer->frame_fence_pending) {
+    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
         nc__renderer_wait_idle(renderer);
     }
 
@@ -2971,20 +2989,19 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
     if (renderer->device) {
         nc__renderer_wait_idle(renderer);
 
+        nc__renderer_destroy_descriptor_state(renderer);
         nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
         nc_renderer_destroy_buffer(renderer, renderer->dummy_storage_buffer);
 
         nc__renderer_destroy_pipelines(renderer);
         vkDestroySampler(renderer->device, renderer->chunk_sampler, NULL);
         vkDestroySampler(renderer->device, renderer->gui_sampler, NULL);
-        nc__renderer_destroy_descriptor_state(renderer);
         nc__renderer_destroy_swapchain(renderer);
         vkDestroyRenderPass(renderer->device, renderer->render_pass, NULL);
         nc__renderer_destroy_retired_transfer_buffers(renderer);
         if (renderer->transfer_buffer) {
             vmaDestroyBuffer(renderer->allocator, renderer->transfer_buffer, renderer->transfer_allocation);
         }
-        vkDestroySemaphore(renderer->device, renderer->render_finished_semaphore, NULL);
         vkDestroySemaphore(renderer->device, renderer->image_available_semaphore, NULL);
         vkDestroyFence(renderer->device, renderer->frame_fence, NULL);
         vkDestroyCommandPool(renderer->device, renderer->command_pool, NULL);
