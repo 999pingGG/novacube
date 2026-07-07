@@ -312,7 +312,7 @@ static void nc__terrain_initialize_test_block_models(nc_terrain_t* terrain) {
         }
     }
     terrain->block_type_model_ids[NC_BLOCK_TYPE_DIRT] =
-            nc_mesher_register_block_model(terrain->mesher, half_cube_data, dirt_textures);
+            nc_mesher_register_block_model(terrain->mesher, full_cube_data, dirt_textures);
 
     uint16_t ramp_data[NC_MESHER_INTS_PER_BLOCK_MODEL] = { 0 };
     for (int z = 0; z < NC_MESHER_BLOCK_MODEL_LENGTH; z++) {
@@ -325,13 +325,13 @@ static void nc__terrain_initialize_test_block_models(nc_terrain_t* terrain) {
         }
     }
     terrain->block_type_model_ids[NC_BLOCK_TYPE_GRASS] =
-            nc_mesher_register_block_model(terrain->mesher, ramp_data, grass_textures);
+            nc_mesher_register_block_model(terrain->mesher, full_cube_data, grass_textures);
 }
 
 static bool nc__terrain_initialize_test_chunks(nc_terrain_t* terrain, nc_renderer_t* renderer) {
-    for (int z = 0; z < 3; z++) {
+    for (int z = -10; z < 10; z++) {
         for (int y = 0; y < 3; y++) {
-            for (int x = 0; x < 3; x++) {
+            for (int x = -10; x < 10; x++) {
                 if (!nc_terrain_load_or_replace_chunk(terrain, renderer, &(vkm_ivec3){ { x, y, z } }, NULL)) {
                     return false;
                 }
@@ -349,52 +349,27 @@ static void nc__terrain_set_test_block(const nc_terrain_t* terrain, const vkm_iv
 }
 
 static void nc__terrain_initialize_test_blocks(const nc_terrain_t* terrain) {
-    const vkm_ivec3 origin = { { NC_MESHER_CHUNK_SIZE, 0, NC_MESHER_CHUNK_SIZE } };
+    for (int z = -10 * NC_MESHER_CHUNK_SIZE; z < 9 * NC_MESHER_CHUNK_SIZE; z++) {
+        for (int x = -10 * NC_MESHER_CHUNK_SIZE; x < 9 * NC_MESHER_CHUNK_SIZE; x++) {
+            const int height = (int)(((15.0f + vkm_sin((float)z / 3.0f) * 3.0f) + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
 
-    for (int z = -10; z < 28; z++) {
-        for (int x = -10; x < 28; x++) {
-            nc__terrain_set_test_block(
-                    terrain,
-                    (vkm_ivec3){ { origin.x + x, origin.y, origin.z + z } },
-                    terrain->block_type_model_ids[NC_BLOCK_TYPE_STONE]);
+            for (int y = 0; y < height; y++) {
+                int type;
+                if (y == height - 1) {
+                    type = NC_BLOCK_TYPE_GRASS;
+                } else if (y > height - 5) {
+                    type = NC_BLOCK_TYPE_DIRT;
+                } else {
+                    type = NC_BLOCK_TYPE_STONE;
+                }
+
+                nc__terrain_set_test_block(
+                        terrain,
+                        (vkm_ivec3){ { x, y, z } },
+                        terrain->block_type_model_ids[type]);
+            }
         }
     }
-
-    for (int y = 1; y < 5; y++) {
-        nc__terrain_set_test_block(
-                terrain,
-                (vkm_ivec3){ { origin.x + 3, origin.y + y, origin.z + 3 } },
-                terrain->block_type_model_ids[NC_BLOCK_TYPE_STONE]);
-        nc__terrain_set_test_block(
-                terrain,
-                (vkm_ivec3){ { origin.x + 12, origin.y + y, origin.z + 3 } },
-                terrain->block_type_model_ids[NC_BLOCK_TYPE_STONE]);
-    }
-
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 5, origin.y + 1, origin.z + 5 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_DIRT]);
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 6, origin.y + 1, origin.z + 5 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_DIRT]);
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 7, origin.y + 1, origin.z + 5 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_GRASS]);
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 8, origin.y + 1, origin.z + 5 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_GRASS]);
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 9, origin.y + 1, origin.z + 6 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_DIRT]);
-    nc__terrain_set_test_block(
-            terrain,
-            (vkm_ivec3){ { origin.x + 10, origin.y + 1, origin.z + 6 } },
-            terrain->block_type_model_ids[NC_BLOCK_TYPE_GRASS]);
 }
 
 nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {

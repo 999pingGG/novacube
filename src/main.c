@@ -78,7 +78,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     *app_state = app;
 
     app->camera = (nc_camera_t){
-        .position = { { 24.0f, 4.0f, 12.0f } },
+        .position = { { 0.0f, 20.0f, 0.0f } },
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
