@@ -6,7 +6,8 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
+#define VOLK_IMPLEMENTATION
+#include <Volk/volk.h>
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
@@ -219,57 +220,63 @@ typedef struct nc_renderer_t {
 #include <tds/vector.h>
 
 static const char* nc__renderer_vk_result_string(const VkResult result) {
+#define NC__VULKAN_ERROR_CASE(x) case x: return #x
     switch (result) {
-        case VK_SUCCESS:
-            return "VK_SUCCESS";
-        case VK_NOT_READY:
-            return "VK_NOT_READY";
-        case VK_TIMEOUT:
-            return "VK_TIMEOUT";
-        case VK_EVENT_SET:
-            return "VK_EVENT_SET";
-        case VK_EVENT_RESET:
-            return "VK_EVENT_RESET";
-        case VK_INCOMPLETE:
-            return "VK_INCOMPLETE";
-        case VK_ERROR_OUT_OF_HOST_MEMORY:
-            return "VK_ERROR_OUT_OF_HOST_MEMORY";
-        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-            return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
-        case VK_ERROR_INITIALIZATION_FAILED:
-            return "VK_ERROR_INITIALIZATION_FAILED";
-        case VK_ERROR_DEVICE_LOST:
-            return "VK_ERROR_DEVICE_LOST";
-        case VK_ERROR_MEMORY_MAP_FAILED:
-            return "VK_ERROR_MEMORY_MAP_FAILED";
-        case VK_ERROR_LAYER_NOT_PRESENT:
-            return "VK_ERROR_LAYER_NOT_PRESENT";
-        case VK_ERROR_EXTENSION_NOT_PRESENT:
-            return "VK_ERROR_EXTENSION_NOT_PRESENT";
-        case VK_ERROR_FEATURE_NOT_PRESENT:
-            return "VK_ERROR_FEATURE_NOT_PRESENT";
-        case VK_ERROR_INCOMPATIBLE_DRIVER:
-            return "VK_ERROR_INCOMPATIBLE_DRIVER";
-        case VK_ERROR_TOO_MANY_OBJECTS:
-            return "VK_ERROR_TOO_MANY_OBJECTS";
-        case VK_ERROR_FORMAT_NOT_SUPPORTED:
-            return "VK_ERROR_FORMAT_NOT_SUPPORTED";
-        case VK_ERROR_FRAGMENTED_POOL:
-            return "VK_ERROR_FRAGMENTED_POOL";
-        case VK_ERROR_OUT_OF_POOL_MEMORY:
-            return "VK_ERROR_OUT_OF_POOL_MEMORY";
-        case VK_ERROR_SURFACE_LOST_KHR:
-            return "VK_ERROR_SURFACE_LOST_KHR";
-        case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR:
-            return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
-        case VK_SUBOPTIMAL_KHR:
-            return "VK_SUBOPTIMAL_KHR";
-        case VK_ERROR_OUT_OF_DATE_KHR:
-            return "VK_ERROR_OUT_OF_DATE_KHR";
+        NC__VULKAN_ERROR_CASE(VK_SUCCESS);
+        NC__VULKAN_ERROR_CASE(VK_NOT_READY);
+        NC__VULKAN_ERROR_CASE(VK_TIMEOUT);
+        NC__VULKAN_ERROR_CASE(VK_EVENT_SET);
+        NC__VULKAN_ERROR_CASE(VK_EVENT_RESET);
+        NC__VULKAN_ERROR_CASE(VK_INCOMPLETE);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_OUT_OF_HOST_MEMORY);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INITIALIZATION_FAILED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_DEVICE_LOST);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_MEMORY_MAP_FAILED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_LAYER_NOT_PRESENT);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_EXTENSION_NOT_PRESENT);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_FEATURE_NOT_PRESENT);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INCOMPATIBLE_DRIVER);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_TOO_MANY_OBJECTS);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_FRAGMENTED_POOL);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_UNKNOWN);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VALIDATION_FAILED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_OUT_OF_POOL_MEMORY);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_EXTERNAL_HANDLE);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_FRAGMENTATION);
+        NC__VULKAN_ERROR_CASE(VK_PIPELINE_COMPILE_REQUIRED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_NOT_PERMITTED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_SURFACE_LOST_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR);
+        NC__VULKAN_ERROR_CASE(VK_SUBOPTIMAL_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_OUT_OF_DATE_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INCOMPATIBLE_DISPLAY_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_SHADER_NV);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT);
+        NC__VULKAN_ERROR_CASE(VK_THREAD_IDLE_KHR);
+        NC__VULKAN_ERROR_CASE(VK_THREAD_DONE_KHR);
+        NC__VULKAN_ERROR_CASE(VK_OPERATION_DEFERRED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_OPERATION_NOT_DEFERRED_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_COMPRESSION_EXHAUSTED_EXT);
+        NC__VULKAN_ERROR_CASE(VK_INCOMPATIBLE_SHADER_BINARY_EXT);
+        NC__VULKAN_ERROR_CASE(VK_PIPELINE_BINARY_MISSING_KHR);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_NOT_ENOUGH_SPACE_KHR);
         default:
             return "unknown VkResult";
     }
 }
+#undef NC__VULKAN_ERROR_CASE
 
 static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_t required, const uint32_t minimum) {
     uint32_t capacity = current ? current : minimum;
@@ -550,6 +557,7 @@ static bool nc__renderer_create_instance(nc_renderer_t* renderer, const nc_rende
             },
             NULL,
             &renderer->instance));
+    volkLoadInstanceOnly(renderer->instance);
     return true;
 
 error:
@@ -584,6 +592,7 @@ static bool nc__renderer_create_device(nc_renderer_t* renderer) {
             },
             NULL,
             &renderer->device));
+    volkLoadDevice(renderer->device);
     vkGetDeviceQueue(renderer->device, renderer->queue_family_index, 0, &renderer->queue);
 
     NC__CHECK_VK_RESULT(vmaCreateAllocator(
@@ -2443,6 +2452,9 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     NC_CHECK_SDL_RESULT(sdl_result);
     sdl_result = SDL_Vulkan_LoadLibrary(NULL);
     NC_CHECK_SDL_RESULT(sdl_result);
+    SDL_FunctionPointer vk_get_instance_proc_addr = SDL_Vulkan_GetVkGetInstanceProcAddr();
+    NC_CHECK_SDL_RESULT(vk_get_instance_proc_addr);
+    volkInitializeCustom((PFN_vkGetInstanceProcAddr)vk_get_instance_proc_addr);
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
@@ -3012,7 +3024,9 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
     if (renderer->surface) {
         SDL_Vulkan_DestroySurface(renderer->instance, renderer->surface, NULL);
     }
-    vkDestroyInstance(renderer->instance, NULL);
+    if (renderer->instance) {
+        vkDestroyInstance(renderer->instance, NULL);
+    }
 
     free(renderer->retired_transfer_buffers);
     free(renderer->upload_ops);

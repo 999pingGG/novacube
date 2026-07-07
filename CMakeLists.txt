@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C CXX VERSION 0.10.0.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C CXX VERSION 0.10.1.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
@@ -43,33 +43,6 @@ target_link_libraries(novacube PRIVATE SDL3::SDL3)
 
 find_package(Vulkan REQUIRED COMPONENTS glslc)
 target_include_directories(novacube PRIVATE ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(novacube PRIVATE Vulkan::Vulkan)
-
-set(NC_VMA_SEARCH_PATHS ${Vulkan_INCLUDE_DIRS})
-if(DEFINED ENV{VULKAN_SDK})
-    list(APPEND NC_VMA_SEARCH_PATHS "$ENV{VULKAN_SDK}/Include")
-endif()
-file(GLOB NC_VMA_SDK_SEARCH_PATHS
-        "C:/VulkanSDK/1.4.335.0/Include"
-        "C:/VulkanSDK/1.4.335.0/Include/vma"
-        "C:/VulkanSDK/*/Include"
-        "C:/VulkanSDK/*/Include/vma")
-find_path(NC_VMA_INCLUDE_DIR
-        NAMES vk_mem_alloc.h
-        PATHS ${NC_VMA_SEARCH_PATHS} ${NC_VMA_SDK_SEARCH_PATHS}
-        PATH_SUFFIXES vma
-        NO_DEFAULT_PATH
-        NO_CMAKE_FIND_ROOT_PATH)
-if(NOT NC_VMA_INCLUDE_DIR)
-    find_path(NC_VMA_INCLUDE_DIR
-            NAMES vk_mem_alloc.h
-            PATH_SUFFIXES vma
-            NO_CMAKE_FIND_ROOT_PATH)
-endif()
-if(NOT NC_VMA_INCLUDE_DIR)
-    message(FATAL_ERROR "Could not find vk_mem_alloc.h. Install VMA or set VULKAN_SDK.")
-endif()
-target_include_directories(novacube PRIVATE ${NC_VMA_INCLUDE_DIR})
 
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH_LOWER)
 
@@ -98,15 +71,14 @@ else()
             -Wextra
             -Wpedantic
             -Werror
-            -Wno-gnu-zero-variadic-macro-arguments)
-    target_compile_options(novacube PRIVATE
+            -Wno-gnu-zero-variadic-macro-arguments
             $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
             $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
-    target_link_options(novacube PRIVATE -nostdlib++)
     if(TARGET_X86)
         target_compile_options(novacube PRIVATE -march=haswell)
     endif()
+    target_link_options(novacube PRIVATE -nostdlib++)
 endif()
 
 target_include_directories(novacube PRIVATE include libs/cvkm libs/nuklear libs/tds/include libs/rapidhash)
