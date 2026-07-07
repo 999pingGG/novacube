@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C CXX VERSION 0.10.2.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C CXX VERSION 0.10.2.1 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
@@ -82,7 +82,14 @@ else()
     target_link_options(novacube PRIVATE -nostdlib++)
 endif()
 
-target_include_directories(novacube PRIVATE include libs/cvkm libs/nuklear libs/tds/include libs/rapidhash)
+target_include_directories(novacube PRIVATE
+        include
+        libs/cvkm
+        libs/nuklear
+        libs/rapidhash
+        libs/tds/include
+        libs/vma
+        libs/volk)
 
 if(NOT ANDROID AND (WIN32 OR UNIX))
     add_custom_command(

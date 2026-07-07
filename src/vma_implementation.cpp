@@ -2,7 +2,9 @@
 #include <stdlib.h>
 
 #include <SDL3/SDL.h>
-#include <Volk/volk.h>
+#include <volk.h>
+
+#include <novacube/macros.h>
 
 #ifndef _MSC_VER
 void* operator new(size_t size) {
@@ -96,24 +98,6 @@ private:
 #define VMA_NULLABLE_NON_DISPATCHABLE
 #define VMA_NOT_NULL_NON_DISPATCHABLE
 #define VMA_IMPLEMENTATION
-#ifdef _MSC_VER
-#pragma warning(push, 0)
-#pragma warning(disable: 4127)
-#pragma warning(disable: 4189)
-#pragma warning(disable: 4324)
-#pragma warning(disable: 4505)
-#pragma warning(disable: 4701)
-#pragma warning(disable: 4703)
-#if __has_include(<vk_mem_alloc.h>)
+NC_IGNORE_ALL_WARNINGS_BEGIN
 #include <vk_mem_alloc.h>
-#else
-#include <vma/vk_mem_alloc.h>
-#endif
-#pragma warning(pop)
-#else
-#if __has_include(<vk_mem_alloc.h>)
-#include <vk_mem_alloc.h>
-#else
-#include <vma/vk_mem_alloc.h>
-#endif
-#endif
+NC_IGNORE_ALL_WARNINGS_END

@@ -17,7 +17,7 @@
 #define NC__DOUBLE_ROUNDING_UNIT 0.0000000000001
 
 // meh, just to relinquish "suggest braces around initialization of subobject"
-NC_IGNORE_ALL_WARNINGS_START
+NC_IGNORE_ALL_WARNINGS_BEGIN
 
 #define X(type, name, _1, _2, _3, _4, _5, ...) \
     static type nc__##name = { __VA_ARGS__ }; \

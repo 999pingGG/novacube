@@ -7,8 +7,9 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #define VOLK_IMPLEMENTATION
-#include <Volk/volk.h>
+#include <volk.h>
 
+#include <novacube/macros.h>
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #define VMA_VULKAN_VERSION 1001000
@@ -16,15 +17,12 @@
 #define VMA_NOT_NULL
 #define VMA_NULLABLE_NON_DISPATCHABLE
 #define VMA_NOT_NULL_NON_DISPATCHABLE
-#if __has_include(<vk_mem_alloc.h>)
+NC_IGNORE_ALL_WARNINGS_BEGIN
 #include <vk_mem_alloc.h>
-#else
-#include <vma/vk_mem_alloc.h>
-#endif
+NC_IGNORE_ALL_WARNINGS_END
 
 #include <novacube/build_info.h>
 #include <novacube/error_handling.h>
-#include <novacube/macros.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
 
@@ -242,13 +240,11 @@ static const char* nc__renderer_vk_result_string(const VkResult result) {
         NC__VULKAN_ERROR_CASE(VK_ERROR_FORMAT_NOT_SUPPORTED);
         NC__VULKAN_ERROR_CASE(VK_ERROR_FRAGMENTED_POOL);
         NC__VULKAN_ERROR_CASE(VK_ERROR_UNKNOWN);
-        NC__VULKAN_ERROR_CASE(VK_ERROR_VALIDATION_FAILED);
         NC__VULKAN_ERROR_CASE(VK_ERROR_OUT_OF_POOL_MEMORY);
         NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_EXTERNAL_HANDLE);
         NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
         NC__VULKAN_ERROR_CASE(VK_ERROR_FRAGMENTATION);
         NC__VULKAN_ERROR_CASE(VK_PIPELINE_COMPILE_REQUIRED);
-        NC__VULKAN_ERROR_CASE(VK_ERROR_NOT_PERMITTED);
         NC__VULKAN_ERROR_CASE(VK_ERROR_SURFACE_LOST_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR);
         NC__VULKAN_ERROR_CASE(VK_SUBOPTIMAL_KHR);
@@ -262,7 +258,6 @@ static const char* nc__renderer_vk_result_string(const VkResult result) {
         NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
-        NC__VULKAN_ERROR_CASE(VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT);
         NC__VULKAN_ERROR_CASE(VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT);
         NC__VULKAN_ERROR_CASE(VK_THREAD_IDLE_KHR);
         NC__VULKAN_ERROR_CASE(VK_THREAD_DONE_KHR);
@@ -270,9 +265,15 @@ static const char* nc__renderer_vk_result_string(const VkResult result) {
         NC__VULKAN_ERROR_CASE(VK_OPERATION_NOT_DEFERRED_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_COMPRESSION_EXHAUSTED_EXT);
+#ifndef ANDROID
+        // The Vulkan SDK included in my NDK doesn't have these...
+        NC__VULKAN_ERROR_CASE(VK_ERROR_VALIDATION_FAILED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_NOT_PERMITTED);
+        NC__VULKAN_ERROR_CASE(VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT);
         NC__VULKAN_ERROR_CASE(VK_INCOMPATIBLE_SHADER_BINARY_EXT);
         NC__VULKAN_ERROR_CASE(VK_PIPELINE_BINARY_MISSING_KHR);
         NC__VULKAN_ERROR_CASE(VK_ERROR_NOT_ENOUGH_SPACE_KHR);
+#endif
         default:
             return "unknown VkResult";
     }
