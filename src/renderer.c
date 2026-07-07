@@ -439,8 +439,9 @@ static bool nc__renderer_reserve_transfer_bytes(
 }
 
 static bool nc__renderer_physical_device_supports_extensions(const VkPhysicalDevice physical_device) {
-    uint32_t extension_count = 0;
     VkExtensionProperties* extensions = NULL;
+
+    uint32_t extension_count;
     NC__CHECK_VK_RESULT(vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, NULL));
 
     extensions = malloc(extension_count * sizeof(*extensions));
@@ -467,14 +468,16 @@ static bool nc__renderer_find_queue_family(
     const VkPhysicalDevice physical_device,
     uint32_t* out_queue_family_index
 ) {
-    uint32_t queue_family_count = 0;
+    VkQueueFamilyProperties* queue_families = NULL;
+
+    uint32_t queue_family_count;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, NULL);
 
-    VkQueueFamilyProperties* queue_families = malloc(queue_family_count * sizeof(*queue_families));
+    queue_families = malloc(queue_family_count * sizeof(*queue_families));
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families);
 
     for (uint32_t i = 0; i < queue_family_count; i++) {
-        VkBool32 present_supported = VK_FALSE;
+        VkBool32 present_supported;
         NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceSupportKHR(
                 physical_device,
                 i,
@@ -499,15 +502,38 @@ error:
     return false;
 }
 
-static bool nc__renderer_select_physical_device(nc_renderer_t* renderer) {
-    uint32_t physical_device_count = 0;
+VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physicalDevice) {
+    VkPhysicalDeviceMemoryProperties memoryProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+
+    VkDeviceSize total = 0;
+    for (uint32_t i = 0; i < memoryProperties.memoryHeapCount; ++i) {
+        VkMemoryHeap heap = memoryProperties.memoryHeaps[i];
+
+        // Check whether the heap is dedicated memory.
+        if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            total += heap.size;
+        }
+    }
+
+    return total;
+}
+
+static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const bool prefer_low_power) {
     VkPhysicalDevice* physical_devices = NULL;
+
+    uint32_t physical_device_count;
     NC__CHECK_VK_RESULT(vkEnumeratePhysicalDevices(renderer->instance, &physical_device_count, NULL));
     NC_CHECK_RESULT(physical_device_count > 0, "No Vulkan physical devices were found.");
 
     physical_devices = malloc(physical_device_count * sizeof(*physical_devices));
     NC__CHECK_VK_RESULT(vkEnumeratePhysicalDevices(renderer->instance, &physical_device_count, physical_devices));
 
+    const int selected_gpu = nc_cvar_get_selected_gpu();
+    const nc_gpu_memory_preference_t gpu_memory_preference = nc_cvar_get_gpu_memory_preference();
+
+    int highest_score = 0;
+    VkDeviceSize best_memory = 0;
     for (uint32_t i = 0; i < physical_device_count; i++) {
         VkPhysicalDeviceFeatures features;
         vkGetPhysicalDeviceFeatures(physical_devices[i], &features);
@@ -518,20 +544,77 @@ static bool nc__renderer_select_physical_device(nc_renderer_t* renderer) {
         }
 #endif
 
-        uint32_t queue_family_index = UINT32_MAX;
+        uint32_t queue_family_index;
         if (!nc__renderer_physical_device_supports_extensions(physical_devices[i]) ||
                 !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
             continue;
         }
 
-        renderer->physical_device = physical_devices[i];
-        renderer->queue_family_index = queue_family_index;
-        vkGetPhysicalDeviceProperties(renderer->physical_device, &renderer->physical_device_properties);
-        free(physical_devices);
-        return true;
+        VkPhysicalDeviceProperties physical_device_properties;
+        vkGetPhysicalDeviceProperties(physical_devices[i], &physical_device_properties);
+
+        if (selected_gpu == (int)i) {
+            // Insuperable GPU.
+            highest_score = 999;
+            renderer->physical_device = physical_devices[i];
+            renderer->queue_family_index = queue_family_index;
+            renderer->physical_device_properties = physical_device_properties;
+            break;
+        }
+
+        int current_score;
+        switch (physical_device_properties.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+                current_score = 1;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+                current_score = prefer_low_power ? 5 : 4;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+                current_score = prefer_low_power ? 4 : 5;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+                current_score = 3;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:
+                current_score = 2;
+                break;
+            default:
+                current_score = 0;
+                continue;
+        }
+
+        if (current_score > highest_score) {
+            // Prioritize a GPU of the preferred type.
+            highest_score = current_score;
+            renderer->physical_device = physical_devices[i];
+            renderer->queue_family_index = queue_family_index;
+            renderer->physical_device_properties = physical_device_properties;
+            best_memory = nc__renderer_get_vram_size(physical_devices[i]);
+        } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
+            const VkDeviceSize current_memory = nc__renderer_get_vram_size(physical_devices[i]);
+            const bool larger = current_memory > best_memory;
+            const bool smaller = current_memory < best_memory;
+            const bool preferred =
+                    larger && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_LARGER
+                    || smaller && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_SMALLER;
+
+            if (preferred) {
+                renderer->physical_device = physical_devices[i];
+                renderer->queue_family_index = queue_family_index;
+                renderer->physical_device_properties = physical_device_properties;
+                best_memory = current_memory;
+            }
+        }
     }
 
-    NC_SET_ERROR("No suitable Vulkan physical device was found.");
+    if (highest_score == 0) {
+        NC_SET_ERROR("No suitable Vulkan physical device was found.");
+        goto error;
+    }
+
+    free(physical_devices);
+    return true;
 
 error:
     free(physical_devices);
@@ -2461,7 +2544,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     if (!nc__renderer_create_instance(result) ||
             !nc__renderer_create_window(result, info) ||
             !nc__renderer_create_surface(result) ||
-            !nc__renderer_select_physical_device(result) ||
+            !nc__renderer_select_physical_device(result, info->prefer_low_power) ||
             !nc__renderer_create_device(result) ||
             !nc__renderer_create_descriptor_set_layouts(result) ||
             !nc__renderer_create_descriptor_pool(result) ||

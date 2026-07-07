@@ -11,7 +11,12 @@
     X(WINDOW, "window") \
     X(BORDERLESS, "borderless") \
     X(FULLSCREEN, "fullscreen") \
-    X(EXCLUSIVE_FULLSCREEN, "exclusive_fullscreen")
+    X(EXCLUSIVE_FULLSCREEN, "exclusive_fullscreen") \
+
+#define NC_GPU_MEMORY_PREFERENCE_TABLE(X) \
+    X(LARGER, "larger") \
+    X(SMALLER, "smaller") \
+    X(NONE, "none") \
 
 #define NC_TOUCH_MOVEMENT_MODE_TABLE(X) \
     X(ANALOG, "analog") \
@@ -31,6 +36,12 @@ typedef enum nc_video_mode_t {
     NC_VIDEO_MODE_TABLE(X)
 #undef X
 } nc_video_mode_t;
+
+typedef enum nc_gpu_memory_preference_t {
+#define X(id, str) NC_GPU_MEMORY_PREFERENCE_##id,
+    NC_GPU_MEMORY_PREFERENCE_TABLE(X)
+#undef X
+} nc_gpu_memory_preference_t;
 
 typedef enum nc_touch_movement_mode_t {
 #define X(id, str) NC_TOUCH_MOVEMENT_MODE_##id,
@@ -63,6 +74,30 @@ typedef enum nc_block_highlight_effect_t {
             nc__print_video_mode, \
             "window", \
             NC_VIDEO_MODE_WINDOW) \
+    X(bool, \
+            prefer_low_power_gpu, \
+            YES, \
+            "\n", \
+            nc__parse_bool, \
+            nc__print_bool, \
+            "false", \
+            false) \
+    X(nc_gpu_memory_preference_t, \
+            gpu_memory_preference, \
+            NO, \
+            , \
+            nc__parse_gpu_memory_preference, \
+            nc__print_gpu_memory_preference, \
+            , \
+            NC_GPU_MEMORY_PREFERENCE_LARGER) \
+    X(int, \
+            selected_gpu, \
+            NO, \
+            , \
+            nc__parse_int, \
+            nc__print_int, \
+            , \
+            -1) \
     X(nc_touch_movement_mode_t, \
             touch_movement_mode, \
             YES, \
@@ -117,7 +152,7 @@ typedef enum nc_block_highlight_effect_t {
             , \
             nc__parse_ubvec4, \
             nc__print_ubvec4, \
-            "0, 0, 0, 127", \
+            , \
             0, 0, 0, 127) \
 
 #define X(type, name, ...) \

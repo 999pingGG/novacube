@@ -88,6 +88,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .window_height = nc_cvar_get_resolution().y,
         .refresh_rate = nc_cvar_get_refresh_rate(),
         .video_mode = nc_cvar_get_video_mode(),
+        .prefer_low_power = nc_cvar_get_prefer_low_power_gpu(),
     });
     if (!app->renderer) {
         goto error;

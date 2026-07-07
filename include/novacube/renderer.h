@@ -21,6 +21,7 @@ typedef struct nc_renderer_create_info_t {
     uint16_t window_height;
     uint16_t refresh_rate;
     nc_video_mode_t video_mode;
+    bool prefer_low_power;
 } nc_renderer_create_info_t;
 
 typedef enum nc_renderer_buffer_usage_t {

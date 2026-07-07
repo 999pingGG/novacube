@@ -439,6 +439,13 @@ static const nc__enum_entry_t nc__video_mode_entries[] = {
     { 0 },
 };
 
+static const nc__enum_entry_t nc__gpu_memory_preference_entries[] = {
+#define X(id, string) { string, sizeof(string) - 1, NC_GPU_MEMORY_PREFERENCE_##id },
+    NC_GPU_MEMORY_PREFERENCE_TABLE(X)
+#undef X
+    { 0 },
+};
+
 static const nc__enum_entry_t nc__touch_movement_mode_entries[] = {
 #define X(id, string) { string, sizeof(string) - 1, NC_TOUCH_MOVEMENT_MODE_##id },
     NC_TOUCH_MOVEMENT_MODE_TABLE(X)
@@ -462,6 +469,10 @@ static const nc__enum_entry_t nc__block_highlight_effect_entries[] = {
 
 static bool nc__parse_video_mode(nc__string_slice_t* slice, nc_video_mode_t* result) {
     return nc__parse_enum(slice, nc__video_mode_entries, (int*)result);
+}
+
+static bool nc__parse_gpu_memory_preference(nc__string_slice_t* slice, nc_gpu_memory_preference_t* result) {
+    return nc__parse_enum(slice, nc__gpu_memory_preference_entries, (int*)result);
 }
 
 static bool nc__parse_touch_movement_mode(nc__string_slice_t* slice, nc_touch_movement_mode_t* result) {
@@ -602,6 +613,10 @@ static void nc__print_ubvec4(nc_string_builder_t* string_builder, const vkm_ubve
 
 static void nc__print_video_mode(nc_string_builder_t* string_builder, const nc_video_mode_t value) {
     nc__print_enum(string_builder, nc__video_mode_entries, value);
+}
+
+static void nc__print_gpu_memory_preference(nc_string_builder_t* string_builder, const nc_gpu_memory_preference_t value) {
+    nc__print_enum(string_builder, nc__gpu_memory_preference_entries, value);
 }
 
 static void nc__print_touch_movement_mode(nc_string_builder_t* string_builder, const nc_touch_movement_mode_t value) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C CXX VERSION 0.10.3.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C CXX VERSION 0.10.4.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
