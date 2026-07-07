@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(novacube LANGUAGES C CXX VERSION 0.10.1.0 HOMEPAGE_URL "https://novacubegame.net")
+project(novacube LANGUAGES C CXX VERSION 0.10.2.0 HOMEPAGE_URL "https://novacubegame.net")
 
 set(NC_COMPANY_NAME CoupledSystems)
 set(NC_PRODUCT_NAME Novacube)
 set(NC_PACKAGE_NAME me.elinge.novacube)
+string(REPLACE "." "," NC_VULKAN_APPLICATION_VERSION ${PROJECT_VERSION})
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -103,6 +104,7 @@ add_custom_target(novacube_build_info ALL
                 "-DNC_COMPANY_NAME=${NC_COMPANY_NAME}"
                 "-DNC_PRODUCT_NAME=${NC_PRODUCT_NAME}"
                 "-DNC_PACKAGE_NAME=${NC_PACKAGE_NAME}"
+                "-DNC_VULKAN_APPLICATION_VERSION=${NC_VULKAN_APPLICATION_VERSION}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/generate_build_info.cmake"
         BYPRODUCTS ${NC_BUILD_INFO_HEADER}
         COMMENT "Generating build info header."

@@ -22,6 +22,7 @@
 #include <vma/vk_mem_alloc.h>
 #endif
 
+#include <novacube/build_info.h>
 #include <novacube/error_handling.h>
 #include <novacube/macros.h>
 #include <novacube/renderer.h>
@@ -536,7 +537,7 @@ error:
     return false;
 }
 
-static bool nc__renderer_create_instance(nc_renderer_t* renderer, const nc_renderer_create_info_t* info) {
+static bool nc__renderer_create_instance(nc_renderer_t* renderer) {
     uint32_t extension_count = 0;
     const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
     NC_CHECK_SDL_RESULT(extensions);
@@ -546,10 +547,8 @@ static bool nc__renderer_create_instance(nc_renderer_t* renderer, const nc_rende
                 .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                 .pApplicationInfo = &(VkApplicationInfo){
                     .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-                    .pApplicationName = info->window_title,
-                    .applicationVersion = VK_MAKE_API_VERSION(0, 0, 9, 0),
-                    .pEngineName = "Novacube",
-                    .engineVersion = VK_MAKE_API_VERSION(0, 0, 9, 0),
+                    .pApplicationName = NC_PRODUCT_NAME,
+                    .applicationVersion = NC_VULKAN_APPLICATION_VERSION,
                     .apiVersion = NC__RENDERER_VK_API_VERSION,
                 },
                 .enabledExtensionCount = extension_count,
@@ -1010,7 +1009,8 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
         goto error;
     }
 
-    const uint32_t image_count = capabilities.minImageCount;
+    // Ask for triple buffering.
+    const uint32_t image_count = vkm_clamp(3, capabilities.minImageCount, capabilities.maxImageCount);
     NC__CHECK_VK_RESULT(vkCreateSwapchainKHR(
             renderer->device,
             &(VkSwapchainCreateInfoKHR){
@@ -1247,7 +1247,7 @@ error:
 }
 
 static bool nc__renderer_create_graphics_pipeline(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     const char* vertex_shader_path,
     const char* fragment_shader_path,
     const VkPipelineVertexInputStateCreateInfo* vertex_input_state,
@@ -1520,7 +1520,7 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     renderer->outline_block_highlight_pipeline = VK_NULL_HANDLE;
 }
 
-static bool nc__renderer_create_sampler(nc_renderer_t* renderer, VkSampler* sampler) {
+static bool nc__renderer_create_sampler(const nc_renderer_t* renderer, VkSampler* sampler) {
     NC__CHECK_VK_RESULT(vkCreateSampler(
             renderer->device,
             &(VkSamplerCreateInfo){
@@ -1531,7 +1531,7 @@ static bool nc__renderer_create_sampler(nc_renderer_t* renderer, VkSampler* samp
                 .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                .maxLod = 1.0f,
+                .maxLod = VK_LOD_CLAMP_NONE,
             },
             NULL,
             sampler));
@@ -2082,7 +2082,7 @@ static bool nc__renderer_queue_texture_upload(
 }
 
 static nc_renderer_texture_t* nc__renderer_create_texture_object(
-    nc_renderer_t* renderer,
+    const nc_renderer_t* renderer,
     const VkFormat format,
     const int16_t width,
     const int16_t height,
@@ -2191,7 +2191,6 @@ static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_ren
         return false;
     }
 
-    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
     vkCmdBindDescriptorSets(
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2458,7 +2457,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
-    if (!nc__renderer_create_instance(result, info) ||
+    if (!nc__renderer_create_instance(result) ||
             !nc__renderer_create_window(result, info) ||
             !nc__renderer_create_surface(result) ||
             !nc__renderer_select_physical_device(result) ||
@@ -2930,6 +2929,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             VK_SUBPASS_CONTENTS_INLINE);
 
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
+    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
     for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
         const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
         if (!nc__renderer_draw_chunk_opaque(renderer, &draw)) {
