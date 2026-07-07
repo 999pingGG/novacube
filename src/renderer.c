@@ -2,11 +2,27 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#define VMA_VULKAN_VERSION 1001000
+#define VMA_NULLABLE
+#define VMA_NOT_NULL
+#define VMA_NULLABLE_NON_DISPATCHABLE
+#define VMA_NOT_NULL_NON_DISPATCHABLE
+#if __has_include(<vk_mem_alloc.h>)
+#include <vk_mem_alloc.h>
+#else
+#include <vma/vk_mem_alloc.h>
+#endif
+
 #include <novacube/error_handling.h>
+#include <novacube/macros.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
 
@@ -20,27 +36,38 @@
 #define NC__RENDERER_TEXTURE_EXTENSION ".png"
 #endif
 
-#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536
+#define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
+#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536u
+#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 2048u
 #define NC__RENDERER_CLEAR_RED 0.53f
 #define NC__RENDERER_CLEAR_GREEN 0.81f
 #define NC__RENDERER_CLEAR_BLUE 0.92f
+#define NC__RENDERER_DEPTH_FORMAT VK_FORMAT_D16_UNORM
+
+#define NC__CHECK_VK_RESULT(result_) do { \
+    const VkResult nc__vk_result = (result_); \
+    if (nc__vk_result != VK_SUCCESS) { \
+        NC_SET_ERROR("%s failed with %s.", #result_, nc__renderer_vk_result_string(nc__vk_result)); \
+        goto error; \
+    } \
+} while (false)
 
 static const char* nc__renderer_crosshair_texture_path =
     NC__RENDERER_ASSETS_BASE_PATH "textures/gui/crosshair" NC__RENDERER_TEXTURE_EXTENSION;
-
-typedef struct nc__renderer_texture_file_data_t {
-    uint8_t* bytes;
-    SDL_GPUTextureFormat format;
-    uint32_t size;
-    int16_t width;
-    int16_t height;
-} nc__renderer_texture_file_data_t;
 
 typedef uint8_t nc__renderer_upload_kind_t;
 enum {
     NC__RENDERER_UPLOAD_BUFFER = 1,
     NC__RENDERER_UPLOAD_TEXTURE,
 };
+
+typedef struct nc__renderer_texture_file_data_t {
+    uint8_t* bytes;
+    VkFormat format;
+    uint32_t size;
+    int16_t width;
+    int16_t height;
+} nc__renderer_texture_file_data_t;
 
 typedef struct nc__renderer_upload_op_t {
     union {
@@ -53,7 +80,6 @@ typedef struct nc__renderer_upload_op_t {
     uint32_t source_offset;
     uint32_t size;
     nc__renderer_upload_kind_t kind;
-    bool cycle;
 } nc__renderer_upload_op_t;
 
 typedef struct nc__renderer_astc_header_t {
@@ -66,9 +92,17 @@ typedef struct nc__renderer_astc_header_t {
     uint8_t dim_z[3];
 } nc__renderer_astc_header_t;
 
+typedef struct nc__renderer_retired_buffer_t {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+} nc__renderer_retired_buffer_t;
+
 typedef struct nc_renderer_texture_t {
-    SDL_GPUTexture* gpu_texture;
-    SDL_GPUTextureFormat format;
+    VkImage image;
+    VmaAllocation allocation;
+    VkImageView image_view;
+    VkFormat format;
+    VkImageLayout layout;
     int32_t width;
     int32_t height;
     uint16_t layer_count;
@@ -76,8 +110,9 @@ typedef struct nc_renderer_texture_t {
 } nc_renderer_texture_t;
 
 typedef struct nc_renderer_buffer_t {
-    SDL_GPUBuffer* gpu_buffer;
-    SDL_GPUBufferUsageFlags usage;
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    VkBufferUsageFlags usage;
     uint32_t capacity;
     uint64_t queued_upload_frame;
 } nc_renderer_buffer_t;
@@ -98,51 +133,142 @@ typedef struct nc__renderer_block_highlight_fragment_uniforms_t {
     float time;
 } nc__renderer_block_highlight_fragment_uniforms_t;
 
+typedef struct nc__renderer_chunk_uniforms_t {
+    vkm_mat4 view_projection;
+    vkm_vec3 position;
+} nc__renderer_chunk_uniforms_t;
+
 typedef struct nc_renderer_t {
-    SDL_GPUDevice* gpu_device;
+    VkInstance instance;
+    VkPhysicalDevice physical_device;
+    VkPhysicalDeviceProperties physical_device_properties;
+    VkDevice device;
+    VkQueue queue;
+    uint32_t queue_family_index;
+    VmaAllocator allocator;
+
     SDL_Window* window;
-    SDL_GPUTexture* depth_texture;
-    SDL_GPUTextureFormat swapchain_format;
+    VkSurfaceKHR surface;
+    VkSwapchainKHR swapchain;
+    VkFormat swapchain_format;
+    VkColorSpaceKHR swapchain_color_space;
+    VkExtent2D swapchain_extent;
+    VkImage* swapchain_images;
+    VkImageView* swapchain_image_views;
+    VkFramebuffer* framebuffers;
+    uint32_t swapchain_image_count;
     vkm_usvec2 window_size;
     vkm_usvec2 viewport;
     bool foreground;
+    bool swapchain_dirty;
+    bool surface_dirty;
 
-    SDL_GPUGraphicsPipeline* chunk_pipeline;
-    SDL_GPUGraphicsPipeline* gui_pipeline;
-    SDL_GPUGraphicsPipeline* procedural_overlay_invert_pipeline;
-    SDL_GPUGraphicsPipeline* procedural_overlay_stick_pipeline;
-    SDL_GPUGraphicsPipeline* outline_block_highlight_pipeline;
-    SDL_GPUGraphicsPipeline* vignette_block_highlight_pipeline;
-    SDL_GPUGraphicsPipeline* plasma_block_highlight_pipeline;
-    SDL_GPUSampler* chunk_sampler;
-    SDL_GPUSampler* gui_sampler;
+    VkImage depth_image;
+    VmaAllocation depth_allocation;
+    VkImageView depth_image_view;
+
+    VkRenderPass render_pass;
+    VkDescriptorSetLayout descriptor_set_layouts[4];
+    VkPipelineLayout pipeline_layout;
+    VkDescriptorPool frame_descriptor_pool;
+    uint32_t frame_descriptor_set_count;
+
+    VkPipeline chunk_pipeline;
+    VkPipeline gui_pipeline;
+    VkPipeline procedural_overlay_invert_pipeline;
+    VkPipeline procedural_overlay_stick_pipeline;
+    VkPipeline outline_block_highlight_pipeline;
+    VkPipeline vignette_block_highlight_pipeline;
+    VkPipeline plasma_block_highlight_pipeline;
+    VkSampler chunk_sampler;
+    VkSampler gui_sampler;
     nc_renderer_texture_t* procedural_overlay_crosshair_texture;
+    nc_renderer_buffer_t* dummy_storage_buffer;
 
-    SDL_GPUTransferBuffer* transfer_buffer;
+    VkCommandPool command_pool;
+    VkCommandBuffer frame_command_buffer;
+    VkFence frame_fence;
+    VkSemaphore image_available_semaphore;
+    VkSemaphore render_finished_semaphore;
+    bool frame_fence_pending;
+    bool frame_has_swapchain_image;
+    uint32_t frame_swapchain_image_index;
+
+    VkBuffer transfer_buffer;
+    VmaAllocation transfer_allocation;
     void* mapped_transfer_buffer;
     uint32_t transfer_size;
     uint32_t transfer_capacity;
-    bool transfer_buffer_needs_cycle;
+
+    nc__renderer_retired_buffer_t* retired_transfer_buffers;
+    uint32_t retired_transfer_buffer_count;
+    uint32_t retired_transfer_buffer_capacity;
 
     nc__renderer_upload_op_t* upload_ops;
     uint32_t upload_count;
     uint32_t upload_capacity;
     bool uploads_dirty;
 
-    SDL_GPUCommandBuffer* frame_command_buffer;
-    SDL_GPUTexture* frame_swapchain_texture;
     uint64_t frame_id;
 } nc_renderer_t;
-
-typedef struct nc__renderer_chunk_uniforms_t {
-    vkm_mat4 view_projection;
-    vkm_vec3 position;
-} nc__renderer_chunk_uniforms_t;
 
 #define TDS_IMPLEMENT
 #define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
 #define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
 #include <tds/vector.h>
+
+static const char* nc__renderer_vk_result_string(const VkResult result) {
+    switch (result) {
+        case VK_SUCCESS:
+            return "VK_SUCCESS";
+        case VK_NOT_READY:
+            return "VK_NOT_READY";
+        case VK_TIMEOUT:
+            return "VK_TIMEOUT";
+        case VK_EVENT_SET:
+            return "VK_EVENT_SET";
+        case VK_EVENT_RESET:
+            return "VK_EVENT_RESET";
+        case VK_INCOMPLETE:
+            return "VK_INCOMPLETE";
+        case VK_ERROR_OUT_OF_HOST_MEMORY:
+            return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+            return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_INITIALIZATION_FAILED:
+            return "VK_ERROR_INITIALIZATION_FAILED";
+        case VK_ERROR_DEVICE_LOST:
+            return "VK_ERROR_DEVICE_LOST";
+        case VK_ERROR_MEMORY_MAP_FAILED:
+            return "VK_ERROR_MEMORY_MAP_FAILED";
+        case VK_ERROR_LAYER_NOT_PRESENT:
+            return "VK_ERROR_LAYER_NOT_PRESENT";
+        case VK_ERROR_EXTENSION_NOT_PRESENT:
+            return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT:
+            return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER:
+            return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case VK_ERROR_TOO_MANY_OBJECTS:
+            return "VK_ERROR_TOO_MANY_OBJECTS";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED:
+            return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+        case VK_ERROR_FRAGMENTED_POOL:
+            return "VK_ERROR_FRAGMENTED_POOL";
+        case VK_ERROR_OUT_OF_POOL_MEMORY:
+            return "VK_ERROR_OUT_OF_POOL_MEMORY";
+        case VK_ERROR_SURFACE_LOST_KHR:
+            return "VK_ERROR_SURFACE_LOST_KHR";
+        case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR:
+            return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
+        case VK_SUBOPTIMAL_KHR:
+            return "VK_SUBOPTIMAL_KHR";
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            return "VK_ERROR_OUT_OF_DATE_KHR";
+        default:
+            return "unknown VkResult";
+    }
+}
 
 static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_t required, const uint32_t minimum) {
     uint32_t capacity = current ? current : minimum;
@@ -158,221 +284,1543 @@ static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_
     return capacity;
 }
 
+static uint32_t nc__renderer_align_u32(const uint32_t value, const uint32_t alignment) {
+    if (alignment <= 1) {
+        return value;
+    }
+
+    return (value + alignment - 1) / alignment * alignment;
+}
+
 static void nc__renderer_free_texture_file_data(nc__renderer_texture_file_data_t* data) {
     free(data->bytes);
     *data = (nc__renderer_texture_file_data_t){ 0 };
 }
 
-static SDL_GPUShader* nc__renderer_load_shader(
-    const nc_renderer_t* renderer,
-    const char* path,
-    const SDL_GPUShaderStage stage,
-    const Uint32 sampler_count,
-    const Uint32 storage_buffer_count,
-    const Uint32 uniform_buffer_count
-) {
-    void* code = NULL;
-    size_t code_size = 0;
-    SDL_GPUShader* shader = NULL;
-
-    code = SDL_LoadFile(path, &code_size);
-    NC_CHECK_SDL_RESULT(code);
-
-#ifndef NDEBUG
-    const SDL_PropertiesID props = SDL_CreateProperties();
-    SDL_SetStringProperty(props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, path);
-#endif
-    shader = SDL_CreateGPUShader(renderer->gpu_device, &(SDL_GPUShaderCreateInfo){
-        .code_size = code_size,
-        .code = code,
-        .entrypoint = "main",
-        .format = SDL_GPU_SHADERFORMAT_SPIRV,
-        .stage = stage,
-        .num_samplers = sampler_count,
-        .num_storage_buffers = storage_buffer_count,
-        .num_uniform_buffers = uniform_buffer_count,
-#ifndef NDEBUG
-        .props = props,
-#endif
-    });
-#ifndef NDEBUG
-    SDL_DestroyProperties(props);
-#endif
-    NC_CHECK_SDL_RESULT(shader);
-
-    free(code);
-    return shader;
-
-error:
-    free(code);
-    return NULL;
-}
-
-static void nc__renderer_destroy_texture_object(const nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
-    if (!texture) {
-        return;
-    }
-
-    SDL_ReleaseGPUTexture(renderer->gpu_device, texture->gpu_texture);
-    free(texture);
-}
-
-static bool nc__renderer_create_depth_texture(nc_renderer_t* renderer) {
-    SDL_ReleaseGPUTexture(renderer->gpu_device, renderer->depth_texture);
-
-    renderer->depth_texture = SDL_CreateGPUTexture(renderer->gpu_device, &(SDL_GPUTextureCreateInfo){
-        .type = SDL_GPU_TEXTURETYPE_2D,
-        .format = SDL_GPU_TEXTUREFORMAT_D16_UNORM,
-        .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
-        .width = renderer->viewport.x,
-        .height = renderer->viewport.y,
-        .layer_count_or_depth = 1,
-        .num_levels = 1,
-        .sample_count = SDL_GPU_SAMPLECOUNT_1,
-    });
-    NC_CHECK_SDL_RESULT(renderer->depth_texture);
-
-    return true;
-
-error:
-    return false;
-}
-
-static void nc__renderer_reserve_upload_ops(nc_renderer_t* renderer, const uint32_t additional_ops) {
-    NC_ASSERT(additional_ops);
-
-    const uint32_t required = renderer->upload_count + additional_ops;
-    NC_ASSERT(required > renderer->upload_count);
-
-    if (required <= renderer->upload_capacity) {
-        return;
-    }
-
-    const uint32_t new_capacity = nc__renderer_next_capacity(renderer->upload_capacity, required, 16);
-    renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
-    renderer->upload_capacity = new_capacity;
-}
-
-static bool nc__renderer_ensure_transfer_mapping(nc_renderer_t* renderer) {
-    if (renderer->mapped_transfer_buffer) {
+static bool nc__renderer_wait_idle(nc_renderer_t* renderer) {
+    if (!renderer->device) {
         return true;
     }
 
-    renderer->mapped_transfer_buffer = SDL_MapGPUTransferBuffer(
-            renderer->gpu_device,
-            renderer->transfer_buffer,
-            renderer->transfer_buffer_needs_cycle);
-    NC_CHECK_SDL_RESULT(renderer->mapped_transfer_buffer);
-
-    renderer->transfer_buffer_needs_cycle = false;
+    NC__CHECK_VK_RESULT(vkDeviceWaitIdle(renderer->device));
+    renderer->frame_fence_pending = false;
     return true;
 
 error:
     return false;
 }
 
-static bool nc__renderer_reserve_transfer_bytes(nc_renderer_t* renderer, const uint32_t size, uint32_t* out_offset) {
-    const uint32_t required = renderer->transfer_size + size;
-    NC_ASSERT(required > renderer->transfer_size);
+static void nc__renderer_destroy_retired_transfer_buffers(nc_renderer_t* renderer) {
+    for (uint32_t i = 0; i < renderer->retired_transfer_buffer_count; i++) {
+        const nc__renderer_retired_buffer_t* retired = &renderer->retired_transfer_buffers[i];
+        vmaDestroyBuffer(renderer->allocator, retired->buffer, retired->allocation);
+    }
+    renderer->retired_transfer_buffer_count = 0;
+}
 
-    if (required > renderer->transfer_capacity) {
-        const uint32_t new_capacity = nc__renderer_next_capacity(
-                renderer->transfer_capacity,
-                required,
-                NC__RENDERER_INITIAL_TRANSFER_CAPACITY);
-        SDL_GPUTransferBuffer* new_transfer_buffer = SDL_CreateGPUTransferBuffer(
-                renderer->gpu_device,
-                &(SDL_GPUTransferBufferCreateInfo){
-                    .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                    .size = new_capacity,
-                });
-        NC_CHECK_SDL_RESULT(new_transfer_buffer);
-
-        void* new_mapped_transfer_buffer = NULL;
-        if (renderer->mapped_transfer_buffer) {
-            new_mapped_transfer_buffer = SDL_MapGPUTransferBuffer(renderer->gpu_device, new_transfer_buffer, false);
-            NC_CHECK_SDL_RESULT(new_mapped_transfer_buffer);
-
-            memcpy(new_mapped_transfer_buffer, renderer->mapped_transfer_buffer, renderer->transfer_size);
-            SDL_UnmapGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
-        }
-
-        SDL_ReleaseGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
-        renderer->transfer_buffer = new_transfer_buffer;
-        renderer->mapped_transfer_buffer = new_mapped_transfer_buffer;
-        renderer->transfer_capacity = new_capacity;
-        renderer->transfer_buffer_needs_cycle = false;
+static void nc__renderer_retire_transfer_buffer(
+    nc_renderer_t* renderer,
+    const VkBuffer buffer,
+    const VmaAllocation allocation
+) {
+    if (!buffer) {
+        return;
     }
 
-    if (!nc__renderer_ensure_transfer_mapping(renderer)) {
+    if (renderer->retired_transfer_buffer_count == renderer->retired_transfer_buffer_capacity) {
+        const uint32_t new_capacity = nc__renderer_next_capacity(
+                renderer->retired_transfer_buffer_capacity,
+                renderer->retired_transfer_buffer_count + 1,
+                4);
+        renderer->retired_transfer_buffers = realloc(
+                renderer->retired_transfer_buffers,
+                new_capacity * sizeof(*renderer->retired_transfer_buffers));
+        renderer->retired_transfer_buffer_capacity = new_capacity;
+    }
+
+    renderer->retired_transfer_buffers[renderer->retired_transfer_buffer_count++] =
+            (nc__renderer_retired_buffer_t){ buffer, allocation };
+}
+
+static bool nc__renderer_create_transfer_buffer(nc_renderer_t* renderer, const uint32_t capacity) {
+    VmaAllocationInfo allocation_info;
+    NC__CHECK_VK_RESULT(vmaCreateBuffer(
+            renderer->allocator,
+            &(VkBufferCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = capacity,
+                .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            },
+            &(VmaAllocationCreateInfo){
+                .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+                .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT,
+            },
+            &renderer->transfer_buffer,
+            &renderer->transfer_allocation,
+            &allocation_info));
+    renderer->mapped_transfer_buffer = allocation_info.pMappedData;
+    renderer->transfer_capacity = capacity;
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_grow_transfer_buffer(nc_renderer_t* renderer, const uint32_t required) {
+    const uint32_t new_capacity = nc__renderer_next_capacity(
+            renderer->transfer_capacity,
+            required,
+            NC__RENDERER_INITIAL_TRANSFER_CAPACITY);
+    VkBuffer old_buffer = renderer->transfer_buffer;
+    VmaAllocation old_allocation = renderer->transfer_allocation;
+    void* old_mapping = renderer->mapped_transfer_buffer;
+
+    renderer->transfer_buffer = VK_NULL_HANDLE;
+    renderer->transfer_allocation = VK_NULL_HANDLE;
+    renderer->mapped_transfer_buffer = NULL;
+
+    if (!nc__renderer_create_transfer_buffer(renderer, new_capacity)) {
+        renderer->transfer_buffer = old_buffer;
+        renderer->transfer_allocation = old_allocation;
+        renderer->mapped_transfer_buffer = old_mapping;
+        return false;
+    }
+
+    if (old_mapping && renderer->transfer_size > 0) {
+        memcpy(renderer->mapped_transfer_buffer, old_mapping, renderer->transfer_size);
+        NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, old_allocation, 0, renderer->transfer_size));
+    }
+
+    if (renderer->frame_command_buffer || renderer->frame_fence_pending) {
+        nc__renderer_retire_transfer_buffer(renderer, old_buffer, old_allocation);
+    } else if (old_buffer) {
+        vmaDestroyBuffer(renderer->allocator, old_buffer, old_allocation);
+    }
+
+    return true;
+
+error:
+    if (renderer->transfer_buffer) {
+        vmaDestroyBuffer(renderer->allocator, renderer->transfer_buffer, renderer->transfer_allocation);
+    }
+    renderer->transfer_buffer = old_buffer;
+    renderer->transfer_allocation = old_allocation;
+    renderer->mapped_transfer_buffer = old_mapping;
+    return false;
+}
+
+static bool nc__renderer_reserve_transfer_bytes(
+    nc_renderer_t* renderer,
+    const uint32_t size,
+    const uint32_t alignment,
+    uint32_t* out_offset
+) {
+    NC_ASSERT(size);
+
+    const uint32_t offset = nc__renderer_align_u32(renderer->transfer_size, alignment);
+    const uint32_t required = offset + size;
+    NC_ASSERT(required >= offset);
+
+    if (required > renderer->transfer_capacity && !nc__renderer_grow_transfer_buffer(renderer, required)) {
+        return false;
+    }
+
+    *out_offset = offset;
+    renderer->transfer_size = required;
+    return true;
+}
+
+static bool nc__renderer_physical_device_supports_extensions(const VkPhysicalDevice physical_device) {
+    uint32_t extension_count = 0;
+    VkExtensionProperties* extensions = NULL;
+    NC__CHECK_VK_RESULT(vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, NULL));
+
+    extensions = malloc(extension_count * sizeof(*extensions));
+    NC__CHECK_VK_RESULT(vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, extensions));
+
+    bool has_swapchain = false;
+    for (uint32_t i = 0; i < extension_count; i++) {
+        if (strcmp(extensions[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+            has_swapchain = true;
+            break;
+        }
+    }
+
+    free(extensions);
+    return has_swapchain;
+
+error:
+    free(extensions);
+    return false;
+}
+
+static bool nc__renderer_find_queue_family(
+    const nc_renderer_t* renderer,
+    const VkPhysicalDevice physical_device,
+    uint32_t* out_queue_family_index
+) {
+    uint32_t queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, NULL);
+
+    VkQueueFamilyProperties* queue_families = malloc(queue_family_count * sizeof(*queue_families));
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families);
+
+    for (uint32_t i = 0; i < queue_family_count; i++) {
+        VkBool32 present_supported = VK_FALSE;
+        NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceSupportKHR(
+                physical_device,
+                i,
+                renderer->surface,
+                &present_supported));
+
+        const VkQueueFlags required_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+        if (queue_families[i].queueCount > 0 &&
+                present_supported &&
+                (queue_families[i].queueFlags & required_flags) == required_flags) {
+            *out_queue_family_index = i;
+            free(queue_families);
+            return true;
+        }
+    }
+
+    free(queue_families);
+    return false;
+
+error:
+    free(queue_families);
+    return false;
+}
+
+static bool nc__renderer_select_physical_device(nc_renderer_t* renderer) {
+    uint32_t physical_device_count = 0;
+    VkPhysicalDevice* physical_devices = NULL;
+    NC__CHECK_VK_RESULT(vkEnumeratePhysicalDevices(renderer->instance, &physical_device_count, NULL));
+    NC_CHECK_RESULT(physical_device_count > 0, "No Vulkan physical devices were found.");
+
+    physical_devices = malloc(physical_device_count * sizeof(*physical_devices));
+    NC__CHECK_VK_RESULT(vkEnumeratePhysicalDevices(renderer->instance, &physical_device_count, physical_devices));
+
+    for (uint32_t i = 0; i < physical_device_count; i++) {
+        VkPhysicalDeviceFeatures features;
+        vkGetPhysicalDeviceFeatures(physical_devices[i], &features);
+
+#if NC__RENDERER_ASTC_TEXTURES
+        if (!features.textureCompressionASTC_LDR) {
+            continue;
+        }
+#endif
+
+        uint32_t queue_family_index = UINT32_MAX;
+        if (!nc__renderer_physical_device_supports_extensions(physical_devices[i]) ||
+                !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
+            continue;
+        }
+
+        renderer->physical_device = physical_devices[i];
+        renderer->queue_family_index = queue_family_index;
+        vkGetPhysicalDeviceProperties(renderer->physical_device, &renderer->physical_device_properties);
+        free(physical_devices);
+        return true;
+    }
+
+    NC_SET_ERROR("No suitable Vulkan physical device was found.");
+
+error:
+    free(physical_devices);
+    return false;
+}
+
+static bool nc__renderer_create_instance(nc_renderer_t* renderer, const nc_renderer_create_info_t* info) {
+    uint32_t extension_count = 0;
+    const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
+    NC_CHECK_SDL_RESULT(extensions);
+
+    NC__CHECK_VK_RESULT(vkCreateInstance(
+            &(VkInstanceCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                .pApplicationInfo = &(VkApplicationInfo){
+                    .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                    .pApplicationName = info->window_title,
+                    .applicationVersion = VK_MAKE_API_VERSION(0, 0, 9, 0),
+                    .pEngineName = "Novacube",
+                    .engineVersion = VK_MAKE_API_VERSION(0, 0, 9, 0),
+                    .apiVersion = NC__RENDERER_VK_API_VERSION,
+                },
+                .enabledExtensionCount = extension_count,
+                .ppEnabledExtensionNames = extensions,
+            },
+            NULL,
+            &renderer->instance));
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_create_device(nc_renderer_t* renderer) {
+    const float queue_priority = 1.0f;
+    VkPhysicalDeviceFeatures enabled_features = { 0 };
+    const VmaVulkanFunctions vma_functions = {
+        .vkGetInstanceProcAddr = vkGetInstanceProcAddr,
+        .vkGetDeviceProcAddr = vkGetDeviceProcAddr,
+    };
+#if NC__RENDERER_ASTC_TEXTURES
+    enabled_features.textureCompressionASTC_LDR = VK_TRUE;
+#endif
+
+    NC__CHECK_VK_RESULT(vkCreateDevice(
+            renderer->physical_device,
+            &(VkDeviceCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                .queueCreateInfoCount = 1,
+                .pQueueCreateInfos = &(VkDeviceQueueCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    .queueFamilyIndex = renderer->queue_family_index,
+                    .queueCount = 1,
+                    .pQueuePriorities = &queue_priority,
+                },
+                .enabledExtensionCount = 1,
+                .ppEnabledExtensionNames = (const char* const[]){ VK_KHR_SWAPCHAIN_EXTENSION_NAME },
+                .pEnabledFeatures = &enabled_features,
+            },
+            NULL,
+            &renderer->device));
+    vkGetDeviceQueue(renderer->device, renderer->queue_family_index, 0, &renderer->queue);
+
+    NC__CHECK_VK_RESULT(vmaCreateAllocator(
+            &(VmaAllocatorCreateInfo){
+                .physicalDevice = renderer->physical_device,
+                .device = renderer->device,
+                .instance = renderer->instance,
+                .vulkanApiVersion = NC__RENDERER_VK_API_VERSION,
+                .pVulkanFunctions = &vma_functions,
+            },
+            &renderer->allocator));
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_create_window(nc_renderer_t* renderer, const nc_renderer_create_info_t* info) {
+    SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+
+#ifdef ANDROID
+    window_flags |= SDL_WINDOW_FULLSCREEN;
+#else
+    bool exclusive = false;
+    switch (info->video_mode) {
+        case NC_VIDEO_MODE_WINDOW:
+            break;
+        case NC_VIDEO_MODE_BORDERLESS:
+            window_flags |= SDL_WINDOW_BORDERLESS;
+            break;
+        case NC_VIDEO_MODE_EXCLUSIVE_FULLSCREEN:
+            exclusive = true;
+            window_flags |= SDL_WINDOW_FULLSCREEN;
+            break;
+        case NC_VIDEO_MODE_FULLSCREEN:
+            window_flags |= SDL_WINDOW_FULLSCREEN;
+            break;
+    }
+#endif
+
+    renderer->window = SDL_CreateWindow(info->window_title, info->window_width, info->window_height, window_flags);
+    NC_CHECK_SDL_RESULT(renderer->window);
+
+#ifndef ANDROID
+    if (exclusive) {
+        SDL_DisplayMode display_mode;
+        bool sdl_result = SDL_GetClosestFullscreenDisplayMode(
+                SDL_GetDisplayForWindow(renderer->window),
+                info->window_width,
+                info->window_height,
+                (float)info->refresh_rate,
+                true,
+                &display_mode);
+        if (!sdl_result) {
+            SDL_LogWarn(
+                    SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_GetClosestFullscreenDisplayMode() failed: %s",
+                    SDL_GetError());
+            SDL_ClearError();
+        } else if (!SDL_SetWindowFullscreenMode(renderer->window, &display_mode)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_SetWindowFullscreenMode() failed: %s", SDL_GetError());
+            SDL_ClearError();
+        }
+    }
+#endif
+
+    int width;
+    int height;
+    bool sdl_result = SDL_GetWindowSize(renderer->window, &width, &height);
+    NC_CHECK_SDL_RESULT(sdl_result);
+    renderer->window_size.x = (uint16_t)width;
+    renderer->window_size.y = (uint16_t)height;
+
+    sdl_result = SDL_GetWindowSizeInPixels(renderer->window, &width, &height);
+    NC_CHECK_SDL_RESULT(sdl_result);
+    renderer->viewport.x = (uint16_t)width;
+    renderer->viewport.y = (uint16_t)height;
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_create_surface(nc_renderer_t* renderer) {
+    if (renderer->surface) {
+        SDL_Vulkan_DestroySurface(renderer->instance, renderer->surface, NULL);
+        renderer->surface = VK_NULL_HANDLE;
+    }
+
+    const bool sdl_result = SDL_Vulkan_CreateSurface(renderer->window, renderer->instance, NULL, &renderer->surface);
+    NC_CHECK_SDL_RESULT(sdl_result);
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_choose_swapchain_format(
+    const VkSurfaceFormatKHR* formats,
+    const uint32_t format_count,
+    VkSurfaceFormatKHR* out_format
+) {
+    NC_CHECK_RESULT(format_count > 0, "The Vulkan surface has no supported formats.");
+
+    if (format_count == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
+        *out_format = (VkSurfaceFormatKHR){
+            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        };
+        return true;
+    }
+
+    for (uint32_t i = 0; i < format_count; i++) {
+        if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
+                formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            *out_format = formats[i];
+            return true;
+        }
+    }
+
+    for (uint32_t i = 0; i < format_count; i++) {
+        if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
+                formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            *out_format = formats[i];
+            return true;
+        }
+    }
+
+    *out_format = formats[0];
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_get_swapchain_extent(
+    const nc_renderer_t* renderer,
+    const VkSurfaceCapabilitiesKHR* capabilities,
+    VkExtent2D* out_extent
+) {
+    if (capabilities->currentExtent.width != UINT32_MAX) {
+        *out_extent = capabilities->currentExtent;
+        return out_extent->width > 0 && out_extent->height > 0;
+    }
+
+    int width;
+    int height;
+    const bool sdl_result = SDL_GetWindowSizeInPixels(renderer->window, &width, &height);
+    NC_CHECK_SDL_RESULT(sdl_result);
+
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    out_extent->width = vkm_clamp(
+            (uint32_t)width,
+            capabilities->minImageExtent.width,
+            capabilities->maxImageExtent.width);
+    out_extent->height = vkm_clamp(
+            (uint32_t)height,
+            capabilities->minImageExtent.height,
+            capabilities->maxImageExtent.height);
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
+    const VkAttachmentDescription attachments[] = {
+        {
+            .format = renderer->swapchain_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        },
+        {
+            .format = NC__RENDERER_DEPTH_FORMAT,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+    };
+    const VkAttachmentReference color_attachment = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    const VkAttachmentReference depth_attachment = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+    const VkSubpassDescription subpass = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment,
+        .pDepthStencilAttachment = &depth_attachment,
+    };
+    const VkSubpassDependency dependency = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+    };
+
+    NC__CHECK_VK_RESULT(vkCreateRenderPass(
+            renderer->device,
+            &(VkRenderPassCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                .attachmentCount = NC_COUNTOF(attachments),
+                .pAttachments = attachments,
+                .subpassCount = 1,
+                .pSubpasses = &subpass,
+                .dependencyCount = 1,
+                .pDependencies = &dependency,
+            },
+            NULL,
+            &renderer->render_pass));
+    return true;
+
+error:
+    return false;
+}
+
+static void nc__renderer_destroy_depth_image(nc_renderer_t* renderer) {
+    vkDestroyImageView(renderer->device, renderer->depth_image_view, NULL);
+    renderer->depth_image_view = VK_NULL_HANDLE;
+
+    if (renderer->depth_image) {
+        vmaDestroyImage(renderer->allocator, renderer->depth_image, renderer->depth_allocation);
+        renderer->depth_image = VK_NULL_HANDLE;
+        renderer->depth_allocation = VK_NULL_HANDLE;
+    }
+}
+
+static bool nc__renderer_create_depth_image(nc_renderer_t* renderer) {
+    nc__renderer_destroy_depth_image(renderer);
+
+    NC__CHECK_VK_RESULT(vmaCreateImage(
+            renderer->allocator,
+            &(VkImageCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .imageType = VK_IMAGE_TYPE_2D,
+                .format = NC__RENDERER_DEPTH_FORMAT,
+                .extent = { renderer->swapchain_extent.width, renderer->swapchain_extent.height, 1 },
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            },
+            &(VmaAllocationCreateInfo){
+                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+            },
+            &renderer->depth_image,
+            &renderer->depth_allocation,
+            NULL));
+
+    NC__CHECK_VK_RESULT(vkCreateImageView(
+            renderer->device,
+            &(VkImageViewCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = renderer->depth_image,
+                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                .format = NC__RENDERER_DEPTH_FORMAT,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                },
+            },
+            NULL,
+            &renderer->depth_image_view));
+    return true;
+
+error:
+    nc__renderer_destroy_depth_image(renderer);
+    return false;
+}
+
+static void nc__renderer_destroy_framebuffers(nc_renderer_t* renderer) {
+    if (renderer->framebuffers) {
+        for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+            vkDestroyFramebuffer(renderer->device, renderer->framebuffers[i], NULL);
+        }
+        free(renderer->framebuffers);
+        renderer->framebuffers = NULL;
+    }
+}
+
+static bool nc__renderer_create_framebuffers(nc_renderer_t* renderer) {
+    renderer->framebuffers = calloc(renderer->swapchain_image_count, sizeof(*renderer->framebuffers));
+    for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+        const VkImageView attachments[] = {
+            renderer->swapchain_image_views[i],
+            renderer->depth_image_view,
+        };
+        NC__CHECK_VK_RESULT(vkCreateFramebuffer(
+                renderer->device,
+                &(VkFramebufferCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                    .renderPass = renderer->render_pass,
+                    .attachmentCount = NC_COUNTOF(attachments),
+                    .pAttachments = attachments,
+                    .width = renderer->swapchain_extent.width,
+                    .height = renderer->swapchain_extent.height,
+                    .layers = 1,
+                },
+                NULL,
+                &renderer->framebuffers[i]));
+    }
+    return true;
+
+error:
+    nc__renderer_destroy_framebuffers(renderer);
+    return false;
+}
+
+static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
+    nc__renderer_destroy_framebuffers(renderer);
+    nc__renderer_destroy_depth_image(renderer);
+
+    if (renderer->swapchain_image_views) {
+        for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+            vkDestroyImageView(renderer->device, renderer->swapchain_image_views[i], NULL);
+        }
+        free(renderer->swapchain_image_views);
+        renderer->swapchain_image_views = NULL;
+    }
+
+    free(renderer->swapchain_images);
+    renderer->swapchain_images = NULL;
+    renderer->swapchain_image_count = 0;
+
+    vkDestroySwapchainKHR(renderer->device, renderer->swapchain, NULL);
+    renderer->swapchain = VK_NULL_HANDLE;
+}
+
+static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
+    VkSurfaceFormatKHR* formats = NULL;
+    VkSurfaceCapabilitiesKHR capabilities;
+    NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            renderer->physical_device,
+            renderer->surface,
+            &capabilities));
+
+    uint32_t format_count = 0;
+    NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(
+            renderer->physical_device,
+            renderer->surface,
+            &format_count,
+            NULL));
+    formats = malloc(format_count * sizeof(*formats));
+    NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(
+            renderer->physical_device,
+            renderer->surface,
+            &format_count,
+            formats));
+
+    VkSurfaceFormatKHR chosen_format;
+    if (!nc__renderer_choose_swapchain_format(formats, format_count, &chosen_format)) {
         goto error;
     }
 
-    *out_offset = renderer->transfer_size;
-    renderer->transfer_size = required;
+    VkExtent2D extent;
+    if (!nc__renderer_get_swapchain_extent(renderer, &capabilities, &extent)) {
+        free(formats);
+        return true;
+    }
+
+    if (renderer->render_pass && renderer->swapchain_format != chosen_format.format) {
+        NC_SET_ERROR("The swapchain format changed after renderer initialization.");
+        goto error;
+    }
+
+    const uint32_t image_count = capabilities.minImageCount;
+    NC__CHECK_VK_RESULT(vkCreateSwapchainKHR(
+            renderer->device,
+            &(VkSwapchainCreateInfoKHR){
+                .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                .surface = renderer->surface,
+                .minImageCount = image_count,
+                .imageFormat = chosen_format.format,
+                .imageColorSpace = chosen_format.colorSpace,
+                .imageExtent = extent,
+                .imageArrayLayers = 1,
+                .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .preTransform = capabilities.currentTransform,
+                .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+                .clipped = VK_TRUE,
+            },
+            NULL,
+            &renderer->swapchain));
+
+    renderer->swapchain_format = chosen_format.format;
+    renderer->swapchain_color_space = chosen_format.colorSpace;
+    renderer->swapchain_extent = extent;
+    renderer->viewport.x = (uint16_t)extent.width;
+    renderer->viewport.y = (uint16_t)extent.height;
+
+    NC__CHECK_VK_RESULT(vkGetSwapchainImagesKHR(
+            renderer->device,
+            renderer->swapchain,
+            &renderer->swapchain_image_count,
+            NULL));
+    renderer->swapchain_images = malloc(renderer->swapchain_image_count * sizeof(*renderer->swapchain_images));
+    NC__CHECK_VK_RESULT(vkGetSwapchainImagesKHR(
+            renderer->device,
+            renderer->swapchain,
+            &renderer->swapchain_image_count,
+            renderer->swapchain_images));
+
+    renderer->swapchain_image_views = calloc(renderer->swapchain_image_count, sizeof(*renderer->swapchain_image_views));
+    for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
+        NC__CHECK_VK_RESULT(vkCreateImageView(
+                renderer->device,
+                &(VkImageViewCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                    .image = renderer->swapchain_images[i],
+                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                    .format = renderer->swapchain_format,
+                    .subresourceRange = {
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .levelCount = 1,
+                        .layerCount = 1,
+                    },
+                },
+                NULL,
+                &renderer->swapchain_image_views[i]));
+    }
+
+    if (!renderer->render_pass && !nc__renderer_create_render_pass(renderer)) {
+        goto error;
+    }
+    if (!nc__renderer_create_depth_image(renderer) || !nc__renderer_create_framebuffers(renderer)) {
+        goto error;
+    }
+
+    free(formats);
+    renderer->swapchain_dirty = false;
+    renderer->surface_dirty = false;
+    return true;
+
+error:
+    free(formats);
+    nc__renderer_destroy_swapchain(renderer);
+    return false;
+}
+
+static bool nc__renderer_recreate_swapchain(nc_renderer_t* renderer) {
+    if (!nc__renderer_wait_idle(renderer)) {
+        return false;
+    }
+
+    if (renderer->surface_dirty && !nc__renderer_create_surface(renderer)) {
+        return false;
+    }
+
+    nc__renderer_destroy_swapchain(renderer);
+    return nc__renderer_create_swapchain(renderer);
+}
+
+static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
+    const VkDescriptorPoolSize pool_sizes[] = {
+        {
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+        },
+    };
+
+    NC__CHECK_VK_RESULT(vkCreateDescriptorPool(
+            renderer->device,
+            &(VkDescriptorPoolCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                .flags = 0,
+                .maxSets = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                .poolSizeCount = NC_COUNTOF(pool_sizes),
+                .pPoolSizes = pool_sizes,
+            },
+            NULL,
+            &renderer->frame_descriptor_pool));
     return true;
 
 error:
     return false;
 }
 
-static bool nc__renderer_queue_buffer_upload_internal(
+static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) {
+    const VkDescriptorSetLayoutBinding set0_bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    };
+    const VkDescriptorSetLayoutBinding set1_bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    };
+    const VkDescriptorSetLayoutBinding set2_bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    };
+    const VkDescriptorSetLayoutBinding set3_bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    };
+    const struct {
+        const VkDescriptorSetLayoutBinding* bindings;
+        uint32_t binding_count;
+    } layouts[] = {
+        { set0_bindings, NC_COUNTOF(set0_bindings) },
+        { set1_bindings, NC_COUNTOF(set1_bindings) },
+        { set2_bindings, NC_COUNTOF(set2_bindings) },
+        { set3_bindings, NC_COUNTOF(set3_bindings) },
+    };
+
+    for (uint32_t i = 0; i < NC_COUNTOF(renderer->descriptor_set_layouts); i++) {
+        NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
+                renderer->device,
+                &(VkDescriptorSetLayoutCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                    .bindingCount = layouts[i].binding_count,
+                    .pBindings = layouts[i].bindings,
+                },
+                NULL,
+                &renderer->descriptor_set_layouts[i]));
+    }
+
+    NC__CHECK_VK_RESULT(vkCreatePipelineLayout(
+            renderer->device,
+            &(VkPipelineLayoutCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                .setLayoutCount = NC_COUNTOF(renderer->descriptor_set_layouts),
+                .pSetLayouts = renderer->descriptor_set_layouts,
+            },
+            NULL,
+            &renderer->pipeline_layout));
+    return true;
+
+error:
+    return false;
+}
+
+static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
+    vkDestroyDescriptorPool(renderer->device, renderer->frame_descriptor_pool, NULL);
+    renderer->frame_descriptor_pool = VK_NULL_HANDLE;
+
+    vkDestroyPipelineLayout(renderer->device, renderer->pipeline_layout, NULL);
+    renderer->pipeline_layout = VK_NULL_HANDLE;
+
+    for (uint32_t i = 0; i < NC_COUNTOF(renderer->descriptor_set_layouts); i++) {
+        vkDestroyDescriptorSetLayout(renderer->device, renderer->descriptor_set_layouts[i], NULL);
+        renderer->descriptor_set_layouts[i] = VK_NULL_HANDLE;
+    }
+}
+
+static VkShaderModule nc__renderer_load_shader(const nc_renderer_t* renderer, const char* path) {
+    size_t code_size = 0;
+    void* code = SDL_LoadFile(path, &code_size);
+    NC_CHECK_SDL_RESULT(code);
+    NC_CHECK_RESULT(code_size % sizeof(uint32_t) == 0, "Shader bytecode size is not a multiple of 4: %s", path);
+
+    VkShaderModule shader_module;
+    NC__CHECK_VK_RESULT(vkCreateShaderModule(
+            renderer->device,
+            &(VkShaderModuleCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .codeSize = code_size,
+                .pCode = code,
+            },
+            NULL,
+            &shader_module));
+
+    SDL_free(code);
+    return shader_module;
+
+error:
+    SDL_free(code);
+    return VK_NULL_HANDLE;
+}
+
+static bool nc__renderer_create_graphics_pipeline(
     nc_renderer_t* renderer,
-    nc_renderer_buffer_t* buffer,
-    const void* data,
-    const uint32_t size
+    const char* vertex_shader_path,
+    const char* fragment_shader_path,
+    const VkPipelineVertexInputStateCreateInfo* vertex_input_state,
+    const VkPipelineRasterizationStateCreateInfo* rasterization_state,
+    const VkPipelineDepthStencilStateCreateInfo* depth_stencil_state,
+    const VkPipelineColorBlendAttachmentState* color_blend_attachment,
+    VkPipeline* out_pipeline
 ) {
-    NC_ASSERT(size);
+    VkShaderModule vertex_shader = nc__renderer_load_shader(renderer, vertex_shader_path);
+    VkShaderModule fragment_shader = nc__renderer_load_shader(renderer, fragment_shader_path);
+    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load Vulkan shaders.");
 
-    nc__renderer_reserve_upload_ops(renderer, 1);
+    const VkPipelineShaderStageCreateInfo shader_stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertex_shader,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragment_shader,
+            .pName = "main",
+        },
+    };
+    const VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    const VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisample_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo color_blend_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = color_blend_attachment,
+    };
+    const VkDynamicState dynamic_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    const VkPipelineDynamicStateCreateInfo dynamic_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = NC_COUNTOF(dynamic_states),
+        .pDynamicStates = dynamic_states,
+    };
 
-    uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, &offset)) {
+    NC__CHECK_VK_RESULT(vkCreateGraphicsPipelines(
+            renderer->device,
+            VK_NULL_HANDLE,
+            1,
+            &(VkGraphicsPipelineCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                .stageCount = NC_COUNTOF(shader_stages),
+                .pStages = shader_stages,
+                .pVertexInputState = vertex_input_state,
+                .pInputAssemblyState = &input_assembly_state,
+                .pViewportState = &viewport_state,
+                .pRasterizationState = rasterization_state,
+                .pMultisampleState = &multisample_state,
+                .pDepthStencilState = depth_stencil_state,
+                .pColorBlendState = &color_blend_state,
+                .pDynamicState = &dynamic_state,
+                .layout = renderer->pipeline_layout,
+                .renderPass = renderer->render_pass,
+                .subpass = 0,
+            },
+            NULL,
+            out_pipeline));
+
+    vkDestroyShaderModule(renderer->device, fragment_shader, NULL);
+    vkDestroyShaderModule(renderer->device, vertex_shader, NULL);
+    return true;
+
+error:
+    vkDestroyShaderModule(renderer->device, fragment_shader, NULL);
+    vkDestroyShaderModule(renderer->device, vertex_shader, NULL);
+    return false;
+}
+
+static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
+    const VkPipelineVertexInputStateCreateInfo no_vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineRasterizationStateCreateInfo raster_back_cull = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_BACK_BIT,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    const VkPipelineRasterizationStateCreateInfo raster_no_cull = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    const VkPipelineDepthStencilStateCreateInfo depth_enabled_write = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+    };
+    const VkPipelineDepthStencilStateCreateInfo depth_enabled_no_write = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+    };
+    const VkPipelineDepthStencilStateCreateInfo depth_disabled = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+    };
+    const VkPipelineColorBlendAttachmentState no_blend = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState alpha_blend = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState subtract_blend = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .colorBlendOp = VK_BLEND_OP_SUBTRACT,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    if (!nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-frag.spv",
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_enabled_write,
+            &no_blend,
+            &renderer->chunk_pipeline)) {
         return false;
     }
 
-    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
-    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
-        .kind = NC__RENDERER_UPLOAD_BUFFER,
-        .source_offset = offset,
-        .size = size,
-        .buffer = buffer,
-        .cycle = buffer->queued_upload_frame != renderer->frame_id,
+    if (!nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_enabled_no_write,
+            &alpha_blend,
+            &renderer->outline_block_highlight_pipeline) ||
+            !nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_enabled_no_write,
+            &alpha_blend,
+            &renderer->vignette_block_highlight_pipeline) ||
+            !nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_enabled_no_write,
+            &alpha_blend,
+            &renderer->plasma_block_highlight_pipeline)) {
+        return false;
+    }
+
+    const VkVertexInputBindingDescription gui_binding = {
+        .binding = 0,
+        .stride = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
     };
-    buffer->queued_upload_frame = renderer->frame_id;
-    renderer->uploads_dirty = true;
+    const VkVertexInputAttributeDescription gui_attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = 0,
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = sizeof(vkm_vec2),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
+        },
+    };
+    const VkPipelineVertexInputStateCreateInfo gui_vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &gui_binding,
+        .vertexAttributeDescriptionCount = NC_COUNTOF(gui_attributes),
+        .pVertexAttributeDescriptions = gui_attributes,
+    };
+    if (!nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
+            &gui_vertex_input,
+            &raster_no_cull,
+            &depth_disabled,
+            &alpha_blend,
+            &renderer->gui_pipeline)) {
+        return false;
+    }
+
+    return nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
+            &no_vertex_input,
+            &raster_no_cull,
+            &depth_disabled,
+            &subtract_blend,
+            &renderer->procedural_overlay_invert_pipeline) &&
+            nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
+            &no_vertex_input,
+            &raster_no_cull,
+            &depth_disabled,
+            &no_blend,
+            &renderer->procedural_overlay_stick_pipeline);
+}
+
+static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
+    vkDestroyPipeline(renderer->device, renderer->procedural_overlay_stick_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->procedural_overlay_invert_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->gui_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->chunk_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->plasma_block_highlight_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->vignette_block_highlight_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->outline_block_highlight_pipeline, NULL);
+
+    renderer->procedural_overlay_stick_pipeline = VK_NULL_HANDLE;
+    renderer->procedural_overlay_invert_pipeline = VK_NULL_HANDLE;
+    renderer->gui_pipeline = VK_NULL_HANDLE;
+    renderer->chunk_pipeline = VK_NULL_HANDLE;
+    renderer->plasma_block_highlight_pipeline = VK_NULL_HANDLE;
+    renderer->vignette_block_highlight_pipeline = VK_NULL_HANDLE;
+    renderer->outline_block_highlight_pipeline = VK_NULL_HANDLE;
+}
+
+static bool nc__renderer_create_sampler(nc_renderer_t* renderer, VkSampler* sampler) {
+    NC__CHECK_VK_RESULT(vkCreateSampler(
+            renderer->device,
+            &(VkSamplerCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                .magFilter = VK_FILTER_NEAREST,
+                .minFilter = VK_FILTER_NEAREST,
+                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .maxLod = 1.0f,
+            },
+            NULL,
+            sampler));
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer) {
+    NC__CHECK_VK_RESULT(vkCreateCommandPool(
+            renderer->device,
+            &(VkCommandPoolCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                .queueFamilyIndex = renderer->queue_family_index,
+            },
+            NULL,
+            &renderer->command_pool));
+    NC__CHECK_VK_RESULT(vkCreateFence(
+            renderer->device,
+            &(VkFenceCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            },
+            NULL,
+            &renderer->frame_fence));
+    NC__CHECK_VK_RESULT(vkCreateSemaphore(
+            renderer->device,
+            &(VkSemaphoreCreateInfo){ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO },
+            NULL,
+            &renderer->image_available_semaphore));
+    NC__CHECK_VK_RESULT(vkCreateSemaphore(
+            renderer->device,
+            &(VkSemaphoreCreateInfo){ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO },
+            NULL,
+            &renderer->render_finished_semaphore));
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_allocate_descriptor_set(
+    nc_renderer_t* renderer,
+    const uint32_t set_index,
+    VkDescriptorSet* out_descriptor_set
+) {
+    NC_ASSERT(set_index < NC_COUNTOF(renderer->descriptor_set_layouts));
+    if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
+        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
+        return false;
+    }
+
+    const VkResult result = vkAllocateDescriptorSets(
+            renderer->device,
+            &(VkDescriptorSetAllocateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                .descriptorPool = renderer->frame_descriptor_pool,
+                .descriptorSetCount = 1,
+                .pSetLayouts = &renderer->descriptor_set_layouts[set_index],
+            },
+            out_descriptor_set);
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
+        return false;
+    }
+    NC__CHECK_VK_RESULT(result);
+
+    renderer->frame_descriptor_set_count++;
+    return true;
+
+error:
+    return false;
+}
+
+static bool nc__renderer_write_uniform_descriptor_set(
+    nc_renderer_t* renderer,
+    const uint32_t set_index,
+    const void* data,
+    const uint32_t size,
+    VkDescriptorSet* out_descriptor_set
+) {
+    const uint32_t alignment = (uint32_t)renderer->physical_device_properties.limits.minUniformBufferOffsetAlignment;
+    uint32_t offset = 0;
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, alignment ? alignment : 1, &offset)) {
+        return false;
+    }
+    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+
+    VkDescriptorSet descriptor_set;
+    if (!nc__renderer_allocate_descriptor_set(renderer, set_index, &descriptor_set)) {
+        return false;
+    }
+
+    const VkDescriptorBufferInfo buffer_info = {
+        .buffer = renderer->transfer_buffer,
+        .offset = offset,
+        .range = size,
+    };
+    vkUpdateDescriptorSets(
+            renderer->device,
+            1,
+            &(VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptor_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &buffer_info,
+            },
+            0,
+            NULL);
+    *out_descriptor_set = descriptor_set;
     return true;
 }
 
-static bool nc__renderer_queue_texture_upload(
+static bool nc__renderer_write_storage_descriptor_set(
     nc_renderer_t* renderer,
-    nc_renderer_texture_t* texture,
-    const uint16_t layer,
-    const void* data,
-    const uint32_t size
+    const nc_renderer_buffer_t* buffer,
+    VkDescriptorSet* out_descriptor_set
 ) {
-    NC_ASSERT(size);
-
-    nc__renderer_reserve_upload_ops(renderer, 1);
-
-    uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, &offset)) {
+    VkDescriptorSet descriptor_set;
+    if (!nc__renderer_allocate_descriptor_set(renderer, 0, &descriptor_set)) {
         return false;
     }
 
-    memcpy((char*)renderer->mapped_transfer_buffer + offset, data, size);
-    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
-        .kind = NC__RENDERER_UPLOAD_TEXTURE,
-        .source_offset = offset,
-        .size = size,
-        .texture = {
-            .texture = texture,
-            .layer = layer,
-        },
-        .cycle = false,
+    const VkDescriptorBufferInfo buffer_info = {
+        .buffer = buffer->buffer,
+        .range = buffer->capacity,
     };
-    renderer->uploads_dirty = true;
+    vkUpdateDescriptorSets(
+            renderer->device,
+            1,
+            &(VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptor_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &buffer_info,
+            },
+            0,
+            NULL);
+    *out_descriptor_set = descriptor_set;
     return true;
+}
+
+static bool nc__renderer_write_texture_descriptor_set(
+    nc_renderer_t* renderer,
+    const nc_renderer_texture_t* texture,
+    const nc_renderer_buffer_t* storage_buffer,
+    const VkSampler sampler,
+    VkDescriptorSet* out_descriptor_set
+) {
+    VkDescriptorSet descriptor_set;
+    if (!nc__renderer_allocate_descriptor_set(renderer, 2, &descriptor_set)) {
+        return false;
+    }
+
+    if (!storage_buffer) {
+        storage_buffer = renderer->dummy_storage_buffer;
+    }
+
+    const VkDescriptorImageInfo image_info = {
+        .sampler = sampler,
+        .imageView = texture->image_view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkDescriptorBufferInfo buffer_info = {
+        .buffer = storage_buffer->buffer,
+        .range = storage_buffer->capacity,
+    };
+    const VkWriteDescriptorSet writes[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptor_set,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_info,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptor_set,
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &buffer_info,
+        },
+    };
+    vkUpdateDescriptorSets(renderer->device, NC_COUNTOF(writes), writes, 0, NULL);
+    *out_descriptor_set = descriptor_set;
+    return true;
+}
+
+static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer, const SDL_Rect* scissor_rect) {
+    vkCmdSetViewport(
+            renderer->frame_command_buffer,
+            0,
+            1,
+            &(VkViewport){
+                .x = 0.0f,
+                .y = 0.0f,
+                .width = (float)renderer->viewport.x,
+                .height = (float)renderer->viewport.y,
+                .minDepth = 0.0f,
+                .maxDepth = 1.0f,
+            });
+
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = { renderer->viewport.x, renderer->viewport.y },
+    };
+    if (scissor_rect) {
+        scissor.offset.x = scissor_rect->x;
+        scissor.offset.y = scissor_rect->y;
+        scissor.extent.width = (uint32_t)vkm_max(scissor_rect->w, 0);
+        scissor.extent.height = (uint32_t)vkm_max(scissor_rect->h, 0);
+    }
+    vkCmdSetScissor(renderer->frame_command_buffer, 0, 1, &scissor);
+}
+
+static void nc__renderer_cmd_transition_texture(
+    const nc_renderer_t* renderer,
+    nc_renderer_texture_t* texture,
+    const VkImageLayout new_layout
+) {
+    if (texture->layout == new_layout) {
+        return;
+    }
+
+    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkAccessFlags src_access = 0;
+    VkAccessFlags dst_access = 0;
+
+    switch (texture->layout) {
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            src_access = VK_ACCESS_SHADER_READ_BIT;
+            break;
+        default:
+            break;
+    }
+
+    switch (new_layout) {
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            dst_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            dst_access = VK_ACCESS_SHADER_READ_BIT;
+            break;
+        default:
+            NC_ASSERT(false);
+            break;
+    }
+
+    vkCmdPipelineBarrier(
+            renderer->frame_command_buffer,
+            src_stage,
+            dst_stage,
+            0,
+            0,
+            NULL,
+            0,
+            NULL,
+            1,
+            &(VkImageMemoryBarrier){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .srcAccessMask = src_access,
+                .dstAccessMask = dst_access,
+                .oldLayout = texture->layout,
+                .newLayout = new_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = texture->image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .levelCount = 1,
+                    .layerCount = texture->layer_count,
+                },
+            });
+    texture->layout = new_layout;
+}
+
+static void nc__renderer_cmd_buffer_upload_barrier(
+    const nc_renderer_t* renderer,
+    const nc_renderer_buffer_t* buffer
+) {
+    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    VkAccessFlags dst_access = VK_ACCESS_SHADER_READ_BIT;
+    if (buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) {
+        dst_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        dst_access = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    } else if (buffer->usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) {
+        dst_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        dst_access = VK_ACCESS_INDEX_READ_BIT;
+    }
+
+    vkCmdPipelineBarrier(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            dst_stage,
+            0,
+            0,
+            NULL,
+            1,
+            &(VkBufferMemoryBarrier){
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = dst_access,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = buffer->buffer,
+                .offset = 0,
+                .size = buffer->capacity,
+            },
+            0,
+            NULL);
 }
 
 static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
@@ -382,56 +1830,46 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
     NC_ASSERT(renderer->frame_command_buffer);
 
-    if (renderer->mapped_transfer_buffer) {
-        SDL_UnmapGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
-        renderer->mapped_transfer_buffer = NULL;
-    }
-
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(renderer->frame_command_buffer);
-    NC_CHECK_SDL_RESULT(copy_pass);
-
     for (uint32_t i = 0; i < renderer->upload_count; i++) {
-        const nc__renderer_upload_op_t* op = &renderer->upload_ops[i];
+        nc__renderer_upload_op_t* op = &renderer->upload_ops[i];
         if (op->kind == NC__RENDERER_UPLOAD_BUFFER) {
-            SDL_UploadToGPUBuffer(
-                    copy_pass,
-                    &(SDL_GPUTransferBufferLocation){
-                        .transfer_buffer = renderer->transfer_buffer,
-                        .offset = op->source_offset,
-                    },
-                    &(SDL_GPUBufferRegion){
-                        .buffer = op->buffer->gpu_buffer,
-                        .offset = 0,
+            vkCmdCopyBuffer(
+                    renderer->frame_command_buffer,
+                    renderer->transfer_buffer,
+                    op->buffer->buffer,
+                    1,
+                    &(VkBufferCopy){
+                        .srcOffset = op->source_offset,
+                        .dstOffset = 0,
                         .size = op->size,
-                    },
-                    op->cycle);
+                    });
+            nc__renderer_cmd_buffer_upload_barrier(renderer, op->buffer);
         } else {
-            SDL_UploadToGPUTexture(
-                    copy_pass,
-                    &(SDL_GPUTextureTransferInfo){
-                        .transfer_buffer = renderer->transfer_buffer,
-                        .offset = op->source_offset,
-                    },
-                    &(SDL_GPUTextureRegion){
-                        .texture = op->texture.texture->gpu_texture,
-                        .layer = op->texture.layer,
-                        .w = op->texture.texture->width,
-                        .h = op->texture.texture->height,
-                        .d = 1,
-                    },
-                    op->cycle);
+            nc_renderer_texture_t* texture = op->texture.texture;
+            nc__renderer_cmd_transition_texture(renderer, texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            vkCmdCopyBufferToImage(
+                    renderer->frame_command_buffer,
+                    renderer->transfer_buffer,
+                    texture->image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1,
+                    &(VkBufferImageCopy){
+                        .bufferOffset = op->source_offset,
+                        .imageSubresource = {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .mipLevel = 0,
+                            .baseArrayLayer = op->texture.layer,
+                            .layerCount = 1,
+                        },
+                        .imageExtent = { (uint32_t)texture->width, (uint32_t)texture->height, 1 },
+                    });
+            nc__renderer_cmd_transition_texture(renderer, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
     }
-    SDL_EndGPUCopyPass(copy_pass);
 
-    renderer->transfer_size = 0;
     renderer->upload_count = 0;
     renderer->uploads_dirty = false;
-    renderer->transfer_buffer_needs_cycle = true;
     return true;
-
-error:
-    return false;
 }
 
 #if NC__RENDERER_ASTC_TEXTURES
@@ -458,7 +1896,7 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
     }
     if (header->block_x != 4 || header->block_y != 4 || header->block_z != 1) {
         NC_SET_ERROR(
-                "Unsupported ASTC block size (%ix%ix%i, must be 4x4x1): %s",
+                "Unsupported ASTC block size (%ux%ux%u, must be 4x4x1): %s",
                 header->block_x,
                 header->block_y,
                 header->block_z,
@@ -466,20 +1904,15 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
         goto error;
     }
     if (nc__renderer_read_u24(header->dim_z) != 1) {
-        NC_SET_ERROR("The ASTC depth is %i, must be 1: %s", header->dim_z, path);
+        NC_SET_ERROR("The ASTC depth is not 1: %s", path);
         goto error;
     }
 
-    uint32_t x = nc__renderer_read_u24(header->dim_x);
-    uint32_t y = nc__renderer_read_u24(header->dim_y);
-
+    const uint32_t x = nc__renderer_read_u24(header->dim_x);
+    const uint32_t y = nc__renderer_read_u24(header->dim_y);
     if (x > INT16_MAX || y > INT16_MAX) {
-        NC_SET_ERROR(
-                "Texture %s is %ix%i, the max dimensions are %ix%i.",
-                x,
-                y,
-                INT16_MAX,
-                INT16_MAX);
+        NC_SET_ERROR("Texture %s is %ux%u, the max dimensions are %ix%i.", path, x, y, INT16_MAX, INT16_MAX);
+        goto error;
     }
 
     out_texture->size = (uint32_t)(file_size - sizeof(*header));
@@ -487,13 +1920,13 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
     memcpy(out_texture->bytes, file_bytes + sizeof(*header), out_texture->size);
     out_texture->width = (int16_t)x;
     out_texture->height = (int16_t)y;
-    out_texture->format = SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM;
+    out_texture->format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
 
-    free(file_bytes);
+    SDL_free(file_bytes);
     return true;
 
 error:
-    free(file_bytes);
+    SDL_free(file_bytes);
     return false;
 }
 #else
@@ -505,23 +1938,25 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
         NC_SET_ERROR(
                 "Surface format is %s, expected SDL_PIXELFORMAT_RGBA32.",
                 SDL_GetPixelFormatName(surface->format));
-        return false;
+        goto error;
     }
 
     if (surface->w > INT16_MAX || surface->h > INT16_MAX) {
         NC_SET_ERROR(
                 "Texture %s is %ix%i, the max dimensions are %ix%i.",
+                path,
                 surface->w,
                 surface->h,
                 INT16_MAX,
                 INT16_MAX);
+        goto error;
     }
 
     *out_texture = (nc__renderer_texture_file_data_t){
         .size = (uint32_t)surface->w * (uint32_t)surface->h * 4,
         .width = (int16_t)surface->w,
         .height = (int16_t)surface->h,
-        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
     };
     out_texture->bytes = memcpy(malloc(out_texture->size), surface->pixels, out_texture->size);
 
@@ -529,13 +1964,85 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
     return true;
 
 error:
+    SDL_DestroySurface(surface);
     return false;
 }
 #endif
 
+static bool nc__renderer_queue_buffer_upload_internal(
+    nc_renderer_t* renderer,
+    nc_renderer_buffer_t* buffer,
+    const void* data,
+    const uint32_t size
+) {
+    NC_ASSERT(size);
+
+    if (renderer->upload_count == renderer->upload_capacity) {
+        const uint32_t new_capacity = nc__renderer_next_capacity(
+                renderer->upload_capacity,
+                renderer->upload_count + 1,
+                16);
+        renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
+        renderer->upload_capacity = new_capacity;
+    }
+
+    uint32_t offset = 0;
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 4, &offset)) {
+        return false;
+    }
+
+    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
+        .kind = NC__RENDERER_UPLOAD_BUFFER,
+        .source_offset = offset,
+        .size = size,
+        .buffer = buffer,
+    };
+    buffer->queued_upload_frame = renderer->frame_id;
+    renderer->uploads_dirty = true;
+    return true;
+}
+
+static bool nc__renderer_queue_texture_upload(
+    nc_renderer_t* renderer,
+    nc_renderer_texture_t* texture,
+    const uint16_t layer,
+    const void* data,
+    const uint32_t size
+) {
+    NC_ASSERT(size);
+
+    if (renderer->upload_count == renderer->upload_capacity) {
+        const uint32_t new_capacity = nc__renderer_next_capacity(
+                renderer->upload_capacity,
+                renderer->upload_count + 1,
+                16);
+        renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
+        renderer->upload_capacity = new_capacity;
+    }
+
+    uint32_t offset = 0;
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 16, &offset)) {
+        return false;
+    }
+
+    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
+        .kind = NC__RENDERER_UPLOAD_TEXTURE,
+        .source_offset = offset,
+        .size = size,
+        .texture = {
+            .texture = texture,
+            .layer = layer,
+        },
+    };
+    renderer->uploads_dirty = true;
+    return true;
+}
+
 static nc_renderer_texture_t* nc__renderer_create_texture_object(
-    const nc_renderer_t* renderer,
-    const SDL_GPUTextureFormat format,
+    nc_renderer_t* renderer,
+    const VkFormat format,
     const int16_t width,
     const int16_t height,
     const uint16_t layer_count,
@@ -544,67 +2051,143 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
     NC_ASSERT(width > 0);
     NC_ASSERT(height > 0);
 
-    SDL_GPUTexture* gpu_texture = SDL_CreateGPUTexture(renderer->gpu_device, &(SDL_GPUTextureCreateInfo){
-        .type = is_array ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D,
-        .format = format,
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        .width = width,
-        .height = height,
-        .layer_count_or_depth = layer_count,
-        .num_levels = 1,
-        .sample_count = SDL_GPU_SAMPLECOUNT_1,
-    });
-    NC_CHECK_SDL_RESULT(gpu_texture);
+    nc_renderer_texture_t* result = calloc(1, sizeof(*result));
+    result->format = format;
+    result->width = width;
+    result->height = height;
+    result->layer_count = layer_count;
+    result->is_array = is_array;
+    result->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    nc_renderer_texture_t* result = malloc(sizeof(*result));
-    *result = (nc_renderer_texture_t){
-        .gpu_texture = gpu_texture,
-        .format = format,
-        .width = width,
-        .height = height,
-        .layer_count = layer_count,
-        .is_array = is_array,
-    };
+    NC__CHECK_VK_RESULT(vmaCreateImage(
+            renderer->allocator,
+            &(VkImageCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .imageType = VK_IMAGE_TYPE_2D,
+                .format = format,
+                .extent = { (uint32_t)width, (uint32_t)height, 1 },
+                .mipLevels = 1,
+                .arrayLayers = layer_count,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            },
+            &(VmaAllocationCreateInfo){
+                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+            },
+            &result->image,
+            &result->allocation,
+            NULL));
+
+    NC__CHECK_VK_RESULT(vkCreateImageView(
+            renderer->device,
+            &(VkImageViewCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = result->image,
+                .viewType = is_array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
+                .format = format,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .levelCount = 1,
+                    .layerCount = layer_count,
+                },
+            },
+            NULL,
+            &result->image_view));
     return result;
 
 error:
+    if (result) {
+        vkDestroyImageView(renderer->device, result->image_view, NULL);
+        if (result->image) {
+            vmaDestroyImage(renderer->allocator, result->image, result->allocation);
+        }
+    }
+    free(result);
     return NULL;
 }
 
-static void nc__renderer_draw_chunk_opaque(
-    const nc_renderer_t* renderer,
-    SDL_GPURenderPass* render_pass,
-    const nc_renderer_chunk_opaque_draw_t* draw
-) {
-    if (draw->vertex_count == 0) {
+static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
+    if (!texture) {
         return;
+    }
+
+    if (!renderer->frame_command_buffer && renderer->frame_fence_pending) {
+        nc__renderer_wait_idle(renderer);
+    }
+
+    vkDestroyImageView(renderer->device, texture->image_view, NULL);
+    if (texture->image) {
+        vmaDestroyImage(renderer->allocator, texture->image, texture->allocation);
+    }
+    free(texture);
+}
+
+static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_renderer_chunk_opaque_draw_t* draw) {
+    if (draw->vertex_count == 0) {
+        return true;
     }
 
     NC_ASSERT(draw->texture->is_array);
 
-    // Quads are expanded into triangle-list vertices in the vertex shader.
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->chunk_pipeline);
-    SDL_BindGPUVertexStorageBuffers(render_pass, 0, &draw->chunk_buffer->gpu_buffer, 1);
-    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &draw->face_data_buffer->gpu_buffer, 1);
-    SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
-        .texture = draw->texture->gpu_texture,
-        .sampler = renderer->chunk_sampler,
-    }, 1);
+    VkDescriptorSet quad_set;
+    VkDescriptorSet uniform_set;
+    VkDescriptorSet texture_set;
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = *draw->view_projection,
         .position = draw->position,
     };
-    SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, &uniforms, sizeof(uniforms));
-    SDL_DrawGPUPrimitives(render_pass, draw->vertex_count, 1, 0, 0);
+    if (!nc__renderer_write_storage_descriptor_set(renderer, draw->chunk_buffer, &quad_set) ||
+            !nc__renderer_write_uniform_descriptor_set(renderer, 1, &uniforms, sizeof(uniforms), &uniform_set) ||
+            !nc__renderer_write_texture_descriptor_set(
+            renderer,
+            draw->texture,
+            draw->face_data_buffer,
+            renderer->chunk_sampler,
+            &texture_set)) {
+        return false;
+    }
+
+    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            0,
+            1,
+            &quad_set,
+            0,
+            NULL);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            1,
+            1,
+            &uniform_set,
+            0,
+            NULL);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            2,
+            1,
+            &texture_set,
+            0,
+            NULL);
+    vkCmdDraw(renderer->frame_command_buffer, draw->vertex_count, 1, 0, 0);
+    return true;
 }
 
-static void nc__renderer_draw_block_highlight(
-    const nc_renderer_t* renderer,
-    SDL_GPURenderPass* render_pass,
+static bool nc__renderer_draw_block_highlight(
+    nc_renderer_t* renderer,
     const nc_renderer_block_highlight_draw_t* draw
 ) {
     if (!draw->shown) {
-        return;
+        return true;
     }
 
     const nc__renderer_block_highlight_vertex_uniforms_t vertex_uniforms = {
@@ -614,7 +2197,7 @@ static void nc__renderer_draw_block_highlight(
 
     const vkm_ubvec4 color = nc_cvar_get_block_highlight_color();
     const nc__renderer_block_highlight_fragment_uniforms_t fragment_uniforms = {
-        .color = { 
+        .color = {
             .r = (float)color.r / 255.0f,
             .g = (float)color.g / 255.0f,
             .b = (float)color.b / 255.0f,
@@ -623,7 +2206,7 @@ static void nc__renderer_draw_block_highlight(
         .time = draw->time,
     };
 
-    SDL_GPUGraphicsPipeline* pipeline;
+    VkPipeline pipeline;
     switch (nc_cvar_get_block_highlight_effect()) {
         case NC_BLOCK_HIGHLIGHT_EFFECT_OUTLINE:
             pipeline = renderer->outline_block_highlight_pipeline;
@@ -640,38 +2223,76 @@ static void nc__renderer_draw_block_highlight(
             break;
     }
 
-    SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
-    SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, &vertex_uniforms, sizeof(vertex_uniforms));
-    SDL_PushGPUFragmentUniformData(renderer->frame_command_buffer, 0, &fragment_uniforms, sizeof(fragment_uniforms));
-    SDL_DrawGPUPrimitives(render_pass, 36, 1, 0, 0);
-}
-
-static void nc__renderer_draw_overlay(
-    const nc_renderer_t* renderer,
-    SDL_GPURenderPass* render_pass,
-    const nc_renderer_overlay_draw_t* draw
-) {
-    if (draw->draw_command_count == 0) {
-        return;
+    VkDescriptorSet vertex_uniform_set;
+    VkDescriptorSet fragment_uniform_set;
+    if (!nc__renderer_write_uniform_descriptor_set(
+            renderer,
+            1,
+            &vertex_uniforms,
+            sizeof(vertex_uniforms),
+            &vertex_uniform_set) ||
+            !nc__renderer_write_uniform_descriptor_set(
+            renderer,
+            3,
+            &fragment_uniforms,
+            sizeof(fragment_uniforms),
+            &fragment_uniform_set)) {
+        return false;
     }
 
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->gui_pipeline);
-    SDL_BindGPUVertexBuffers(render_pass, 0, &(SDL_GPUBufferBinding){
-        .buffer = draw->vertex_buffer->gpu_buffer,
-        .offset = 0,
-    }, 1);
-    SDL_BindGPUIndexBuffer(render_pass, &(SDL_GPUBufferBinding){
-        .buffer = draw->index_buffer->gpu_buffer,
-        .offset = 0,
-    }, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            1,
+            1,
+            &vertex_uniform_set,
+            0,
+            NULL);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            3,
+            1,
+            &fragment_uniform_set,
+            0,
+            NULL);
+    vkCmdDraw(renderer->frame_command_buffer, 36, 1, 0, 0);
+    return true;
+}
+
+static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer_overlay_draw_t* draw) {
+    if (draw->draw_command_count == 0) {
+        return true;
+    }
 
     const float uniforms[] = {
         2.0f / (float)renderer->viewport.x,
-        -2.0f / (float)renderer->viewport.y,
+        2.0f / (float)renderer->viewport.y,
         -1.0f,
-        1.0f,
+        -1.0f,
     };
-    SDL_PushGPUVertexUniformData(renderer->frame_command_buffer, 0, uniforms, sizeof(uniforms));
+    VkDescriptorSet uniform_set;
+    if (!nc__renderer_write_uniform_descriptor_set(renderer, 1, uniforms, sizeof(uniforms), &uniform_set)) {
+        return false;
+    }
+
+    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->gui_pipeline);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            1,
+            1,
+            &uniform_set,
+            0,
+            NULL);
+
+    const VkDeviceSize vertex_offset = 0;
+    vkCmdBindVertexBuffers(renderer->frame_command_buffer, 0, 1, &draw->vertex_buffer->buffer, &vertex_offset);
+    vkCmdBindIndexBuffer(renderer->frame_command_buffer, draw->index_buffer->buffer, 0, VK_INDEX_TYPE_UINT16);
 
     for (uint32_t i = 0; i < draw->draw_command_count; i++) {
         const nc_renderer_overlay_draw_command_t* draw_command = &draw->draw_commands[i];
@@ -680,22 +2301,38 @@ static void nc__renderer_draw_overlay(
             continue;
         }
 
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
-            .texture = texture->gpu_texture,
-            .sampler = renderer->gui_sampler,
-        }, 1);
-        SDL_SetGPUScissor(render_pass, &draw_command->clip_rect);
-        SDL_DrawGPUIndexedPrimitives(render_pass, draw_command->element_count, 1, draw_command->first_index, 0, 0);
+        VkDescriptorSet texture_set;
+        if (!nc__renderer_write_texture_descriptor_set(renderer, texture, NULL, renderer->gui_sampler, &texture_set)) {
+            return false;
+        }
+        vkCmdBindDescriptorSets(
+                renderer->frame_command_buffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                renderer->pipeline_layout,
+                2,
+                1,
+                &texture_set,
+                0,
+                NULL);
+        nc__renderer_set_viewport_and_scissor(renderer, &draw_command->clip_rect);
+        vkCmdDrawIndexed(
+                renderer->frame_command_buffer,
+                draw_command->element_count,
+                1,
+                draw_command->first_index,
+                0,
+                0);
     }
+
+    return true;
 }
 
-static void nc__renderer_draw_procedural_overlay(
-    const nc_renderer_t* renderer,
-    SDL_GPURenderPass* render_pass,
+static bool nc__renderer_draw_procedural_overlay(
+    nc_renderer_t* renderer,
     const nc_renderer_procedural_overlay_draw_t* draw
 ) {
     if (!draw) {
-        return;
+        return true;
     }
 
     nc__renderer_procedural_overlay_uniforms_t uniforms = { 0 };
@@ -719,429 +2356,94 @@ static void nc__renderer_draw_procedural_overlay(
     uniforms.crosshair[2] = draw->crosshair_size;
     uniforms.crosshair[3] = draw->crosshair_size;
 
-    SDL_SetGPUScissor(render_pass, &(SDL_Rect){
-        .x = 0,
-        .y = 0,
-        .w = renderer->viewport.x,
-        .h = renderer->viewport.y,
-    });
+    VkDescriptorSet uniform_set;
+    VkDescriptorSet texture_set;
+    if (!nc__renderer_write_uniform_descriptor_set(renderer, 3, &uniforms, sizeof(uniforms), &uniform_set) ||
+            !nc__renderer_write_texture_descriptor_set(
+            renderer,
+            renderer->procedural_overlay_crosshair_texture,
+            NULL,
+            renderer->gui_sampler,
+            &texture_set)) {
+        return false;
+    }
 
-    SDL_PushGPUFragmentUniformData(renderer->frame_command_buffer, 0, &uniforms, sizeof(uniforms));
+    nc__renderer_set_viewport_and_scissor(renderer, NULL);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            3,
+            1,
+            &uniform_set,
+            0,
+            NULL);
 
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->procedural_overlay_invert_pipeline);
-    SDL_BindGPUFragmentSamplers(render_pass, 0, &(SDL_GPUTextureSamplerBinding){
-        .texture = renderer->procedural_overlay_crosshair_texture->gpu_texture,
-        .sampler = renderer->gui_sampler,
-    }, 1);
-    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
+    vkCmdBindPipeline(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->procedural_overlay_invert_pipeline);
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            2,
+            1,
+            &texture_set,
+            0,
+            NULL);
+    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
 
-    SDL_BindGPUGraphicsPipeline(render_pass, renderer->procedural_overlay_stick_pipeline);
-    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
+    vkCmdBindPipeline(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->procedural_overlay_stick_pipeline);
+    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    return true;
 }
 
 nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
-    SDL_PropertiesID props = 0;
-    SDL_GPUShader* vertex_shader = NULL;
-    SDL_GPUShader* fragment_shader = NULL;
     nc_renderer_t* result = calloc(1, sizeof(*result));
-
     result->foreground = true;
+    result->queue_family_index = UINT32_MAX;
 
     bool sdl_result = SDL_InitSubSystem(SDL_INIT_VIDEO);
+    NC_CHECK_SDL_RESULT(sdl_result);
+    sdl_result = SDL_Vulkan_LoadLibrary(NULL);
     NC_CHECK_SDL_RESULT(sdl_result);
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
-    props = SDL_CreateProperties();
-    NC_CHECK_SDL_RESULT(props);
-
-    sdl_result = SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
-    sdl_result &= SDL_SetBooleanProperty(
-            props,
-            SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN,
-#ifdef NDEBUG
-            false);
-#else
-            true);
-#endif
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_PREFERLOWPOWER_BOOLEAN, true);
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_D3D12_ALLOW_FEWER_RESOURCE_SLOTS_BOOLEAN, true);
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN, false);
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, false);
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN, false);
-    sdl_result &= SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN, false);
-
-    SDL_GPUVulkanOptions options = {
-        .vulkan_api_version = VK_API_VERSION_1_0,
-    };
-    sdl_result &= SDL_SetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER, &options);
-    NC_CHECK_SDL_RESULT(sdl_result);
-
-    result->gpu_device = SDL_CreateGPUDeviceWithProperties(props);
-    NC_CHECK_SDL_RESULT(result->gpu_device);
-
-    SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-
-#ifdef ANDROID
-    window_flags |= SDL_WINDOW_FULLSCREEN;
-#else
-    bool exclusive = false;
-    switch (info->video_mode) {
-        case NC_VIDEO_MODE_WINDOW:
-            break;
-        case NC_VIDEO_MODE_BORDERLESS:
-            window_flags |= SDL_WINDOW_BORDERLESS;
-            break;
-        case NC_VIDEO_MODE_EXCLUSIVE_FULLSCREEN:
-            exclusive = true;
-        case NC_VIDEO_MODE_FULLSCREEN:
-            window_flags |= SDL_WINDOW_FULLSCREEN;
-            break;
-    }
-#endif
-
-    result->window = SDL_CreateWindow(info->window_title, info->window_width, info->window_height, window_flags);
-    NC_CHECK_SDL_RESULT(result->window);
-
-#ifndef ANDROID
-    if (exclusive) {
-        SDL_DisplayMode display_mode;
-        sdl_result = SDL_GetClosestFullscreenDisplayMode(
-                SDL_GetDisplayForWindow(result->window),
-                info->window_width,
-                info->window_height,
-                (float)info->refresh_rate,
-                true, &display_mode);
-        if (!sdl_result) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_GetClosestFullscreenDisplayMode() failed: %s", SDL_GetError());
-            SDL_ClearError();
-        } else {
-            sdl_result = SDL_SetWindowFullscreenMode(result->window, &display_mode);
-            if (!sdl_result) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_SetWindowFullscreenMode() failed: %s", SDL_GetError());
-                SDL_ClearError();
-            }
-        }
-    }
-#endif
-
-    int width;
-    int height;
-    sdl_result = SDL_GetWindowSize(result->window, &width, &height);
-    NC_CHECK_SDL_RESULT(sdl_result);
-
-    result->window_size.x = (uint16_t)width;
-    result->window_size.y = (uint16_t)height;
-
-    sdl_result = SDL_GetWindowSizeInPixels(result->window, &width, &height);
-    NC_CHECK_SDL_RESULT(sdl_result);
-
-    result->viewport.x = (uint16_t)width;
-    result->viewport.y = (uint16_t)height;
-
-    sdl_result = SDL_ClaimWindowForGPUDevice(result->gpu_device, result->window);
-    NC_CHECK_SDL_RESULT(sdl_result);
-
-    result->swapchain_format = SDL_GetGPUSwapchainTextureFormat(result->gpu_device, result->window);
-    if (!nc__renderer_create_depth_texture(result)) {
+    if (!nc__renderer_create_instance(result, info) ||
+            !nc__renderer_create_window(result, info) ||
+            !nc__renderer_create_surface(result) ||
+            !nc__renderer_select_physical_device(result) ||
+            !nc__renderer_create_device(result) ||
+            !nc__renderer_create_descriptor_set_layouts(result) ||
+            !nc__renderer_create_descriptor_pool(result) ||
+            !nc__renderer_create_frame_resources(result) ||
+            !nc__renderer_create_transfer_buffer(result, NC__RENDERER_INITIAL_TRANSFER_CAPACITY) ||
+            !nc__renderer_create_sampler(result, &result->chunk_sampler) ||
+            !nc__renderer_create_sampler(result, &result->gui_sampler) ||
+            !nc__renderer_create_swapchain(result) ||
+            !nc__renderer_create_pipelines(result)) {
         goto error;
     }
 
-    result->transfer_capacity = NC__RENDERER_INITIAL_TRANSFER_CAPACITY;
-    result->transfer_buffer = SDL_CreateGPUTransferBuffer(result->gpu_device, &(SDL_GPUTransferBufferCreateInfo){
-        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = result->transfer_capacity,
-    });
-    NC_CHECK_SDL_RESULT(result->transfer_buffer);
-
-    result->chunk_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
-        .min_filter = SDL_GPU_FILTER_NEAREST,
-        .mag_filter = SDL_GPU_FILTER_NEAREST,
-        .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
-        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-    });
-    NC_CHECK_SDL_RESULT(result->chunk_sampler);
-
-    result->gui_sampler = SDL_CreateGPUSampler(result->gpu_device, &(SDL_GPUSamplerCreateInfo){
-        .min_filter = SDL_GPU_FILTER_NEAREST,
-        .mag_filter = SDL_GPU_FILTER_NEAREST,
-        .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
-        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-    });
-    NC_CHECK_SDL_RESULT(result->gui_sampler);
-
-    vertex_shader = nc__renderer_load_shader(
+    result->dummy_storage_buffer = nc_renderer_create_buffer(
             result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-            SDL_GPU_SHADERSTAGE_VERTEX,
-            0,
-            0,
-            1);
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            0,
-            0,
-            1);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the outline block highlight shaders.");
-
-    SDL_GPUGraphicsPipelineCreateInfo graphics_pipeline_create_info = {
-        .vertex_shader = vertex_shader,
-        .fragment_shader = fragment_shader,
-        .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-        .rasterizer_state = {
-            .fill_mode = SDL_GPU_FILLMODE_FILL,
-            .cull_mode = SDL_GPU_CULLMODE_BACK,
-            .front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
-            .enable_depth_clip = true,
-        },
-        .depth_stencil_state = {
-            .compare_op = SDL_GPU_COMPAREOP_LESS,
-            .enable_depth_test = true,
-            // Disabling depth write here *almost* doesn't matter since the block highlight is *almost* the same size as the block.
-            // It would be near unnoticeable. But if the highlight is ever of a larger scale, we don't want it occluding stuff.
-            .enable_depth_write = false,
-            .enable_stencil_test = false,
-        },
-        .target_info = {
-            .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                {
-                    .format = result->swapchain_format,
-                    .blend_state = {
-                        .enable_blend = true,
-                        .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
-                        .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-                        .color_blend_op = SDL_GPU_BLENDOP_ADD,
-                        .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
-                        .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-                        .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
-                    },
-                },
-            },
-            .num_color_targets = 1,
-            .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM,
-            .has_depth_stencil_target = true,
-        },
-    };
-    result->outline_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->outline_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            0,
-            0,
-            1);
-    NC_CHECK_RESULT(fragment_shader, "Failed to load the vignette block highlight shader.");
-
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    result->vignette_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->vignette_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            0,
-            0,
-            1);
-    NC_CHECK_RESULT(fragment_shader, "Failed to load the plasma block highlight shader.");
-
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    result->plasma_block_highlight_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->plasma_block_highlight_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
-
-    vertex_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
-            SDL_GPU_SHADERSTAGE_VERTEX,
-            0,
-            1,
-            1);
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            1,
-            1,
-            0);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the chunk shaders.");
-
-    graphics_pipeline_create_info.vertex_shader = vertex_shader;
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    graphics_pipeline_create_info.depth_stencil_state.enable_depth_write = true;
-    graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-        {
-            .format = result->swapchain_format,
-            .blend_state.enable_blend = false,
-        },
-    };
-    result->chunk_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->chunk_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
-
-    vertex_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
-            SDL_GPU_SHADERSTAGE_VERTEX,
-            0,
-            0,
-            1);
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            1,
-            0,
-            0);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the GUI shaders.");
-
-    graphics_pipeline_create_info.vertex_shader = vertex_shader;
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    graphics_pipeline_create_info.vertex_input_state.vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]){
-        {
-            .slot = 0,
-            .pitch = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
-            .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
-        }
-    };
-    graphics_pipeline_create_info.vertex_input_state.num_vertex_buffers = 1;
-    graphics_pipeline_create_info.vertex_input_state.vertex_attributes = (SDL_GPUVertexAttribute[]){
-            {
-                .location = 0,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                .offset = 0,
-            },
-            {
-                .location = 1,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                .offset = sizeof(vkm_vec2),
-            },
-            {
-                .location = 2,
-                .buffer_slot = 0,
-                .format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
-                .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
-            },
-    };
-    graphics_pipeline_create_info.vertex_input_state.num_vertex_attributes = 3;
-    // Overlay geometry comes from UI batches with mixed winding, so keep culling disabled here.
-    graphics_pipeline_create_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-    graphics_pipeline_create_info.depth_stencil_state = (SDL_GPUDepthStencilState){
-        .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
-        .enable_depth_test = false,
-        .enable_depth_write = false,
-        .enable_stencil_test = false,
-    };
-    graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-        {
-            .format = result->swapchain_format,
-            .blend_state = {
-                .enable_blend = true,
-                .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
-                .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-                .color_blend_op = SDL_GPU_BLENDOP_ADD,
-                .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
-                .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-                .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
-            },
-        },
-    };
-    result->gui_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->gui_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    fragment_shader = NULL;
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
-    vertex_shader = NULL;
+            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
+            sizeof(uint32_t));
+    NC_CHECK_RESULT(result->dummy_storage_buffer, "Failed to create the dummy storage buffer.");
 
     result->procedural_overlay_crosshair_texture =
             nc_renderer_create_texture_2d_from_file(result, nc__renderer_crosshair_texture_path);
     NC_CHECK_RESULT(result->procedural_overlay_crosshair_texture, "Failed to load the procedural crosshair texture.");
 
-    vertex_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
-            SDL_GPU_SHADERSTAGE_VERTEX,
-            0,
-            0,
-            0);
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            1,
-            0,
-            1);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load the procedural overlay invert shaders.");
-
-    graphics_pipeline_create_info.vertex_shader = vertex_shader;
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-        {
-            .format = result->swapchain_format,
-            .blend_state = {
-                .enable_blend = true,
-                .src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
-                .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
-                .color_blend_op = SDL_GPU_BLENDOP_SUBTRACT,
-                .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO,
-                .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE,
-                .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
-            },
-        },
-    };
-    graphics_pipeline_create_info.vertex_input_state.num_vertex_buffers = 0;
-    graphics_pipeline_create_info.vertex_input_state.num_vertex_attributes = 0;
-    result->procedural_overlay_invert_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->procedural_overlay_invert_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-
-    fragment_shader = nc__renderer_load_shader(
-            result,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
-            SDL_GPU_SHADERSTAGE_FRAGMENT,
-            0,
-            0,
-            1);
-    NC_CHECK_RESULT(fragment_shader, "Failed to load the procedural overlay stick shader.");
-
-    graphics_pipeline_create_info.fragment_shader = fragment_shader;
-    graphics_pipeline_create_info.target_info.color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-        {
-            .format = result->swapchain_format,
-        },
-    };
-    result->procedural_overlay_stick_pipeline = SDL_CreateGPUGraphicsPipeline(result->gpu_device, &graphics_pipeline_create_info);
-    NC_CHECK_SDL_RESULT(result->procedural_overlay_stick_pipeline);
-
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
-    SDL_DestroyProperties(props);
+    SDL_Log("Vulkan renderer initialized on %s.", result->physical_device_properties.deviceName);
     return result;
 
 error:
-    SDL_DestroyProperties(props);
-    SDL_ReleaseGPUShader(result->gpu_device, fragment_shader);
-    SDL_ReleaseGPUShader(result->gpu_device, vertex_shader);
     nc_renderer_fini(result);
     return NULL;
 }
@@ -1158,6 +2460,7 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
         case SDL_EVENT_WINDOW_MAXIMIZED:
         case SDL_EVENT_WINDOW_RESTORED:
             renderer->foreground = true;
+            renderer->swapchain_dirty = true;
             break;
         case SDL_EVENT_WINDOW_RESIZED:
             if (event->window.data1 > 0 && event->window.data2 > 0) {
@@ -1169,7 +2472,7 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
             if (event->window.data1 > 0 && event->window.data2 > 0) {
                 renderer->viewport.x = (uint16_t)event->window.data1;
                 renderer->viewport.y = (uint16_t)event->window.data2;
-                return nc__renderer_create_depth_texture(renderer);
+                renderer->swapchain_dirty = true;
             }
             break;
         default:
@@ -1183,36 +2486,146 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     NC_ASSERT(!renderer->frame_command_buffer);
 
     renderer->frame_id++;
-    renderer->frame_command_buffer = SDL_AcquireGPUCommandBuffer(renderer->gpu_device);
-    NC_CHECK_SDL_RESULT(renderer->frame_command_buffer);
+    NC__CHECK_VK_RESULT(vkWaitForFences(renderer->device, 1, &renderer->frame_fence, VK_TRUE, UINT64_MAX));
+    renderer->frame_fence_pending = false;
+    nc__renderer_destroy_retired_transfer_buffers(renderer);
 
-    const bool sdl_result = SDL_WaitAndAcquireGPUSwapchainTexture(
+    if (!renderer->uploads_dirty && renderer->upload_count == 0) {
+        renderer->transfer_size = 0;
+    }
+
+    NC__CHECK_VK_RESULT(vkResetCommandPool(renderer->device, renderer->command_pool, 0));
+    NC__CHECK_VK_RESULT(vkResetDescriptorPool(renderer->device, renderer->frame_descriptor_pool, 0));
+    renderer->frame_descriptor_set_count = 0;
+
+    if ((renderer->swapchain_dirty || renderer->surface_dirty) && !nc__renderer_recreate_swapchain(renderer)) {
+        goto error;
+    }
+
+    NC__CHECK_VK_RESULT(vkAllocateCommandBuffers(
+            renderer->device,
+            &(VkCommandBufferAllocateInfo){
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = renderer->command_pool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1,
+            },
+            &renderer->frame_command_buffer));
+    NC__CHECK_VK_RESULT(vkBeginCommandBuffer(
             renderer->frame_command_buffer,
-            renderer->window,
-            &renderer->frame_swapchain_texture,
-            NULL,
-            NULL);
-    NC_CHECK_SDL_RESULT(sdl_result);
+            &(VkCommandBufferBeginInfo){
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            }));
 
+    renderer->frame_has_swapchain_image = false;
+    if (!renderer->foreground ||
+            renderer->swapchain == VK_NULL_HANDLE ||
+            renderer->viewport.x == 0 ||
+            renderer->viewport.y == 0) {
+        return true;
+    }
+
+    const VkResult acquire_result = vkAcquireNextImageKHR(
+            renderer->device,
+            renderer->swapchain,
+            UINT64_MAX,
+            renderer->image_available_semaphore,
+            VK_NULL_HANDLE,
+            &renderer->frame_swapchain_image_index);
+    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        renderer->swapchain_dirty = true;
+        renderer->frame_has_swapchain_image = false;
+        return true;
+    }
+    if (acquire_result == VK_ERROR_SURFACE_LOST_KHR) {
+        renderer->surface_dirty = true;
+        renderer->swapchain_dirty = true;
+        renderer->frame_has_swapchain_image = false;
+        return true;
+    }
+    NC_CHECK_RESULT(
+            acquire_result == VK_SUCCESS || acquire_result == VK_SUBOPTIMAL_KHR,
+            "vkAcquireNextImageKHR failed with %s.",
+            nc__renderer_vk_result_string(acquire_result));
+
+#ifndef ANDROID
+    if (acquire_result == VK_SUBOPTIMAL_KHR) {
+        renderer->swapchain_dirty = true;
+    }
+#endif
+
+    renderer->frame_has_swapchain_image = true;
     return true;
 
 error:
-    SDL_CancelGPUCommandBuffer(renderer->frame_command_buffer);
-    renderer->frame_command_buffer = NULL;
+    if (renderer->frame_command_buffer) {
+        vkFreeCommandBuffers(renderer->device, renderer->command_pool, 1, &renderer->frame_command_buffer);
+        renderer->frame_command_buffer = VK_NULL_HANDLE;
+    }
     return false;
 }
 
 bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     NC_ASSERT(renderer->frame_command_buffer);
 
-    const bool submit_result = SDL_SubmitGPUCommandBuffer(renderer->frame_command_buffer);
-    renderer->frame_command_buffer = NULL;
-    renderer->frame_swapchain_texture = NULL;
-    NC_CHECK_SDL_RESULT(submit_result);
+    if (renderer->transfer_size > 0) {
+        NC__CHECK_VK_RESULT(vmaFlushAllocation(
+                renderer->allocator,
+                renderer->transfer_allocation,
+                0,
+                renderer->transfer_size));
+    }
 
+    NC__CHECK_VK_RESULT(vkEndCommandBuffer(renderer->frame_command_buffer));
+    NC__CHECK_VK_RESULT(vkResetFences(renderer->device, 1, &renderer->frame_fence));
+
+    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
+        .pWaitSemaphores = renderer->frame_has_swapchain_image ? &renderer->image_available_semaphore : NULL,
+        .pWaitDstStageMask = renderer->frame_has_swapchain_image ? &wait_stage : NULL,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &renderer->frame_command_buffer,
+        .signalSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
+        .pSignalSemaphores = renderer->frame_has_swapchain_image ? &renderer->render_finished_semaphore : NULL,
+    };
+    NC__CHECK_VK_RESULT(vkQueueSubmit(renderer->queue, 1, &submit_info, renderer->frame_fence));
+    renderer->frame_fence_pending = true;
+
+    if (renderer->frame_has_swapchain_image) {
+        const VkResult present_result = vkQueuePresentKHR(
+                renderer->queue,
+                &(VkPresentInfoKHR){
+                    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores = &renderer->render_finished_semaphore,
+                    .swapchainCount = 1,
+                    .pSwapchains = &renderer->swapchain,
+                    .pImageIndices = &renderer->frame_swapchain_image_index,
+                });
+        if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
+            renderer->surface_dirty = true;
+            renderer->swapchain_dirty = true;
+        } else if (present_result == VK_ERROR_OUT_OF_DATE_KHR) {
+            renderer->swapchain_dirty = true;
+#ifndef ANDROID
+        } else if (present_result == VK_SUBOPTIMAL_KHR) {
+            renderer->swapchain_dirty = true;
+#endif
+        } else {
+            NC__CHECK_VK_RESULT(present_result);
+        }
+    }
+
+    vkFreeCommandBuffers(renderer->device, renderer->command_pool, 1, &renderer->frame_command_buffer);
+    renderer->frame_command_buffer = VK_NULL_HANDLE;
+    renderer->frame_has_swapchain_image = false;
     return true;
 
 error:
+    renderer->frame_command_buffer = VK_NULL_HANDLE;
     return false;
 }
 
@@ -1242,25 +2655,33 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
     const nc_renderer_buffer_usage_t usage,
     const uint32_t initial_size
 ) {
-    static const uint8_t nc_to_sdl_usage[] = {
-        [NC_RENDERER_BUFFER_USAGE_VERTEX] = SDL_GPU_BUFFERUSAGE_VERTEX,
-        [NC_RENDERER_BUFFER_USAGE_INDEX] = SDL_GPU_BUFFERUSAGE_INDEX,
-        [NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ] = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+    static const VkBufferUsageFlags nc_to_vk_usage[] = {
+        [NC_RENDERER_BUFFER_USAGE_VERTEX] = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        [NC_RENDERER_BUFFER_USAGE_INDEX] = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        [NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ] = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
     };
 
     NC_ASSERT(usage > 0 && usage <= NC_RENDERER_BUFFER_USAGE_COUNT);
+    NC_ASSERT(initial_size > 0);
 
-    nc_renderer_buffer_t* result = malloc(sizeof(*result));
-    *result = (nc_renderer_buffer_t){
-        .gpu_buffer = SDL_CreateGPUBuffer(renderer->gpu_device, &(SDL_GPUBufferCreateInfo){
-            .usage = nc_to_sdl_usage[usage],
-            .size = initial_size,
-        }),
-        .usage = nc_to_sdl_usage[usage],
-        .capacity = initial_size,
-    };
-    NC_CHECK_SDL_RESULT(result->gpu_buffer);
+    nc_renderer_buffer_t* result = calloc(1, sizeof(*result));
+    result->usage = nc_to_vk_usage[usage] | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    result->capacity = initial_size;
 
+    NC__CHECK_VK_RESULT(vmaCreateBuffer(
+            renderer->allocator,
+            &(VkBufferCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = initial_size,
+                .usage = result->usage,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            },
+            &(VmaAllocationCreateInfo){
+                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+            },
+            &result->buffer,
+            &result->allocation,
+            NULL));
     return result;
 
 error:
@@ -1273,7 +2694,11 @@ void nc_renderer_destroy_buffer(nc_renderer_t* renderer, nc_renderer_buffer_t* b
         return;
     }
 
-    SDL_ReleaseGPUBuffer(renderer->gpu_device, buffer->gpu_buffer);
+    if (!renderer->frame_command_buffer && renderer->frame_fence_pending) {
+        nc__renderer_wait_idle(renderer);
+    }
+
+    vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
     free(buffer);
 }
 
@@ -1285,14 +2710,26 @@ bool nc_renderer_queue_buffer_upload(
 ) {
     if (size > buffer->capacity) {
         const uint32_t new_capacity = nc__renderer_next_capacity(buffer->capacity, size, buffer->capacity);
-        SDL_GPUBuffer* new_gpu_buffer = SDL_CreateGPUBuffer(renderer->gpu_device, &(SDL_GPUBufferCreateInfo){
-            .usage = buffer->usage,
-            .size = new_capacity,
-        });
-        NC_CHECK_SDL_RESULT(new_gpu_buffer);
+        VkBuffer new_buffer;
+        VmaAllocation new_allocation;
+        NC__CHECK_VK_RESULT(vmaCreateBuffer(
+                renderer->allocator,
+                &(VkBufferCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .size = new_capacity,
+                    .usage = buffer->usage,
+                    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                },
+                &(VmaAllocationCreateInfo){
+                    .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+                },
+                &new_buffer,
+                &new_allocation,
+                NULL));
 
-        SDL_ReleaseGPUBuffer(renderer->gpu_device, buffer->gpu_buffer);
-        buffer->gpu_buffer = new_gpu_buffer;
+        vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
+        buffer->buffer = new_buffer;
+        buffer->allocation = new_allocation;
         buffer->capacity = new_capacity;
     }
 
@@ -1310,7 +2747,7 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
 ) {
     nc_renderer_texture_t* result = nc__renderer_create_texture_object(
             renderer,
-            SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_R8G8B8A8_UNORM,
             width,
             height,
             1,
@@ -1319,7 +2756,7 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
         return NULL;
     }
 
-    const uint32_t size = width * height * 4;
+    const uint32_t size = (uint32_t)width * (uint32_t)height * 4;
     if (!nc__renderer_queue_texture_upload(renderer, result, 0, pixels, size)) {
         nc__renderer_destroy_texture_object(renderer, result);
         return NULL;
@@ -1346,7 +2783,12 @@ nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(nc_renderer_t* re
         return NULL;
     }
 
-    const bool upload_result = nc__renderer_queue_texture_upload(renderer, texture, 0, texture_data.bytes, texture_data.size);
+    const bool upload_result = nc__renderer_queue_texture_upload(
+            renderer,
+            texture,
+            0,
+            texture_data.bytes,
+            texture_data.size);
     nc__renderer_free_texture_file_data(&texture_data);
     if (!upload_result) {
         nc__renderer_destroy_texture_object(renderer, texture);
@@ -1424,46 +2866,60 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         return false;
     }
 
-    if (!renderer->frame_swapchain_texture) {
-        // This is valid: The window is minimized or something. In this case, do not draw.
+    if (!renderer->frame_has_swapchain_image) {
         return true;
     }
 
-    SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(
-            renderer->frame_command_buffer,
-            &(SDL_GPUColorTargetInfo){
-                .texture = renderer->frame_swapchain_texture,
-                .clear_color = { NC__RENDERER_CLEAR_RED, NC__RENDERER_CLEAR_GREEN, NC__RENDERER_CLEAR_BLUE, 1.0f },
-                .load_op = SDL_GPU_LOADOP_CLEAR,
-                .store_op = SDL_GPU_STOREOP_STORE,
+    const VkClearValue clear_values[] = {
+        {
+            .color = {
+                .float32 = {
+                    NC__RENDERER_CLEAR_RED,
+                    NC__RENDERER_CLEAR_GREEN,
+                    NC__RENDERER_CLEAR_BLUE,
+                    1.0f,
+                },
             },
-            1,
-            &(SDL_GPUDepthStencilTargetInfo){
-                .texture = renderer->depth_texture,
-                .clear_depth = 1.0f,
-                .load_op = SDL_GPU_LOADOP_CLEAR,
-                .store_op = SDL_GPU_STOREOP_DONT_CARE,
-                .stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
-                .stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
-                .cycle = true,
-            });
-    NC_CHECK_SDL_RESULT(render_pass);
+        },
+        {
+            .depthStencil = { .depth = 1.0f },
+        },
+    };
+    vkCmdBeginRenderPass(
+            renderer->frame_command_buffer,
+            &(VkRenderPassBeginInfo){
+                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                .renderPass = renderer->render_pass,
+                .framebuffer = renderer->framebuffers[renderer->frame_swapchain_image_index],
+                .renderArea = {
+                    .extent = renderer->swapchain_extent,
+                },
+                .clearValueCount = NC_COUNTOF(clear_values),
+                .pClearValues = clear_values,
+            },
+            VK_SUBPASS_CONTENTS_INLINE);
 
+    nc__renderer_set_viewport_and_scissor(renderer, NULL);
     for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
         const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
-        nc__renderer_draw_chunk_opaque(renderer, render_pass, &draw);
+        if (!nc__renderer_draw_chunk_opaque(renderer, &draw)) {
+            return false;
+        }
     }
-    nc__renderer_draw_block_highlight(renderer, render_pass, frame->block_highlight_draw);
+    if (!nc__renderer_draw_block_highlight(renderer, frame->block_highlight_draw)) {
+        return false;
+    }
     for (uint32_t i = 0; i < frame->overlay_draw_count; i++) {
-        nc__renderer_draw_overlay(renderer, render_pass, &frame->overlay_draws[i]);
+        if (!nc__renderer_draw_overlay(renderer, &frame->overlay_draws[i])) {
+            return false;
+        }
     }
-    nc__renderer_draw_procedural_overlay(renderer, render_pass, frame->procedural_overlay_draw);
+    if (!nc__renderer_draw_procedural_overlay(renderer, frame->procedural_overlay_draw)) {
+        return false;
+    }
 
-    SDL_EndGPURenderPass(render_pass);
+    vkCmdEndRenderPass(renderer->frame_command_buffer);
     return true;
-
-error:
-    return false;
 }
 
 float nc_renderer_get_window_pixel_density(const nc_renderer_t* renderer) {
@@ -1512,34 +2968,39 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         return;
     }
 
-    if (renderer->frame_command_buffer) {
-        SDL_CancelGPUCommandBuffer(renderer->frame_command_buffer);
-    }
-
-    if (renderer->gpu_device) {
-        if (renderer->mapped_transfer_buffer) {
-            SDL_UnmapGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
-        }
+    if (renderer->device) {
+        nc__renderer_wait_idle(renderer);
 
         nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_stick_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->procedural_overlay_invert_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->gui_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->chunk_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->plasma_block_highlight_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->vignette_block_highlight_pipeline);
-        SDL_ReleaseGPUGraphicsPipeline(renderer->gpu_device, renderer->outline_block_highlight_pipeline);
-        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->chunk_sampler);
-        SDL_ReleaseGPUSampler(renderer->gpu_device, renderer->gui_sampler);
-        SDL_ReleaseGPUTransferBuffer(renderer->gpu_device, renderer->transfer_buffer);
-        SDL_ReleaseGPUTexture(renderer->gpu_device, renderer->depth_texture);
-        SDL_ReleaseWindowFromGPUDevice(renderer->gpu_device, renderer->window);
+        nc_renderer_destroy_buffer(renderer, renderer->dummy_storage_buffer);
+
+        nc__renderer_destroy_pipelines(renderer);
+        vkDestroySampler(renderer->device, renderer->chunk_sampler, NULL);
+        vkDestroySampler(renderer->device, renderer->gui_sampler, NULL);
+        nc__renderer_destroy_descriptor_state(renderer);
+        nc__renderer_destroy_swapchain(renderer);
+        vkDestroyRenderPass(renderer->device, renderer->render_pass, NULL);
+        nc__renderer_destroy_retired_transfer_buffers(renderer);
+        if (renderer->transfer_buffer) {
+            vmaDestroyBuffer(renderer->allocator, renderer->transfer_buffer, renderer->transfer_allocation);
+        }
+        vkDestroySemaphore(renderer->device, renderer->render_finished_semaphore, NULL);
+        vkDestroySemaphore(renderer->device, renderer->image_available_semaphore, NULL);
+        vkDestroyFence(renderer->device, renderer->frame_fence, NULL);
+        vkDestroyCommandPool(renderer->device, renderer->command_pool, NULL);
+        vmaDestroyAllocator(renderer->allocator);
+        vkDestroyDevice(renderer->device, NULL);
     }
 
-    free(renderer->upload_ops);
+    if (renderer->surface) {
+        SDL_Vulkan_DestroySurface(renderer->instance, renderer->surface, NULL);
+    }
+    vkDestroyInstance(renderer->instance, NULL);
 
+    free(renderer->retired_transfer_buffers);
+    free(renderer->upload_ops);
     SDL_DestroyWindow(renderer->window);
-    SDL_DestroyGPUDevice(renderer->gpu_device);
+    SDL_Vulkan_UnloadLibrary();
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 
     free(renderer);

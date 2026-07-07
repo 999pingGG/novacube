@@ -46,6 +46,8 @@ void nc_camera_get_view_projection(
 
     vkm_mat4 projection_matrix;
     vkm_perspective(vertical_fov, aspect_ratio, near_plane, far_plane, &projection_matrix);
+    // cvkm's ZO projection is Y-up; native Vulkan viewports map clip-space +Y downward.
+    projection_matrix.m11 = -projection_matrix.m11;
 
     vkm_mul(&projection_matrix, &view_matrix, view_projection);
 }
