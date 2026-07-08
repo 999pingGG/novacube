@@ -128,7 +128,7 @@ def compile_shaders(debug):
             
             params = ['glslc', '--target-env=vulkan1.1', str(shader), '-o', str(out)]
             if debug:
-                params.append('-g')
+                params.extend(['-g', '-O0'])
             else:
                 params.append('-O')
 
