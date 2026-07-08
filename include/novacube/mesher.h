@@ -50,7 +50,8 @@ typedef struct nc_mesh_face_data_t {
     uint16_t texture_layer;     // Bits 0-10: texture array layer (values 0-2047)
                                 // Max 2048 layers was picked to support at least most entry-level mobile GPUs
                                 // per Vulkan limits.
-    uint16_t second_texture;    // Unimplemented but possibly cool for biome blending or something.
+    uint8_t ambient_occlusion;  // 2 bits for every face corner. 4 different values. A total of 8 bits per face.
+    uint8_t unused;             // Reserved for future biome blending, lighting, or something.
 } nc_mesh_face_data_t;
 
 #define TDS_DECLARE

@@ -43,9 +43,9 @@ nc_mesher_t* nc_mesher_init(void) {
 }
 
 uint16_t nc_mesher_register_block_model(
-        nc_mesher_t* mesher,
-        const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
-        const uint16_t textures[6]
+    nc_mesher_t* mesher,
+    const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
+    const uint16_t textures[6]
 ) {
     NC_ASSERT(mesher->block_models.count < UINT16_MAX);
     const uint16_t result = mesher->block_models.count;
@@ -122,6 +122,112 @@ static uint16_t nc__chunk_get_block(const uint16_t* chunk_and_neighbors[3][3][3]
     }
 
     return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
+}
+
+static bool nc__chunk_is_solid_from_axis_columns(
+    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    const int x,
+    const int y,
+    const int z
+) {
+    return (axis_columns[0][z][x] >> y & 1) != 0;
+}
+
+static uint16_t nc__chunk_build_face_ao_mask(
+    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    const int direction,
+    int x,
+    int y,
+    int z
+) {
+    // Same 3x3 neighbour layout as TanTanDev's reference implementation.
+    static const int8_t adjacent_ao_offsets[9][2] = {
+        { -1, -1 }, { -1,  0 }, { -1,  1 },
+        {  0, -1 }, {  0,  0 }, {  0,  1 },
+        {  1, -1 }, {  1,  0 }, {  1,  1 },
+    };
+
+    uint16_t result = 0;
+
+    // Shift into the padded chunk coordinates so chunk-edge AO can hit neighbour chunks too.
+    x++;
+    y++;
+    z++;
+
+    for (int i = 0; i < (int)NC_COUNTOF(adjacent_ao_offsets); i++) {
+        const int8_t offset_x = adjacent_ao_offsets[i][0];
+        const int8_t offset_y = adjacent_ao_offsets[i][1];
+        int sample_x;
+        int sample_y;
+        int sample_z;
+
+        switch (direction) {
+            case 0:
+                // down
+                sample_x = x + offset_x;
+                sample_y = y - 1;
+                sample_z = z + offset_y;
+                break;
+            case 1:
+                // up
+                sample_x = x + offset_x;
+                sample_y = y + 1;
+                sample_z = z + offset_y;
+                break;
+            case 2:
+                // left
+                sample_x = x - 1;
+                sample_y = y + offset_y;
+                sample_z = z + offset_x;
+                break;
+            case 3:
+                // right
+                sample_x = x + 1;
+                sample_y = y + offset_y;
+                sample_z = z + offset_x;
+                break;
+            case 4:
+                // back (-z)
+                sample_x = x + offset_x;
+                sample_y = y + offset_y;
+                sample_z = z - 1;
+                break;
+            case 5:
+                // front (+z)
+                sample_x = x + offset_x;
+                sample_y = y + offset_y;
+                sample_z = z + 1;
+                break;
+            default:
+                NC_ASSERT(false);
+                return 0;
+        }
+
+        if (nc__chunk_is_solid_from_axis_columns(axis_columns, sample_x, sample_y, sample_z)) {
+            result |= (uint16_t)(1 << i);
+        }
+    }
+
+    return result;
+}
+
+static uint8_t nc__chunk_pack_face_ambient_occlusion(const uint16_t ao_mask) {
+    const uint8_t corner_0 = (uint8_t)((ao_mask >> 0 & 1) + (ao_mask >> 1 & 1) + (ao_mask >> 3 & 1));
+    const uint8_t corner_1 = (uint8_t)((ao_mask >> 3 & 1) + (ao_mask >> 6 & 1) + (ao_mask >> 7 & 1));
+    const uint8_t corner_2 = (uint8_t)((ao_mask >> 5 & 1) + (ao_mask >> 7 & 1) + (ao_mask >> 8 & 1));
+    const uint8_t corner_3 = (uint8_t)((ao_mask >> 1 & 1) + (ao_mask >> 2 & 1) + (ao_mask >> 5 & 1));
+
+    return (uint8_t)(corner_0 | corner_1 << 2 | corner_2 << 4 | corner_3 << 6);
+}
+
+static uint8_t nc__chunk_compute_face_ambient_occlusion(
+    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    const int direction,
+    const int x,
+    const int y,
+    const int z
+) {
+    return nc__chunk_pack_face_ambient_occlusion(nc__chunk_build_face_ao_mask(axis_columns, direction, x, y, z));
 }
 
 static vkm_ubvec3 nc__world_to_sample_coords(const int direction, const int plane, const int x, const int y) {
@@ -248,6 +354,8 @@ void nc_mesher_compute_chunk(
         }
     }
 
+    const uint32_t non_solid_face_data_count = face_data_result->count;
+
     // neighbor chunk voxels.
     // note(leddoo): couldn't be bothered to optimize these.
     //  might be worth it though. together, they take
@@ -280,6 +388,32 @@ void nc_mesher_compute_chunk(
                 }
             }
         }
+    }
+
+    if (non_solid_face_data_count != 0) {
+        nc_mesh_face_data_t* face_data = face_data_result->array;
+        uint32_t face_data_index = 0;
+
+        block_index = 0;
+        for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
+            for (int y = 0; y < NC_MESHER_CHUNK_SIZE; y++) {
+                for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
+                    const nc_block_model_t* model = nc__get_block_model(mesher, chunk[block_index]);
+                    if (!model->solid && model->quads.count) {
+                        for (int direction = 0; direction < 6; direction++) {
+                            face_data[face_data_index + direction].ambient_occlusion =
+                                    nc__chunk_compute_face_ambient_occlusion(axis_columns, direction, x, y, z);
+                        }
+
+                        face_data_index += 6;
+                    }
+
+                    block_index++;
+                }
+            }
+        }
+
+        NC_ASSERT(face_data_index == non_solid_face_data_count);
     }
 
     // face culling
@@ -354,6 +488,12 @@ void nc_mesher_compute_chunk(
                         nc_mesh_face_data_t* face_data = nc_mesh_face_data_vec_grow(face_data_result, 1);
                         *face_data = (nc_mesh_face_data_t){
                             .texture_layer = block_model->texture_array_layers[direction],
+                            .ambient_occlusion = nc__chunk_compute_face_ambient_occlusion(
+                                    axis_columns,
+                                    direction,
+                                    block_coords.x,
+                                    block_coords.y,
+                                    block_coords.z),
                         };
                     }
                 }
