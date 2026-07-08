@@ -31,7 +31,9 @@ float ambient_occlusion_lerp(uint occlusion) {
 }
 
 void main() {
-    uvec2 face_data_coord = uvec2(floor(face_data_uv));
+    // Interpolation and rasterization precision can put fragments on the far edge a hair beyond the quad. Clamp the
+    // discrete lookup so those fragments cannot read past the face-data array through the device address.
+    uvec2 face_data_coord = min(uvec2(floor(face_data_uv)), face_data_size - uvec2(1));
     uint face_index = face_data_coord.y * face_data_size.x + face_data_coord.x;
     nc_mesh_face_data_t face = pc.face_data.faces[face_data_offset + face_index];
 
