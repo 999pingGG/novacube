@@ -1,10 +1,16 @@
 #version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
 layout(early_fragment_tests) in;
 
-layout(std140, set = 3, binding = 0) uniform block_highlight_fragment_uniforms {
+layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer block_highlight_fragment_uniforms {
     vec4 color;
     float time;
-} uniforms;
+};
+
+layout(push_constant) uniform push_constants {
+    layout(offset = 16) block_highlight_fragment_uniforms uniforms;
+} pc;
 
 layout(location = 0) in vec2 in_face_uv;
 
@@ -85,6 +91,6 @@ float snoise(vec2 v)
 //////////////////////////////////////////////////////////////////////
 
 void main() {
-    out_color = uniforms.color;
-    out_color.a *= abs(sin(uniforms.time * 5.0 + snoise(in_face_uv * 3.0 + vec2(uniforms.time) * 0.5)));
+    out_color = pc.uniforms.color;
+    out_color.a *= abs(sin(pc.uniforms.time * 5.0 + snoise(in_face_uv * 3.0 + vec2(pc.uniforms.time) * 0.5)));
 }

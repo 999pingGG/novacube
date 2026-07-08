@@ -1,18 +1,25 @@
 #version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
 
 struct nc_mesh_quad_t {
     uint greedy_quad;
     uint plane_direction_and_face_data_offset;
 };
 
-layout(std430, set = 0, binding = 0) restrict readonly buffer quad_buffer {
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer quad_buffer {
     nc_mesh_quad_t data[];
-} quads;
+};
 
-layout(std140, set = 1, binding = 0) uniform chunk_uniforms {
+layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
     mat4 view_projection;
     vec3 position;
-} uniforms;
+};
+
+layout(push_constant) uniform push_constants {
+    quad_buffer quads;
+    chunk_uniforms uniforms;
+} pc;
 
 // Note: mediump is bugged with PowerVR Rogue
 layout(location = 0) flat out uint face_data_offset;
@@ -95,7 +102,7 @@ void main() {
     int quad_index = gl_VertexIndex / 6;
     int vertex_index_within_quad = gl_VertexIndex % 6;
 
-    nc_mesh_quad_t quad = quads.data[quad_index];
+    nc_mesh_quad_t quad = pc.quads.data[quad_index];
 
     // Unpack data
     uvec2 quad_position = uvec2(quad.greedy_quad & 255, quad.greedy_quad >> 8 & 255);
@@ -116,5 +123,6 @@ void main() {
 
     uvec3 translation = world_to_sample_coords(direction, plane, vertex_position);
 
-    gl_Position = uniforms.view_projection * vec4(vec3(translation) * INVERSE_MODEL_SIZE + uniforms.position, 1.0);
+    gl_Position = pc.uniforms.view_projection
+            * vec4(vec3(translation) * INVERSE_MODEL_SIZE + pc.uniforms.position, 1.0);
 }

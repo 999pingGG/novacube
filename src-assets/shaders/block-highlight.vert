@@ -1,9 +1,15 @@
 #version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
 
-layout(std140, set = 1, binding = 0) uniform block_highlight_vertex_uniforms {
+layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer block_highlight_vertex_uniforms {
     mat4 view_projection;
     vec4 block_position_and_scale;
-} uniforms;
+};
+
+layout(push_constant) uniform push_constants {
+    block_highlight_vertex_uniforms uniforms;
+} pc;
 
 layout(location = 0) out vec2 out_face_uv;
 
@@ -79,10 +85,10 @@ const vec3 face_normals[] = vec3[](
     vec3( 0.0,  0.0,  1.0));
 
 void main() {
-    const vec3 center = uniforms.block_position_and_scale.xyz + vec3(0.5);
-    const vec3 vertex = (cube_vertices[gl_VertexIndex] - vec3(0.5)) * uniforms.block_position_and_scale.w;
+    const vec3 center = pc.uniforms.block_position_and_scale.xyz + vec3(0.5);
+    const vec3 vertex = (cube_vertices[gl_VertexIndex] - vec3(0.5)) * pc.uniforms.block_position_and_scale.w;
     const vec3 world_position = center + vertex;
 
-    gl_Position = uniforms.view_projection * vec4(world_position, 1.0);
+    gl_Position = pc.uniforms.view_projection * vec4(world_position, 1.0);
     out_face_uv = face_uvs[gl_VertexIndex % 6];
 }

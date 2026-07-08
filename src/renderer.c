@@ -37,17 +37,20 @@ NC_IGNORE_ALL_WARNINGS_END
 #endif
 
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
-#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536u
+#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536
 #define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 4096
+#define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
+#define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
+#define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
 #define NC__RENDERER_CLEAR_RED 0.53f
 #define NC__RENDERER_CLEAR_GREEN 0.81f
 #define NC__RENDERER_CLEAR_BLUE 0.92f
 #define NC__RENDERER_DEPTH_FORMAT VK_FORMAT_D16_UNORM
 
-#define NC__CHECK_VK_RESULT(result_) do { \
-    const VkResult nc__vk_result = (result_); \
+#define NC__CHECK_VK_RESULT(result) do { \
+    const VkResult nc__vk_result = (result); \
     if (nc__vk_result != VK_SUCCESS) { \
-        NC_SET_ERROR("%s failed with %s.", #result_, nc__renderer_vk_result_string(nc__vk_result)); \
+        NC_SET_ERROR(nc__renderer_vk_result_string(nc__vk_result)); \
         goto error; \
     } \
 } while (false)
@@ -114,7 +117,7 @@ typedef struct nc_renderer_buffer_t {
     VmaAllocation allocation;
     VkBufferUsageFlags usage;
     uint32_t capacity;
-    uint64_t queued_upload_frame;
+    VkDeviceAddress address;
 } nc_renderer_buffer_t;
 
 typedef struct nc__renderer_procedural_overlay_uniforms_t {
@@ -138,6 +141,16 @@ typedef struct nc__renderer_chunk_uniforms_t {
     vkm_vec3 position;
 } nc__renderer_chunk_uniforms_t;
 
+typedef struct nc__renderer_chunk_push_constants_t {
+    VkDeviceAddress quad_buffer;
+    VkDeviceAddress uniforms;
+    VkDeviceAddress face_data_buffer;
+} nc__renderer_chunk_push_constants_t;
+
+typedef struct nc__renderer_address_push_constants_t {
+    VkDeviceAddress data;
+} nc__renderer_address_push_constants_t;
+
 typedef struct nc_renderer_t {
     VkInstance instance;
     VkPhysicalDevice physical_device;
@@ -145,6 +158,8 @@ typedef struct nc_renderer_t {
     VkDevice device;
     VkQueue queue;
     uint32_t queue_family_index;
+    PFN_vkGetBufferDeviceAddressKHR get_buffer_device_address;
+    bool khr_get_buffer_device_address;
     VmaAllocator allocator;
 
     SDL_Window* window;
@@ -168,7 +183,7 @@ typedef struct nc_renderer_t {
     VkImageView depth_image_view;
 
     VkRenderPass render_pass;
-    VkDescriptorSetLayout descriptor_set_layouts[4];
+    VkDescriptorSetLayout texture_descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     VkDescriptorPool frame_descriptor_pool;
     uint32_t frame_descriptor_set_count;
@@ -183,7 +198,6 @@ typedef struct nc_renderer_t {
     VkSampler chunk_sampler;
     VkSampler gui_sampler;
     nc_renderer_texture_t* procedural_overlay_crosshair_texture;
-    nc_renderer_buffer_t* dummy_storage_buffer;
 
     VkCommandPool command_pool;
     VkCommandBuffer frame_command_buffer;
@@ -196,6 +210,7 @@ typedef struct nc_renderer_t {
     uint32_t frame_swapchain_image_index;
 
     VkBuffer transfer_buffer;
+    VkDeviceAddress transfer_buffer_address;
     VmaAllocation transfer_allocation;
     void* mapped_transfer_buffer;
     uint32_t transfer_size;
@@ -217,6 +232,28 @@ typedef struct nc_renderer_t {
 #define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
 #define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
 #include <tds/vector.h>
+
+typedef struct nc__renderer_required_extension {
+    const char* const* alternative_names;
+} nc__renderer_required_extension;
+
+static const nc__renderer_required_extension nc__renderer_required_extensions[] = {
+    {
+        .alternative_names = (const char* const []){ VK_KHR_SWAPCHAIN_EXTENSION_NAME, NULL },
+    },
+    {
+        .alternative_names = (const char* const []){
+            VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+            VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+            NULL,
+        },
+    },
+    {
+        .alternative_names = (const char* const []){ VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME, NULL },
+    },
+};
+
+#define NC__RENDERER_REQUIRED_EXTENSION_COUNT NC_COUNTOF(nc__renderer_required_extensions)
 
 static const char* nc__renderer_vk_result_string(const VkResult result) {
 #define NC__VULKAN_ERROR_CASE(x) case x: return #x
@@ -302,6 +339,15 @@ static uint32_t nc__renderer_align_u32(const uint32_t value, const uint32_t alig
     return (value + alignment - 1) / alignment * alignment;
 }
 
+static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* renderer, const VkBuffer buffer) {
+    return renderer->get_buffer_device_address(
+            renderer->device,
+            &(VkBufferDeviceAddressInfo){
+                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                .buffer = buffer,
+            });
+}
+
 static void nc__renderer_free_texture_file_data(nc__renderer_texture_file_data_t* data) {
     free(data->bytes);
     *data = (nc__renderer_texture_file_data_t){ 0 };
@@ -356,18 +402,20 @@ static bool nc__renderer_create_transfer_buffer(nc_renderer_t* renderer, const u
             &(VkBufferCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                 .size = capacity,
-                .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             },
             &(VmaAllocationCreateInfo){
-                .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
-                .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
+                .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
             },
             &renderer->transfer_buffer,
             &renderer->transfer_allocation,
             &allocation_info));
+    NC_ASSERT(allocation_info.pMappedData);
     renderer->mapped_transfer_buffer = allocation_info.pMappedData;
     renderer->transfer_capacity = capacity;
+    renderer->transfer_buffer_address = nc__renderer_get_buffer_address(renderer, renderer->transfer_buffer);
     return true;
 
 error:
@@ -382,15 +430,18 @@ static bool nc__renderer_grow_transfer_buffer(nc_renderer_t* renderer, const uin
     VkBuffer old_buffer = renderer->transfer_buffer;
     VmaAllocation old_allocation = renderer->transfer_allocation;
     void* old_mapping = renderer->mapped_transfer_buffer;
+    const VkDeviceAddress old_address = renderer->transfer_buffer_address;
 
     renderer->transfer_buffer = VK_NULL_HANDLE;
     renderer->transfer_allocation = VK_NULL_HANDLE;
     renderer->mapped_transfer_buffer = NULL;
+    renderer->transfer_buffer_address = 0;
 
     if (!nc__renderer_create_transfer_buffer(renderer, new_capacity)) {
         renderer->transfer_buffer = old_buffer;
         renderer->transfer_allocation = old_allocation;
         renderer->mapped_transfer_buffer = old_mapping;
+        renderer->transfer_buffer_address = old_address;
         return false;
     }
 
@@ -438,7 +489,25 @@ static bool nc__renderer_reserve_transfer_bytes(
     return true;
 }
 
-static bool nc__renderer_physical_device_supports_extensions(const VkPhysicalDevice physical_device) {
+static bool nc__renderer_extension_list_contains(
+    const VkExtensionProperties* extensions,
+    const uint32_t extension_count,
+    const char* const name
+) {
+    for (uint32_t i = 0; i < extension_count; i++) {
+        if (strcmp(extensions[i].extensionName, name) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool nc__renderer_find_required_extensions(
+    const VkPhysicalDevice physical_device,
+    const char** out_enabled_extensions,
+    bool* khr_get_buffer_device_address
+) {
     VkExtensionProperties* extensions = NULL;
 
     uint32_t extension_count;
@@ -447,20 +516,81 @@ static bool nc__renderer_physical_device_supports_extensions(const VkPhysicalDev
     extensions = malloc(extension_count * sizeof(*extensions));
     NC__CHECK_VK_RESULT(vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, extensions));
 
-    bool has_swapchain = false;
-    for (uint32_t i = 0; i < extension_count; i++) {
-        if (strcmp(extensions[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
-            has_swapchain = true;
-            break;
+    uint32_t enabled_extension_count = 0;
+    for (uint32_t i = 0; i < NC__RENDERER_REQUIRED_EXTENSION_COUNT; i++) {
+        // iterate required extensions
+        const nc__renderer_required_extension* required_extension = &nc__renderer_required_extensions[i];
+        const char* selected_name = NULL;
+        for (uint32_t j = 0; required_extension->alternative_names[j]; j++) {
+            // iterate variants of the required extension
+            const char* const name = required_extension->alternative_names[j];
+            if (nc__renderer_extension_list_contains(extensions, extension_count, name)) {
+                // check the variant against the device's extension list
+                selected_name = name;
+                break;
+            }
+        }
+
+        if (!selected_name) {
+            free(extensions);
+            return false;
+        }
+
+        out_enabled_extensions[enabled_extension_count++] = selected_name;
+        if (strcmp(selected_name, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
+            *khr_get_buffer_device_address = true;
+        } else if (strcmp(selected_name, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
+            *khr_get_buffer_device_address = false;
         }
     }
 
     free(extensions);
-    return has_swapchain;
+    return enabled_extension_count == NC__RENDERER_REQUIRED_EXTENSION_COUNT;
 
 error:
     free(extensions);
     return false;
+}
+
+static bool nc__renderer_physical_device_supports_required_features(
+    const VkPhysicalDevice physical_device,
+    const bool khr_get_buffer_device_address
+) {
+    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
+    };
+    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
+    };
+    VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_layout_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
+    };
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &scalar_block_layout_features,
+    };
+    if (khr_get_buffer_device_address) {
+        scalar_block_layout_features.pNext = &buffer_device_address_features;
+    } else {
+        scalar_block_layout_features.pNext = &buffer_device_address_features_ext;
+    }
+
+    vkGetPhysicalDeviceFeatures2(physical_device, &features);
+
+#if NC__RENDERER_ASTC_TEXTURES
+    if (!features.features.textureCompressionASTC_LDR) {
+        return false;
+    }
+#endif
+
+    const VkBool32 buffer_device_address = khr_get_buffer_device_address
+            ? buffer_device_address_features.bufferDeviceAddress
+            : buffer_device_address_features_ext.bufferDeviceAddress;
+    if (!buffer_device_address || !scalar_block_layout_features.scalarBlockLayout) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool nc__renderer_find_queue_family(
@@ -502,13 +632,13 @@ error:
     return false;
 }
 
-VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physicalDevice) {
-    VkPhysicalDeviceMemoryProperties memoryProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+VkDeviceSize nc__renderer_get_vram_size(const VkPhysicalDevice physical_device) {
+    VkPhysicalDeviceMemoryProperties memory_properties;
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
 
     VkDeviceSize total = 0;
-    for (uint32_t i = 0; i < memoryProperties.memoryHeapCount; ++i) {
-        VkMemoryHeap heap = memoryProperties.memoryHeaps[i];
+    for (uint32_t i = 0; i < memory_properties.memoryHeapCount; ++i) {
+        const VkMemoryHeap heap = memory_properties.memoryHeaps[i];
 
         // Check whether the heap is dedicated memory.
         if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
@@ -519,7 +649,11 @@ VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physicalDevice) {
     return total;
 }
 
-static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const bool prefer_low_power) {
+static bool nc__renderer_select_physical_device(
+    nc_renderer_t* renderer,
+    const bool prefer_low_power,
+    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT]
+) {
     VkPhysicalDevice* physical_devices = NULL;
 
     uint32_t physical_device_count;
@@ -535,18 +669,17 @@ static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const b
     int highest_score = 0;
     VkDeviceSize best_memory = 0;
     for (uint32_t i = 0; i < physical_device_count; i++) {
-        VkPhysicalDeviceFeatures features;
-        vkGetPhysicalDeviceFeatures(physical_devices[i], &features);
-
-#if NC__RENDERER_ASTC_TEXTURES
-        if (!features.textureCompressionASTC_LDR) {
-            continue;
-        }
-#endif
-
         uint32_t queue_family_index;
-        if (!nc__renderer_physical_device_supports_extensions(physical_devices[i]) ||
-                !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
+        bool khr_get_buffer_device_address;
+
+        if (!nc__renderer_find_required_extensions(
+                physical_devices[i],
+                enabled_device_extensions,
+                &khr_get_buffer_device_address)
+            || !nc__renderer_physical_device_supports_required_features(
+                    physical_devices[i],
+                    khr_get_buffer_device_address)
+            || !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
             continue;
         }
 
@@ -559,6 +692,7 @@ static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const b
             renderer->physical_device = physical_devices[i];
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
+            renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
             break;
         }
 
@@ -590,19 +724,21 @@ static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const b
             renderer->physical_device = physical_devices[i];
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
+            renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
             best_memory = nc__renderer_get_vram_size(physical_devices[i]);
         } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
             const VkDeviceSize current_memory = nc__renderer_get_vram_size(physical_devices[i]);
             const bool larger = current_memory > best_memory;
             const bool smaller = current_memory < best_memory;
             const bool preferred =
-                    larger && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_LARGER
-                    || smaller && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_SMALLER;
+                    (larger && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_LARGER)
+                    || (smaller && gpu_memory_preference == NC_GPU_MEMORY_PREFERENCE_SMALLER);
 
             if (preferred) {
                 renderer->physical_device = physical_devices[i];
                 renderer->queue_family_index = queue_family_index;
                 renderer->physical_device_properties = physical_device_properties;
+                renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
                 best_memory = current_memory;
             }
         }
@@ -613,11 +749,11 @@ static bool nc__renderer_select_physical_device(nc_renderer_t* renderer, const b
         goto error;
     }
 
-    free(physical_devices);
+    free((void*)physical_devices);
     return true;
 
 error:
-    free(physical_devices);
+    free((void*)physical_devices);
     return false;
 }
 
@@ -647,44 +783,69 @@ error:
     return false;
 }
 
-static bool nc__renderer_create_device(nc_renderer_t* renderer) {
-    const float queue_priority = 1.0f;
-    VkPhysicalDeviceFeatures enabled_features = { 0 };
-    const VmaVulkanFunctions vma_functions = {
-        .vkGetInstanceProcAddr = vkGetInstanceProcAddr,
-        .vkGetDeviceProcAddr = vkGetDeviceProcAddr,
+static bool nc__renderer_create_device(
+    nc_renderer_t* renderer,
+    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT]
+) {
+    VkPhysicalDeviceFeatures2 enabled_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
     };
+    VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_layout_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
+        .scalarBlockLayout = VK_TRUE,
+    };
+    enabled_features.pNext = &scalar_block_layout_features;
 #if NC__RENDERER_ASTC_TEXTURES
-    enabled_features.textureCompressionASTC_LDR = VK_TRUE;
+    enabled_features.features.textureCompressionASTC_LDR = VK_TRUE;
 #endif
+    if (renderer->khr_get_buffer_device_address) {
+        scalar_block_layout_features.pNext = &(VkPhysicalDeviceBufferDeviceAddressFeaturesKHR){
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
+            .bufferDeviceAddress = VK_TRUE,
+        };
+    } else {
+        scalar_block_layout_features.pNext = &(VkPhysicalDeviceBufferDeviceAddressFeaturesEXT){
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
+            .bufferDeviceAddress = VK_TRUE,
+        };
+    }
 
     NC__CHECK_VK_RESULT(vkCreateDevice(
             renderer->physical_device,
             &(VkDeviceCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                .pNext = &enabled_features,
                 .queueCreateInfoCount = 1,
                 .pQueueCreateInfos = &(VkDeviceQueueCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                     .queueFamilyIndex = renderer->queue_family_index,
                     .queueCount = 1,
-                    .pQueuePriorities = &queue_priority,
+                    .pQueuePriorities = &(float){ 1.0f },
                 },
-                .enabledExtensionCount = 1,
-                .ppEnabledExtensionNames = (const char* const[]){ VK_KHR_SWAPCHAIN_EXTENSION_NAME },
-                .pEnabledFeatures = &enabled_features,
+                .enabledExtensionCount = NC__RENDERER_REQUIRED_EXTENSION_COUNT,
+                .ppEnabledExtensionNames = enabled_device_extensions,
             },
             NULL,
             &renderer->device));
     volkLoadDevice(renderer->device);
+    renderer->get_buffer_device_address = renderer->khr_get_buffer_device_address ? vkGetBufferDeviceAddressKHR : vkGetBufferDeviceAddressEXT;
+    if (!renderer->get_buffer_device_address) {
+        // last attempt at getting this function pointer
+        renderer->get_buffer_device_address = vkGetBufferDeviceAddress;
+    }
     vkGetDeviceQueue(renderer->device, renderer->queue_family_index, 0, &renderer->queue);
 
     NC__CHECK_VK_RESULT(vmaCreateAllocator(
             &(VmaAllocatorCreateInfo){
+                .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
                 .physicalDevice = renderer->physical_device,
                 .device = renderer->device,
                 .instance = renderer->instance,
                 .vulkanApiVersion = NC__RENDERER_VK_API_VERSION,
-                .pVulkanFunctions = &vma_functions,
+                .pVulkanFunctions = &(VmaVulkanFunctions){
+                    .vkGetInstanceProcAddr = vkGetInstanceProcAddr,
+                    .vkGetDeviceProcAddr = vkGetDeviceProcAddr,
+                },
             },
             &renderer->allocator));
     return true;
@@ -845,62 +1006,57 @@ error:
 }
 
 static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
-    const VkAttachmentDescription attachments[] = {
-        {
-            .format = renderer->swapchain_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        },
-        {
-            .format = NC__RENDERER_DEPTH_FORMAT,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        },
-    };
-    const VkAttachmentReference color_attachment = {
-        .attachment = 0,
-        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    };
-    const VkAttachmentReference depth_attachment = {
-        .attachment = 1,
-        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    };
-    const VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_attachment,
-        .pDepthStencilAttachment = &depth_attachment,
-    };
-    const VkSubpassDependency dependency = {
-        .srcSubpass = VK_SUBPASS_EXTERNAL,
-        .dstSubpass = 0,
-        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-    };
-
     NC__CHECK_VK_RESULT(vkCreateRenderPass(
             renderer->device,
             &(VkRenderPassCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                .attachmentCount = NC_COUNTOF(attachments),
-                .pAttachments = attachments,
+                .attachmentCount = 2,
+                .pAttachments = (VkAttachmentDescription[]){
+                    {
+                        .format = renderer->swapchain_format,
+                        .samples = VK_SAMPLE_COUNT_1_BIT,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    },
+                    {
+                        .format = NC__RENDERER_DEPTH_FORMAT,
+                        .samples = VK_SAMPLE_COUNT_1_BIT,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    },
+                },
                 .subpassCount = 1,
-                .pSubpasses = &subpass,
+                .pSubpasses = &(VkSubpassDescription){
+                    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    .colorAttachmentCount = 1,
+                    .pColorAttachments = &(VkAttachmentReference){
+                        .attachment = 0,
+                        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    },
+                    .pDepthStencilAttachment = &(VkAttachmentReference){
+                        .attachment = 1,
+                        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    },
+                },
                 .dependencyCount = 1,
-                .pDependencies = &dependency,
+                .pDependencies = &(VkSubpassDependency){
+                    .srcSubpass = VK_SUBPASS_EXTERNAL,
+                    .dstSubpass = 0,
+                    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                },
             },
             NULL,
             &renderer->render_pass));
@@ -940,7 +1096,8 @@ static bool nc__renderer_create_depth_image(nc_renderer_t* renderer) {
                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             },
             &(VmaAllocationCreateInfo){
-                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+                .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
             },
             &renderer->depth_image,
             &renderer->depth_allocation,
@@ -1184,29 +1341,17 @@ static bool nc__renderer_recreate_swapchain(nc_renderer_t* renderer) {
 }
 
 static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
-    const VkDescriptorPoolSize pool_sizes[] = {
-        {
-            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-        },
-        {
-            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-        },
-        {
-            .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-        },
-    };
-
     NC__CHECK_VK_RESULT(vkCreateDescriptorPool(
             renderer->device,
             &(VkDescriptorPoolCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                 .flags = 0,
                 .maxSets = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-                .poolSizeCount = NC_COUNTOF(pool_sizes),
-                .pPoolSizes = pool_sizes,
+                .poolSizeCount = 1,
+                .pPoolSizes = &(VkDescriptorPoolSize){
+                    .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                },
             },
             NULL,
             &renderer->frame_descriptor_pool));
@@ -1217,72 +1362,39 @@ error:
 }
 
 static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) {
-    const VkDescriptorSetLayoutBinding set0_bindings[] = {
-        {
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-    };
-    const VkDescriptorSetLayoutBinding set1_bindings[] = {
-        {
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-    };
-    const VkDescriptorSetLayoutBinding set2_bindings[] = {
-        {
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-        {
-            .binding = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-    };
-    const VkDescriptorSetLayoutBinding set3_bindings[] = {
-        {
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        },
-    };
-    const struct {
-        const VkDescriptorSetLayoutBinding* bindings;
-        uint32_t binding_count;
-    } layouts[] = {
-        { set0_bindings, NC_COUNTOF(set0_bindings) },
-        { set1_bindings, NC_COUNTOF(set1_bindings) },
-        { set2_bindings, NC_COUNTOF(set2_bindings) },
-        { set3_bindings, NC_COUNTOF(set3_bindings) },
-    };
-
-    for (uint32_t i = 0; i < NC_COUNTOF(renderer->descriptor_set_layouts); i++) {
-        NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
-                renderer->device,
-                &(VkDescriptorSetLayoutCreateInfo){
-                    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                    .bindingCount = layouts[i].binding_count,
-                    .pBindings = layouts[i].bindings,
+    NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
+            renderer->device,
+            &(VkDescriptorSetLayoutCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .bindingCount = 1,
+                .pBindings = &(VkDescriptorSetLayoutBinding){
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
                 },
-                NULL,
-                &renderer->descriptor_set_layouts[i]));
-    }
-
+            },
+            NULL,
+            &renderer->texture_descriptor_set_layout));
     NC__CHECK_VK_RESULT(vkCreatePipelineLayout(
             renderer->device,
             &(VkPipelineLayoutCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                .setLayoutCount = NC_COUNTOF(renderer->descriptor_set_layouts),
-                .pSetLayouts = renderer->descriptor_set_layouts,
+                .setLayoutCount = 1,
+                .pSetLayouts = &renderer->texture_descriptor_set_layout,
+                .pushConstantRangeCount = 2,
+                .pPushConstantRanges = (VkPushConstantRange[]){
+                    {
+                        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                        .offset = NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+                        .size = 2 * sizeof(VkDeviceAddress),
+                    },
+                    {
+                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .offset = NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
+                        .size = sizeof(VkDeviceAddress),
+                    },
+                },
             },
             NULL,
             &renderer->pipeline_layout));
@@ -1299,10 +1411,8 @@ static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
     vkDestroyPipelineLayout(renderer->device, renderer->pipeline_layout, NULL);
     renderer->pipeline_layout = VK_NULL_HANDLE;
 
-    for (uint32_t i = 0; i < NC_COUNTOF(renderer->descriptor_set_layouts); i++) {
-        vkDestroyDescriptorSetLayout(renderer->device, renderer->descriptor_set_layouts[i], NULL);
-        renderer->descriptor_set_layouts[i] = VK_NULL_HANDLE;
-    }
+    vkDestroyDescriptorSetLayout(renderer->device, renderer->texture_descriptor_set_layout, NULL);
+    renderer->texture_descriptor_set_layout = VK_NULL_HANDLE;
 }
 
 static VkShaderModule nc__renderer_load_shader(const nc_renderer_t* renderer, const char* path) {
@@ -1344,64 +1454,56 @@ static bool nc__renderer_create_graphics_pipeline(
     VkShaderModule fragment_shader = nc__renderer_load_shader(renderer, fragment_shader_path);
     NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load Vulkan shaders.");
 
-    const VkPipelineShaderStageCreateInfo shader_stages[] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vertex_shader,
-            .pName = "main",
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = fragment_shader,
-            .pName = "main",
-        },
-    };
-    const VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-    const VkPipelineViewportStateCreateInfo viewport_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount = 1,
-    };
-    const VkPipelineMultisampleStateCreateInfo multisample_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo color_blend_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = color_blend_attachment,
-    };
-    const VkDynamicState dynamic_states[] = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-    };
-    const VkPipelineDynamicStateCreateInfo dynamic_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = NC_COUNTOF(dynamic_states),
-        .pDynamicStates = dynamic_states,
-    };
-
     NC__CHECK_VK_RESULT(vkCreateGraphicsPipelines(
             renderer->device,
             VK_NULL_HANDLE,
             1,
             &(VkGraphicsPipelineCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                .stageCount = NC_COUNTOF(shader_stages),
-                .pStages = shader_stages,
+                .stageCount = 2,
+                .pStages = (VkPipelineShaderStageCreateInfo[]){
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                        .module = vertex_shader,
+                        .pName = "main",
+                    },
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .module = fragment_shader,
+                        .pName = "main",
+                    },
+                },
                 .pVertexInputState = vertex_input_state,
-                .pInputAssemblyState = &input_assembly_state,
-                .pViewportState = &viewport_state,
+                .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                },
+                .pViewportState = &(VkPipelineViewportStateCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                    .viewportCount = 1,
+                    .scissorCount = 1,
+                },
                 .pRasterizationState = rasterization_state,
-                .pMultisampleState = &multisample_state,
+                .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+                },
                 .pDepthStencilState = depth_stencil_state,
-                .pColorBlendState = &color_blend_state,
-                .pDynamicState = &dynamic_state,
+                .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                    .attachmentCount = 1,
+                    .pAttachments = color_blend_attachment,
+                },
+                .pDynamicState = &(VkPipelineDynamicStateCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                    .dynamicStateCount = 2,
+                    .pDynamicStates = (VkDynamicState[]){
+                        VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR,
+                    },
+                },
                 .layout = renderer->pipeline_layout,
                 .renderPass = renderer->render_pass,
                 .subpass = 0,
@@ -1522,43 +1624,40 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         return false;
     }
 
-    const VkVertexInputBindingDescription gui_binding = {
-        .binding = 0,
-        .stride = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-    };
-    const VkVertexInputAttributeDescription gui_attributes[] = {
-        {
-            .location = 0,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32_SFLOAT,
-            .offset = 0,
-        },
-        {
-            .location = 1,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32_SFLOAT,
-            .offset = sizeof(vkm_vec2),
-        },
-        {
-            .location = 2,
-            .binding = 0,
-            .format = VK_FORMAT_R8G8B8A8_UNORM,
-            .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
-        },
-    };
-    const VkPipelineVertexInputStateCreateInfo gui_vertex_input = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &gui_binding,
-        .vertexAttributeDescriptionCount = NC_COUNTOF(gui_attributes),
-        .pVertexAttributeDescriptions = gui_attributes,
-    };
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
-            &gui_vertex_input,
+            &(VkPipelineVertexInputStateCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                .vertexBindingDescriptionCount = 1,
+                .pVertexBindingDescriptions = &(VkVertexInputBindingDescription){
+                    .binding = 0,
+                    .stride = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
+                    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+                },
+                .vertexAttributeDescriptionCount = 3,
+                .pVertexAttributeDescriptions = (VkVertexInputAttributeDescription[]){
+                    {
+                        .location = 0,
+                        .binding = 0,
+                        .format = VK_FORMAT_R32G32_SFLOAT,
+                        .offset = 0,
+                    },
+                    {
+                        .location = 1,
+                        .binding = 0,
+                        .format = VK_FORMAT_R32G32_SFLOAT,
+                        .offset = sizeof(vkm_vec2),
+                    },
+                    {
+                        .location = 2,
+                        .binding = 0,
+                        .format = VK_FORMAT_R8G8B8A8_UNORM,
+                        .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
+                    },
+                },
+            },
             &raster_no_cull,
             &depth_disabled,
             &alpha_blend,
@@ -1663,26 +1762,42 @@ error:
     return false;
 }
 
-static bool nc__renderer_allocate_descriptor_set(
+static bool nc__renderer_write_buffer_reference_data(
     nc_renderer_t* renderer,
-    const uint32_t set_index,
-    VkDescriptorSet* out_descriptor_set
+    const void* data,
+    const uint32_t size,
+    VkDeviceAddress* out_address
 ) {
-    NC_ASSERT(set_index < NC_COUNTOF(renderer->descriptor_set_layouts));
+    uint32_t offset = 0;
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT, &offset)) {
+        return false;
+    }
+    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+
+    *out_address = renderer->transfer_buffer_address + offset;
+    return true;
+}
+
+static bool nc__renderer_bind_texture_descriptor_set(
+    nc_renderer_t* renderer,
+    const nc_renderer_texture_t* texture,
+    const VkSampler sampler
+) {
     if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
         NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
         return false;
     }
 
+    VkDescriptorSet texture_set;
     const VkResult result = vkAllocateDescriptorSets(
             renderer->device,
             &(VkDescriptorSetAllocateInfo){
                 .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                 .descriptorPool = renderer->frame_descriptor_pool,
                 .descriptorSetCount = 1,
-                .pSetLayouts = &renderer->descriptor_set_layouts[set_index],
+                .pSetLayouts = &renderer->texture_descriptor_set_layout,
             },
-            out_descriptor_set);
+            &texture_set);
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
         NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
         return false;
@@ -1690,130 +1805,39 @@ static bool nc__renderer_allocate_descriptor_set(
     NC__CHECK_VK_RESULT(result);
 
     renderer->frame_descriptor_set_count++;
+
+    vkUpdateDescriptorSets(
+            renderer->device,
+            1,
+            &(VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = texture_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &(VkDescriptorImageInfo){
+                    .sampler = sampler,
+                    .imageView = texture->image_view,
+                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                },
+            },
+            0,
+            NULL);
+
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            0,
+            1,
+            &texture_set,
+            0,
+            NULL);
+
     return true;
 
 error:
     return false;
-}
-
-static bool nc__renderer_write_uniform_descriptor_set(
-    nc_renderer_t* renderer,
-    const uint32_t set_index,
-    const void* data,
-    const uint32_t size,
-    VkDescriptorSet* out_descriptor_set
-) {
-    const uint32_t alignment = (uint32_t)renderer->physical_device_properties.limits.minUniformBufferOffsetAlignment;
-    uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, alignment ? alignment : 1, &offset)) {
-        return false;
-    }
-    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
-
-    VkDescriptorSet descriptor_set;
-    if (!nc__renderer_allocate_descriptor_set(renderer, set_index, &descriptor_set)) {
-        return false;
-    }
-
-    const VkDescriptorBufferInfo buffer_info = {
-        .buffer = renderer->transfer_buffer,
-        .offset = offset,
-        .range = size,
-    };
-    vkUpdateDescriptorSets(
-            renderer->device,
-            1,
-            &(VkWriteDescriptorSet){
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = descriptor_set,
-                .dstBinding = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo = &buffer_info,
-            },
-            0,
-            NULL);
-    *out_descriptor_set = descriptor_set;
-    return true;
-}
-
-static bool nc__renderer_write_storage_descriptor_set(
-    nc_renderer_t* renderer,
-    const nc_renderer_buffer_t* buffer,
-    VkDescriptorSet* out_descriptor_set
-) {
-    VkDescriptorSet descriptor_set;
-    if (!nc__renderer_allocate_descriptor_set(renderer, 0, &descriptor_set)) {
-        return false;
-    }
-
-    const VkDescriptorBufferInfo buffer_info = {
-        .buffer = buffer->buffer,
-        .range = buffer->capacity,
-    };
-    vkUpdateDescriptorSets(
-            renderer->device,
-            1,
-            &(VkWriteDescriptorSet){
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = descriptor_set,
-                .dstBinding = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pBufferInfo = &buffer_info,
-            },
-            0,
-            NULL);
-    *out_descriptor_set = descriptor_set;
-    return true;
-}
-
-static bool nc__renderer_write_texture_descriptor_set(
-    nc_renderer_t* renderer,
-    const nc_renderer_texture_t* texture,
-    const nc_renderer_buffer_t* storage_buffer,
-    const VkSampler sampler,
-    VkDescriptorSet* out_descriptor_set
-) {
-    VkDescriptorSet descriptor_set;
-    if (!nc__renderer_allocate_descriptor_set(renderer, 2, &descriptor_set)) {
-        return false;
-    }
-
-    if (!storage_buffer) {
-        storage_buffer = renderer->dummy_storage_buffer;
-    }
-
-    const VkDescriptorImageInfo image_info = {
-        .sampler = sampler,
-        .imageView = texture->image_view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    const VkDescriptorBufferInfo buffer_info = {
-        .buffer = storage_buffer->buffer,
-        .range = storage_buffer->capacity,
-    };
-    const VkWriteDescriptorSet writes[] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = descriptor_set,
-            .dstBinding = 0,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &image_info,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = descriptor_set,
-            .dstBinding = 1,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo = &buffer_info,
-        },
-    };
-    vkUpdateDescriptorSets(renderer->device, NC_COUNTOF(writes), writes, 0, NULL);
-    *out_descriptor_set = descriptor_set;
-    return true;
 }
 
 static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer, const SDL_Rect* scissor_rect) {
@@ -2123,7 +2147,6 @@ static bool nc__renderer_queue_buffer_upload_internal(
         .size = size,
         .buffer = buffer,
     };
-    buffer->queued_upload_frame = renderer->frame_id;
     renderer->uploads_dirty = true;
     return true;
 }
@@ -2200,7 +2223,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             },
             &(VmaAllocationCreateInfo){
-                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
             },
             &result->image,
             &result->allocation,
@@ -2257,51 +2280,36 @@ static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_ren
 
     NC_ASSERT(draw->texture->is_array);
 
-    VkDescriptorSet quad_set;
-    VkDescriptorSet uniform_set;
-    VkDescriptorSet texture_set;
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = *draw->view_projection,
         .position = draw->position,
     };
-    if (!nc__renderer_write_storage_descriptor_set(renderer, draw->chunk_buffer, &quad_set) ||
-            !nc__renderer_write_uniform_descriptor_set(renderer, 1, &uniforms, sizeof(uniforms), &uniform_set) ||
-            !nc__renderer_write_texture_descriptor_set(
+    nc__renderer_chunk_push_constants_t push_constants = {
+        .quad_buffer = draw->chunk_buffer->address,
+        .face_data_buffer = draw->face_data_buffer->address,
+    };
+    if (!nc__renderer_write_buffer_reference_data(
             renderer,
-            draw->texture,
-            draw->face_data_buffer,
-            renderer->chunk_sampler,
-            &texture_set)) {
+            &uniforms,
+            sizeof(uniforms),
+            &push_constants.uniforms)) {
         return false;
     }
 
-    vkCmdBindDescriptorSets(
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            0,
-            1,
-            &quad_set,
-            0,
-            NULL);
-    vkCmdBindDescriptorSets(
+            VK_SHADER_STAGE_VERTEX_BIT,
+            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+            2 * sizeof(VkDeviceAddress),
+            &push_constants);
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            1,
-            1,
-            &uniform_set,
-            0,
-            NULL);
-    vkCmdBindDescriptorSets(
-            renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            renderer->pipeline_layout,
-            2,
-            1,
-            &texture_set,
-            0,
-            NULL);
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
+            sizeof(push_constants.face_data_buffer),
+            &push_constants.face_data_buffer);
     vkCmdDraw(renderer->frame_command_buffer, draw->vertex_count, 1, 0, 0);
     return true;
 }
@@ -2347,42 +2355,39 @@ static bool nc__renderer_draw_block_highlight(
             break;
     }
 
-    VkDescriptorSet vertex_uniform_set;
-    VkDescriptorSet fragment_uniform_set;
-    if (!nc__renderer_write_uniform_descriptor_set(
+    nc__renderer_address_push_constants_t push_constants;
+    if (!nc__renderer_write_buffer_reference_data(
             renderer,
-            1,
             &vertex_uniforms,
             sizeof(vertex_uniforms),
-            &vertex_uniform_set) ||
-            !nc__renderer_write_uniform_descriptor_set(
-            renderer,
-            3,
-            &fragment_uniforms,
-            sizeof(fragment_uniforms),
-            &fragment_uniform_set)) {
+            &push_constants.data)) {
         return false;
     }
 
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            1,
-            1,
-            &vertex_uniform_set,
-            0,
-            NULL);
-    vkCmdBindDescriptorSets(
+            VK_SHADER_STAGE_VERTEX_BIT,
+            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+            sizeof(push_constants),
+            &push_constants);
+
+    if (!nc__renderer_write_buffer_reference_data(
+            renderer,
+            &fragment_uniforms,
+            sizeof(fragment_uniforms),
+            &push_constants.data)) {
+        return false;
+    }
+
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            3,
-            1,
-            &fragment_uniform_set,
-            0,
-            NULL);
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
+            sizeof(push_constants),
+            &push_constants);
     vkCmdDraw(renderer->frame_command_buffer, 36, 1, 0, 0);
     return true;
 }
@@ -2398,21 +2403,19 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         -1.0f,
         -1.0f,
     };
-    VkDescriptorSet uniform_set;
-    if (!nc__renderer_write_uniform_descriptor_set(renderer, 1, uniforms, sizeof(uniforms), &uniform_set)) {
+    nc__renderer_address_push_constants_t push_constants;
+    if (!nc__renderer_write_buffer_reference_data(renderer, uniforms, sizeof(uniforms), &push_constants.data)) {
         return false;
     }
 
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->gui_pipeline);
-    vkCmdBindDescriptorSets(
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            1,
-            1,
-            &uniform_set,
-            0,
-            NULL);
+            VK_SHADER_STAGE_VERTEX_BIT,
+            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+            sizeof(push_constants),
+            &push_constants);
 
     const VkDeviceSize vertex_offset = 0;
     vkCmdBindVertexBuffers(renderer->frame_command_buffer, 0, 1, &draw->vertex_buffer->buffer, &vertex_offset);
@@ -2425,19 +2428,9 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
             continue;
         }
 
-        VkDescriptorSet texture_set;
-        if (!nc__renderer_write_texture_descriptor_set(renderer, texture, NULL, renderer->gui_sampler, &texture_set)) {
+        if (!nc__renderer_bind_texture_descriptor_set(renderer, texture, renderer->gui_sampler)) {
             return false;
         }
-        vkCmdBindDescriptorSets(
-                renderer->frame_command_buffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                renderer->pipeline_layout,
-                2,
-                1,
-                &texture_set,
-                0,
-                NULL);
         nc__renderer_set_viewport_and_scissor(renderer, &draw_command->clip_rect);
         vkCmdDrawIndexed(
                 renderer->frame_command_buffer,
@@ -2480,42 +2473,28 @@ static bool nc__renderer_draw_procedural_overlay(
     uniforms.crosshair[2] = draw->crosshair_size;
     uniforms.crosshair[3] = draw->crosshair_size;
 
-    VkDescriptorSet uniform_set;
-    VkDescriptorSet texture_set;
-    if (!nc__renderer_write_uniform_descriptor_set(renderer, 3, &uniforms, sizeof(uniforms), &uniform_set) ||
-            !nc__renderer_write_texture_descriptor_set(
+    nc__renderer_address_push_constants_t push_constants;
+    if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data) ||
+            !nc__renderer_bind_texture_descriptor_set(
             renderer,
             renderer->procedural_overlay_crosshair_texture,
-            NULL,
-            renderer->gui_sampler,
-            &texture_set)) {
+            renderer->gui_sampler)) {
         return false;
     }
 
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
-    vkCmdBindDescriptorSets(
+    vkCmdPushConstants(
             renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->pipeline_layout,
-            3,
-            1,
-            &uniform_set,
-            0,
-            NULL);
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
+            sizeof(push_constants),
+            &push_constants);
 
     vkCmdBindPipeline(
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->procedural_overlay_invert_pipeline);
-    vkCmdBindDescriptorSets(
-            renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            renderer->pipeline_layout,
-            2,
-            1,
-            &texture_set,
-            0,
-            NULL);
     vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
 
     vkCmdBindPipeline(
@@ -2541,27 +2520,22 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
-    if (!nc__renderer_create_instance(result) ||
-            !nc__renderer_create_window(result, info) ||
-            !nc__renderer_create_surface(result) ||
-            !nc__renderer_select_physical_device(result, info->prefer_low_power) ||
-            !nc__renderer_create_device(result) ||
-            !nc__renderer_create_descriptor_set_layouts(result) ||
-            !nc__renderer_create_descriptor_pool(result) ||
-            !nc__renderer_create_frame_resources(result) ||
-            !nc__renderer_create_transfer_buffer(result, NC__RENDERER_INITIAL_TRANSFER_CAPACITY) ||
-            !nc__renderer_create_sampler(result, &result->chunk_sampler) ||
-            !nc__renderer_create_sampler(result, &result->gui_sampler) ||
-            !nc__renderer_create_swapchain(result) ||
-            !nc__renderer_create_pipelines(result)) {
+    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
+    if (!nc__renderer_create_instance(result)
+            || !nc__renderer_create_window(result, info)
+            || !nc__renderer_create_surface(result)
+            || !nc__renderer_select_physical_device(result, info->prefer_low_power, enabled_device_extensions)
+            || !nc__renderer_create_device(result, enabled_device_extensions)
+            || !nc__renderer_create_descriptor_set_layouts(result)
+            || !nc__renderer_create_descriptor_pool(result)
+            || !nc__renderer_create_frame_resources(result)
+            || !nc__renderer_create_transfer_buffer(result, NC__RENDERER_INITIAL_TRANSFER_CAPACITY)
+            || !nc__renderer_create_sampler(result, &result->chunk_sampler)
+            || !nc__renderer_create_sampler(result, &result->gui_sampler)
+            || !nc__renderer_create_swapchain(result)
+            || !nc__renderer_create_pipelines(result)) {
         goto error;
     }
-
-    result->dummy_storage_buffer = nc_renderer_create_buffer(
-            result,
-            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-            sizeof(uint32_t));
-    NC_CHECK_RESULT(result->dummy_storage_buffer, "Failed to create the dummy storage buffer.");
 
     result->procedural_overlay_crosshair_texture =
             nc_renderer_create_texture_2d_from_file(result, nc__renderer_crosshair_texture_path);
@@ -2699,17 +2673,20 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     VkSemaphore* render_finished_semaphore = renderer->frame_has_swapchain_image
             ? &renderer->render_finished_semaphores[renderer->frame_swapchain_image_index]
             : NULL;
-    const VkSubmitInfo submit_info = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
-        .pWaitSemaphores = renderer->frame_has_swapchain_image ? &renderer->image_available_semaphore : NULL,
-        .pWaitDstStageMask = renderer->frame_has_swapchain_image ? &wait_stage : NULL,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &renderer->frame_command_buffer,
-        .signalSemaphoreCount = renderer->frame_has_swapchain_image ? 1u : 0u,
-        .pSignalSemaphores = render_finished_semaphore,
-    };
-    NC__CHECK_VK_RESULT(vkQueueSubmit(renderer->queue, 1, &submit_info, renderer->frame_fence));
+    NC__CHECK_VK_RESULT(vkQueueSubmit(
+            renderer->queue,
+            1,
+            &(VkSubmitInfo){
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                .waitSemaphoreCount = renderer->frame_has_swapchain_image ? 1 : 0,
+                .pWaitSemaphores = renderer->frame_has_swapchain_image ? &renderer->image_available_semaphore : NULL,
+                .pWaitDstStageMask = renderer->frame_has_swapchain_image ? &wait_stage : NULL,
+                .commandBufferCount = 1,
+                .pCommandBuffers = &renderer->frame_command_buffer,
+                .signalSemaphoreCount = renderer->frame_has_swapchain_image ? 1 : 0,
+                .pSignalSemaphores = render_finished_semaphore,
+            },
+            renderer->frame_fence));
     renderer->frame_fence_pending = true;
 
     if (renderer->frame_has_swapchain_image) {
@@ -2771,7 +2748,8 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
     static const VkBufferUsageFlags nc_to_vk_usage[] = {
         [NC_RENDERER_BUFFER_USAGE_VERTEX] = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         [NC_RENDERER_BUFFER_USAGE_INDEX] = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        [NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ] = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        [NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ] =
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
     };
 
     NC_ASSERT(usage > 0 && usage <= NC_RENDERER_BUFFER_USAGE_COUNT);
@@ -2790,11 +2768,14 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             },
             &(VmaAllocationCreateInfo){
-                .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
             },
             &result->buffer,
             &result->allocation,
             NULL));
+
+    result->address = nc__renderer_get_buffer_address(renderer, result->buffer);
+
     return result;
 
 error:
@@ -2834,7 +2815,7 @@ bool nc_renderer_queue_buffer_upload(
                     .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
                 },
                 &(VmaAllocationCreateInfo){
-                    .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                 },
                 &new_buffer,
                 &new_allocation,
@@ -2844,6 +2825,7 @@ bool nc_renderer_queue_buffer_upload(
         buffer->buffer = new_buffer;
         buffer->allocation = new_allocation;
         buffer->capacity = new_capacity;
+        buffer->address = nc__renderer_get_buffer_address(renderer, buffer->buffer);
     }
 
     return nc__renderer_queue_buffer_upload_internal(renderer, buffer, data, size);
@@ -3014,8 +2996,17 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
 
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
+    const nc_renderer_texture_t* bound_chunk_texture = NULL;
     for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
         const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
+        if (draw.vertex_count > 0 && draw.texture != bound_chunk_texture) {
+            NC_ASSERT(draw.texture->is_array);
+            if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
+                return false;
+            }
+            bound_chunk_texture = draw.texture;
+        }
+
         if (!nc__renderer_draw_chunk_opaque(renderer, &draw)) {
             return false;
         }
@@ -3087,7 +3078,6 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
 
         nc__renderer_destroy_descriptor_state(renderer);
         nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
-        nc_renderer_destroy_buffer(renderer, renderer->dummy_storage_buffer);
 
         nc__renderer_destroy_pipelines(renderer);
         vkDestroySampler(renderer->device, renderer->chunk_sampler, NULL);
