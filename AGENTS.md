@@ -13,6 +13,7 @@ A guide for [coding agents](https://agents.md/).
   isn't it?
 - When passing and returning structs > 8 bytes, prefer to do it with pointers.
 - Use a 120 column limit.
+- For the love of God don't use the "u" suffix for integer literals, unless getting an unsigned type is necessary.
 
 ## Testing
 
