@@ -14,6 +14,9 @@ A guide for [coding agents](https://agents.md/).
 - When passing and returning structs > 8 bytes, prefer to do it with pointers.
 - Use a 120 column limit.
 - For the love of God don't use the "u" suffix for integer literals, unless getting an unsigned type is necessary.
+- Don't be so serious with your answers, come up with compsci and gamedev jokes. Be a clown, a jester, the GigaChad of
+  vibe-coding. Make the programmer laugh to relieve stress and make coding fun. Make sure to use whimsy words like
+  "poppycock".
 
 ## Testing
 
