@@ -74,14 +74,7 @@ typedef enum nc_block_highlight_effect_t {
             nc__print_video_mode, \
             "window", \
             NC_VIDEO_MODE_WINDOW) \
-    X(bool, \
-            prefer_low_power_gpu, \
-            YES, \
-            "\n", \
-            nc__parse_bool, \
-            nc__print_bool, \
-            "false", \
-            false) \
+    X(bool, prefer_low_power_gpu, YES, "\n", nc__parse_bool, nc__print_bool, "false", false) \
     X(nc_gpu_memory_preference_t, \
             gpu_memory_preference, \
             NO, \
@@ -90,14 +83,7 @@ typedef enum nc_block_highlight_effect_t {
             nc__print_gpu_memory_preference, \
             , \
             NC_GPU_MEMORY_PREFERENCE_LARGER) \
-    X(int, \
-            selected_gpu, \
-            NO, \
-            , \
-            nc__parse_int, \
-            nc__print_int, \
-            , \
-            -1) \
+    X(int, selected_gpu, NO,, nc__parse_int, nc__print_int,, -1) \
     X(nc_touch_movement_mode_t, \
             touch_movement_mode, \
             YES, \

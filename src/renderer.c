@@ -1250,8 +1250,10 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
         goto error;
     }
 
+    // The spec states that a max image count of 0 means unlimited. We only want 3.
+    const uint32_t max_image_count = capabilities.maxImageCount ? capabilities.maxImageCount : 3;
     // Ask for triple buffering.
-    const uint32_t image_count = vkm_clamp(3, capabilities.minImageCount, capabilities.maxImageCount);
+    const uint32_t image_count = vkm_clamp(3, capabilities.minImageCount, max_image_count);
     NC__CHECK_VK_RESULT(vkCreateSwapchainKHR(
             renderer->device,
             &(VkSwapchainCreateInfoKHR){
@@ -2774,7 +2776,9 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
             &result->allocation,
             NULL));
 
-    result->address = nc__renderer_get_buffer_address(renderer, result->buffer);
+    if (usage == NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ) {
+        result->address = nc__renderer_get_buffer_address(renderer, result->buffer);
+    }
 
     return result;
 
