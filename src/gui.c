@@ -711,6 +711,10 @@ void nc_gui_set_window_size(nc_gui_context_t* context, const uint16_t width, con
 }
 
 void nc_gui_set_pixel_viewport(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
+    if (context->pixel_viewport.x == width && context->pixel_viewport.y == height) {
+        return;
+    }
+
     context->pixel_viewport.x = width;
     context->pixel_viewport.y = height;
     nc__gui_layout_controls(context);

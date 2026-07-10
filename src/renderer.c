@@ -126,6 +126,12 @@ typedef struct nc__renderer_procedural_overlay_uniforms_t {
     float crosshair[4];
 } nc__renderer_procedural_overlay_uniforms_t;
 
+typedef struct nc__renderer_gui_uniforms_t {
+    vkm_mat4 transform;
+    vkm_vec2 scale;
+    vkm_vec2 translate;
+} nc__renderer_gui_uniforms_t;
+
 typedef struct nc__renderer_block_highlight_vertex_uniforms_t {
     vkm_mat4 view_projection;
     vkm_vec4 block_position_and_scale;
@@ -172,6 +178,7 @@ typedef struct nc_renderer_t {
     uint32_t swapchain_image_count;
     vkm_usvec2 window_size;
     vkm_usvec2 viewport;
+    VkSurfaceTransformFlagBitsKHR surface_transform;
     bool foreground;
     bool swapchain_dirty;
     bool surface_dirty;
@@ -335,6 +342,91 @@ static uint32_t nc__renderer_align_u32(const uint32_t value, const uint32_t alig
     }
 
     return (value + alignment - 1) / alignment * alignment;
+}
+
+static bool nc__renderer_surface_transform_swaps_extent(const VkSurfaceTransformFlagBitsKHR transform) {
+    return transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+            transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+}
+
+static vkm_usvec2 nc__renderer_get_display_viewport(const nc_renderer_t* renderer) {
+    if (nc__renderer_surface_transform_swaps_extent(renderer->surface_transform)) {
+        return (vkm_usvec2){ { renderer->viewport.y, renderer->viewport.x } };
+    }
+
+    return renderer->viewport;
+}
+
+static void nc__renderer_get_pre_rotation_matrix(const nc_renderer_t* renderer, vkm_mat4* result) {
+    const vkm_vec3 axis = CVKM_VEC3_FORWARD;
+    float angle;
+
+    switch (renderer->surface_transform) {
+        case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+            angle = CVKM_PI_2_F;
+            break;
+        case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+            angle = CVKM_PI_F;
+            break;
+        case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+            angle = -CVKM_PI_2_F;
+            break;
+        default:
+            *result = CVKM_MAT4_IDENTITY;
+            return;
+    }
+
+    vkm_make_rotation(angle, &axis, result);
+}
+
+static void nc__renderer_pre_rotate_view_projection(
+    const nc_renderer_t* renderer,
+    const vkm_mat4* view_projection,
+    vkm_mat4* result
+) {
+    vkm_mat4 pre_rotation;
+    nc__renderer_get_pre_rotation_matrix(renderer, &pre_rotation);
+    vkm_mul(&pre_rotation, view_projection, result);
+}
+
+static void nc__renderer_pre_rotate_rect(const nc_renderer_t* renderer, const SDL_Rect* rect, SDL_Rect* result) {
+    const int x = rect->x;
+    const int y = rect->y;
+    const int w = rect->w;
+    const int h = rect->h;
+    const int buffer_width = renderer->viewport.x;
+    const int buffer_height = renderer->viewport.y;
+
+    switch (renderer->surface_transform) {
+        case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+            *result = (SDL_Rect){ .x = buffer_width - h - y, .y = x, .w = h, .h = w };
+            break;
+        case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+            *result = (SDL_Rect){ .x = buffer_width - w - x, .y = buffer_height - h - y, .w = w, .h = h };
+            break;
+        case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+            *result = (SDL_Rect){ .x = y, .y = buffer_height - w - x, .w = h, .h = w };
+            break;
+        default:
+            *result = *rect;
+            break;
+    }
+}
+
+static vkm_vec2 nc__renderer_pre_rotate_point(const nc_renderer_t* renderer, const vkm_vec2 point) {
+    const float buffer_width = (float)renderer->viewport.x;
+    const float buffer_height = (float)renderer->viewport.y;
+
+    switch (renderer->surface_transform) {
+        case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+            return (vkm_vec2){ { buffer_width - point.y, point.x } };
+        case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+            return (vkm_vec2){ { buffer_width - point.x, buffer_height - point.y } };
+        case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+            return (vkm_vec2){ { point.y, buffer_height - point.x } };
+        default:
+            return point;
+    }
 }
 
 static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* renderer, VkBuffer buffer) {
@@ -979,6 +1071,17 @@ static bool nc__renderer_get_swapchain_extent(
         return false;
     }
 
+#ifdef ANDROID
+    (void)renderer;
+
+    *out_extent = capabilities->currentExtent;
+    if (nc__renderer_surface_transform_swaps_extent(capabilities->currentTransform)) {
+        const uint32_t width = out_extent->width;
+        out_extent->width = out_extent->height;
+        out_extent->height = width;
+    }
+    return true;
+#else
     int width;
     int height;
     const bool sdl_result = SDL_GetWindowSizeInPixels(renderer->window, &width, &height);
@@ -1000,6 +1103,7 @@ static bool nc__renderer_get_swapchain_extent(
 
 error:
     return false;
+#endif
 }
 
 static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
@@ -1225,6 +1329,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
             renderer->physical_device,
             renderer->surface,
             &capabilities));
+    renderer->surface_transform = capabilities.currentTransform;
 
     uint32_t format_count = 0;
     NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -1275,7 +1380,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
                 .imageArrayLayers = 1,
                 .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                 .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                .preTransform = capabilities.currentTransform,
+                .preTransform = renderer->surface_transform,
                 .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
                 .presentMode = VK_PRESENT_MODE_FIFO_KHR,
                 .clipped = VK_TRUE,
@@ -1879,10 +1984,12 @@ static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer,
         .extent = { renderer->viewport.x, renderer->viewport.y },
     };
     if (scissor_rect) {
-        scissor.offset.x = scissor_rect->x;
-        scissor.offset.y = scissor_rect->y;
-        scissor.extent.width = (uint32_t)vkm_max(scissor_rect->w, 0);
-        scissor.extent.height = (uint32_t)vkm_max(scissor_rect->h, 0);
+        SDL_Rect rotated_rect;
+        nc__renderer_pre_rotate_rect(renderer, scissor_rect, &rotated_rect);
+        scissor.offset.x = rotated_rect.x;
+        scissor.offset.y = rotated_rect.y;
+        scissor.extent.width = (uint32_t)rotated_rect.w;
+        scissor.extent.height = (uint32_t)rotated_rect.h;
     }
     vkCmdSetScissor(renderer->frame_command_buffer, 0, 1, &scissor);
 }
@@ -2300,8 +2407,11 @@ static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_ren
 
     NC_ASSERT(draw->texture->is_array);
 
+    vkm_mat4 view_projection;
+    nc__renderer_pre_rotate_view_projection(renderer, draw->view_projection, &view_projection);
+
     const nc__renderer_chunk_uniforms_t uniforms = {
-        .view_projection = *draw->view_projection,
+        .view_projection = view_projection,
         .position = draw->position,
     };
     nc__renderer_chunk_push_constants_t push_constants = {
@@ -2342,8 +2452,11 @@ static bool nc__renderer_draw_block_highlight(
         return true;
     }
 
+    vkm_mat4 view_projection;
+    nc__renderer_pre_rotate_view_projection(renderer, draw->view_projection, &view_projection);
+
     const nc__renderer_block_highlight_vertex_uniforms_t vertex_uniforms = {
-        .view_projection = *draw->view_projection,
+        .view_projection = view_projection,
         .block_position_and_scale = { { draw->position.x, draw->position.y, draw->position.z, 1.02f } },
     };
 
@@ -2417,14 +2530,17 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         return true;
     }
 
-    const float uniforms[] = {
-        2.0f / (float)renderer->viewport.x,
-        2.0f / (float)renderer->viewport.y,
-        -1.0f,
-        -1.0f,
+    vkm_mat4 pre_rotation;
+    nc__renderer_get_pre_rotation_matrix(renderer, &pre_rotation);
+
+    const vkm_usvec2 display_viewport = nc__renderer_get_display_viewport(renderer);
+    const nc__renderer_gui_uniforms_t uniforms = {
+        .transform = pre_rotation,
+        .scale = { { 2.0f / (float)display_viewport.x, 2.0f / (float)display_viewport.y } },
+        .translate = { { -1.0f, -1.0f } },
     };
     nc__renderer_address_push_constants_t push_constants;
-    if (!nc__renderer_write_buffer_reference_data(renderer, uniforms, sizeof(uniforms), &push_constants.data)) {
+    if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data)) {
         return false;
     }
 
@@ -2478,20 +2594,33 @@ static bool nc__renderer_draw_procedural_overlay(
             continue;
         }
 
-        uniforms.rings[i][0] = draw->analog_stick_ring_positions[i].x;
-        uniforms.rings[i][1] = draw->analog_stick_ring_positions[i].y;
+        const vkm_vec2 ring_position = nc__renderer_pre_rotate_point(
+                renderer,
+                draw->analog_stick_ring_positions[i]);
+        const vkm_vec2 stick_position = nc__renderer_pre_rotate_point(renderer, draw->analog_stick_positions[i]);
+        uniforms.rings[i][0] = ring_position.x;
+        uniforms.rings[i][1] = ring_position.y;
         uniforms.rings[i][2] = draw->analog_stick_ring_radius;
         uniforms.rings[i][3] = draw->analog_stick_ring_thickness;
 
-        uniforms.sticks[i][0] = draw->analog_stick_positions[i].x;
-        uniforms.sticks[i][1] = draw->analog_stick_positions[i].y;
+        uniforms.sticks[i][0] = stick_position.x;
+        uniforms.sticks[i][1] = stick_position.y;
         uniforms.sticks[i][2] = draw->analog_stick_radius;
     }
 
-    uniforms.crosshair[0] = ((float)renderer->viewport.x - draw->crosshair_size) * 0.5f;
-    uniforms.crosshair[1] = ((float)renderer->viewport.y - draw->crosshair_size) * 0.5f;
-    uniforms.crosshair[2] = draw->crosshair_size;
-    uniforms.crosshair[3] = draw->crosshair_size;
+    const vkm_usvec2 display_viewport = nc__renderer_get_display_viewport(renderer);
+    const SDL_Rect crosshair_rect = {
+        .x = (int)(((float)display_viewport.x - draw->crosshair_size) * 0.5f),
+        .y = (int)(((float)display_viewport.y - draw->crosshair_size) * 0.5f),
+        .w = (int)draw->crosshair_size,
+        .h = (int)draw->crosshair_size,
+    };
+    SDL_Rect rotated_crosshair_rect;
+    nc__renderer_pre_rotate_rect(renderer, &crosshair_rect, &rotated_crosshair_rect);
+    uniforms.crosshair[0] = (float)rotated_crosshair_rect.x;
+    uniforms.crosshair[1] = (float)rotated_crosshair_rect.y;
+    uniforms.crosshair[2] = (float)rotated_crosshair_rect.w;
+    uniforms.crosshair[3] = (float)rotated_crosshair_rect.h;
 
     nc__renderer_address_push_constants_t push_constants;
     if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data) ||
@@ -2591,8 +2720,10 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
             break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
             if (event->window.data1 > 0 && event->window.data2 > 0) {
+#ifndef ANDROID
                 renderer->viewport.x = (uint16_t)event->window.data1;
                 renderer->viewport.y = (uint16_t)event->window.data2;
+#endif
                 renderer->swapchain_dirty = true;
             }
             break;
@@ -2753,7 +2884,7 @@ bool nc_renderer_is_foreground(const nc_renderer_t* renderer) {
 }
 
 vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer) {
-    return renderer->viewport;
+    return nc__renderer_get_display_viewport(renderer);
 }
 
 vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {

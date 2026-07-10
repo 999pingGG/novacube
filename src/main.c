@@ -221,16 +221,6 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_mul(&velocity, NC__MOVEMENT_SPEED, &velocity);
     vkm_muladd(&velocity, (float)delta_time, &app->camera.position);
 
-    const vkm_usvec2 viewport = nc_renderer_get_viewport(app->renderer);
-    vkm_mat4 view_projection;
-    nc_camera_get_view_projection(
-            &app->camera,
-            vkm_deg2rad(80.0f),
-            (float)viewport.x / (float)viewport.y,
-            0.2f,
-            500.0f,
-            &view_projection);
-
     char debug_buffer[100];
 
     if (nc_cvar_get_show_fps()) {
@@ -252,6 +242,19 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (!nc_renderer_begin_frame(app->renderer)) {
         goto error;
     }
+
+    const vkm_usvec2 viewport = nc_renderer_get_viewport(app->renderer);
+    nc_gui_set_pixel_viewport(app->gui, viewport.x, viewport.y);
+
+    vkm_mat4 view_projection;
+    nc_camera_get_view_projection(
+            &app->camera,
+            vkm_deg2rad(80.0f),
+            (float)viewport.x / (float)viewport.y,
+            0.2f,
+            500.0f,
+            &view_projection);
+
     if (!nc_terrain_prepare_render(app->terrain, app->renderer)) {
         goto error;
     }
