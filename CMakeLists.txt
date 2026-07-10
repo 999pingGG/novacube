@@ -76,7 +76,7 @@ else()
             $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
             $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
-    if(TARGET_X86)
+    if(TARGET_X86 AND NOT ANDROID)
         target_compile_options(novacube PRIVATE -march=haswell)
     endif()
     target_link_options(novacube PRIVATE -nostdlib++)
