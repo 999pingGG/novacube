@@ -262,27 +262,27 @@ CVKM_DEFINE_VEC3(d, double);
 #define CVKM_DVEC3_UP     ((vkm_dvec3)  { { 0.0,  1.0,  0.0  } })
 
 #ifdef CVKM_LH
-#define CVKM_BVEC3_FRONT  ((vkm_bvec3)  { { 0,    0,    1    } })
-#define CVKM_UBVEC3_FRONT ((vkm_ubvec3) { { 0,    0,    1    } })
-#define CVKM_SVEC3_FRONT  ((vkm_svec3)  { { 0,    0,    1    } })
-#define CVKM_USVEC3_FRONT ((vkm_usvec3) { { 0,    0,    1    } })
-#define CVKM_IVEC3_FRONT  ((vkm_ivec3)  { { 0,    0,    1    } })
-#define CVKM_UVEC3_FRONT  ((vkm_uvec3)  { { 0,    0,    1    } })
-#define CVKM_LVEC3_FRONT  ((vkm_lvec3)  { { 0,    0,    1    } })
-#define CVKM_ULVEC3_FRONT ((vkm_ulvec3) { { 0,    0,    1    } })
-#define CVKM_VEC3_FRONT   ((vkm_vec3)   { { 0.0f, 0.0f, 1.0f } })
-#define CVKM_DVEC3_FRONT  ((vkm_dvec3)  { { 0.0,  0.0,  1.0  } })
+#define CVKM_BVEC3_FORWARD  ((vkm_bvec3)  { { 0,    0,    1    } })
+#define CVKM_UBVEC3_FORWARD ((vkm_ubvec3) { { 0,    0,    1    } })
+#define CVKM_SVEC3_FORWARD  ((vkm_svec3)  { { 0,    0,    1    } })
+#define CVKM_USVEC3_FORWARD ((vkm_usvec3) { { 0,    0,    1    } })
+#define CVKM_IVEC3_FORWARD  ((vkm_ivec3)  { { 0,    0,    1    } })
+#define CVKM_UVEC3_FORWARD  ((vkm_uvec3)  { { 0,    0,    1    } })
+#define CVKM_LVEC3_FORWARD  ((vkm_lvec3)  { { 0,    0,    1    } })
+#define CVKM_ULVEC3_FORWARD ((vkm_ulvec3) { { 0,    0,    1    } })
+#define CVKM_VEC3_FORWARD   ((vkm_vec3)   { { 0.0f, 0.0f, 1.0f } })
+#define CVKM_DVEC3_FORWARD  ((vkm_dvec3)  { { 0.0,  0.0,  1.0  } })
 #else
-#define CVKM_BVEC3_FRONT  ((vkm_bvec3)  { { 0,    0,    -1    } })
-#define CVKM_UBVEC3_FRONT ((vkm_ubvec3) { { 0,    0,    -1    } })
-#define CVKM_SVEC3_FRONT  ((vkm_svec3)  { { 0,    0,    -1    } })
-#define CVKM_USVEC3_FRONT ((vkm_usvec3) { { 0,    0,    -1    } })
-#define CVKM_IVEC3_FRONT  ((vkm_ivec3)  { { 0,    0,    -1    } })
-#define CVKM_UVEC3_FRONT  ((vkm_uvec3)  { { 0,    0,    -1    } })
-#define CVKM_LVEC3_FRONT  ((vkm_lvec3)  { { 0,    0,    -1    } })
-#define CVKM_ULVEC3_FRONT ((vkm_ulvec3) { { 0,    0,    -1    } })
-#define CVKM_VEC3_FRONT   ((vkm_vec3)   { { 0.0f, 0.0f, -1.0f } })
-#define CVKM_DVEC3_FRONT  ((vkm_dvec3)  { { 0.0,  0.0,  -1.0  } })
+#define CVKM_BVEC3_FORWARD  ((vkm_bvec3)  { { 0,    0,    -1    } })
+#define CVKM_UBVEC3_FORWARD ((vkm_ubvec3) { { 0,    0,    -1    } })
+#define CVKM_SVEC3_FORWARD  ((vkm_svec3)  { { 0,    0,    -1    } })
+#define CVKM_USVEC3_FORWARD ((vkm_usvec3) { { 0,    0,    -1    } })
+#define CVKM_IVEC3_FORWARD  ((vkm_ivec3)  { { 0,    0,    -1    } })
+#define CVKM_UVEC3_FORWARD  ((vkm_uvec3)  { { 0,    0,    -1    } })
+#define CVKM_LVEC3_FORWARD  ((vkm_lvec3)  { { 0,    0,    -1    } })
+#define CVKM_ULVEC3_FORWARD ((vkm_ulvec3) { { 0,    0,    -1    } })
+#define CVKM_VEC3_FORWARD   ((vkm_vec3)   { { 0.0f, 0.0f, -1.0f } })
+#define CVKM_DVEC3_FORWARD  ((vkm_dvec3)  { { 0.0,  0.0,  -1.0  } })
 #endif
 
 #define CVKM_BVEC3_LEFT   ((vkm_bvec3)  { { -1,    0,    0    } })
@@ -2894,9 +2894,9 @@ static void vkm_quat_make_rotation(const float angle, const vkm_vec3* axis, vkm_
   const float half_angle = angle * 0.5f;
   const float sine = sinf(half_angle);
   *result = (vkm_versor){ {
-    axis->x * sine,
-    axis->y * sine,
-    axis->z * sine,
+    normalized_axis.x * sine,
+    normalized_axis.y * sine,
+    normalized_axis.z * sine,
     vkm_cos(half_angle),
   } };
 }
