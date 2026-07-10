@@ -1,5 +1,6 @@
 // Based on https://github.com/TanTanDev/binary_greedy_mesher_demo
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
