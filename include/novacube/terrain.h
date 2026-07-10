@@ -29,7 +29,7 @@ bool nc_terrain_load_or_replace_chunk(
         const vkm_ivec3* coords,
         const uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK]);
 void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_ivec3* coords);
-bool nc_terrain_get_block(const nc_terrain_t* terrain, vkm_ivec3 block_coords, uint16_t* block);
+bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_coords, uint16_t* block);
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer);
 void nc_terrain_get_opaque_draws(
@@ -42,7 +42,8 @@ void nc_terrain_get_block_highlight_draw(
         float time,
         const nc_camera_t* camera,
         nc_renderer_block_highlight_draw_t* draw);
-void nc_terrain_modify_block(nc_terrain_t* terrain, const nc_camera_t* camera, nc_block_type_t new_block);
+void nc_terrain_set_block(nc_terrain_t* terrain, const vkm_ivec3* block_coords, nc_block_type_t new_block);
+void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camera, nc_block_type_t new_block);
 void nc_terrain_fini(nc_terrain_t* terrain, nc_renderer_t* renderer);
 
 #endif

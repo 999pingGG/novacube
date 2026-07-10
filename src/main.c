@@ -14,6 +14,7 @@
 #include <novacube/gui.h>
 #include <novacube/macros.h>
 #include <novacube/renderer.h>
+#include <novacube/standard_functions.h>
 #include <novacube/terrain.h>
 
 #ifndef ANDROID
@@ -34,7 +35,7 @@ typedef struct nc__app_t {
 static const bool* keyboard_state;
 
 static void nc__app_modify_block(const nc__app_t* app, const nc_block_type_t block_type) {
-    nc_terrain_modify_block(app->terrain, &app->camera, block_type);
+    nc_terrain_entity_set_block(app->terrain, &app->camera, block_type);
 }
 
 static void nc__app_handle_gui_actions(const nc__app_t* app, const nc_gui_actions_t actions) {
@@ -58,6 +59,43 @@ static void nc__app_fini(nc__app_t* app) {
     free(app);
 }
 
+static void nc__app_initialize_test_blocks(nc__app_t* app) {
+    for (int z = -10 * NC_MESHER_CHUNK_SIZE; z < 9 * NC_MESHER_CHUNK_SIZE; z++) {
+        for (int x = -10 * NC_MESHER_CHUNK_SIZE; x < 9 * NC_MESHER_CHUNK_SIZE; x++) {
+            const int height = (int)(((15.0f + vkm_sin((float)z / 3.0f) * 3.0f) + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
+
+            for (int y = 0; y < height; y++) {
+                nc_block_type_t type;
+                if (y == height - 1) {
+                    type = NC_BLOCK_TYPE_GRASS;
+                } else if (y > height - 5) {
+                    type = NC_BLOCK_TYPE_DIRT;
+                } else {
+                    type = NC_BLOCK_TYPE_STONE;
+                }
+
+                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, type);
+            }
+        }
+    }
+}
+
+static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
+    const double radius = vkm_sin(time) * 5.0 + 10.0;
+
+    for (int z = -5; z <= 25; z++) {
+        for (int y = 5; y <= 35; y++) {
+            for (int x = -5; x <= 25; x++) {
+                const vkm_dvec3 center = (vkm_dvec3){ { x - 10.0, y - 20.0, z - 10.0 } };
+                const bool solid = vkm_sqr_magnitude(&center) <= radius * radius;
+                const nc_block_type_t block = solid ? (nc_block_type_t)((rand() + 1) % NC_BLOCK_TYPE_COUNT + 1) : NC_BLOCK_TYPE_AIR;
+                NC_ASSERT(block <= NC_BLOCK_TYPE_COUNT);
+                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, block);
+            }
+        }
+    }
+}
+
 SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -78,7 +116,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     *app_state = app;
 
     app->camera = (nc_camera_t){
-        .position = { { 0.0f, 20.0f, 0.0f } },
+        .position = { { 10.0f, 20.0f, -20.0f } },
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
@@ -104,6 +142,8 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         goto error;
     }
 
+    nc__app_initialize_test_blocks(app);
+
     keyboard_state = SDL_GetKeyboardState(NULL);
     if (!nc_renderer_set_relative_mouse_mode(app->renderer, true)) {
         goto error;
@@ -127,6 +167,8 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     const double delta_time = last_ticks == 0 ? 1.0 / 60.0 : (double)(ticks - last_ticks) / 1000000000.0;
     time += delta_time;
     last_ticks = ticks;
+
+    nc__app_animated_test_thingy(app, time);
 
     vkm_vec2 touch_camera_delta;
     nc_gui_get_camera_delta(app->gui, &touch_camera_delta);
