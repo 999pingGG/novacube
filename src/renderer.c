@@ -166,8 +166,6 @@ typedef struct nc_renderer_t {
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
     VkFormat swapchain_format;
-    VkColorSpaceKHR swapchain_color_space;
-    VkExtent2D swapchain_extent;
     VkImage* swapchain_images;
     VkImageView* swapchain_image_views;
     VkFramebuffer* framebuffers;
@@ -339,7 +337,7 @@ static uint32_t nc__renderer_align_u32(const uint32_t value, const uint32_t alig
     return (value + alignment - 1) / alignment * alignment;
 }
 
-static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* renderer, const VkBuffer buffer) {
+static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* renderer, VkBuffer buffer) {
     return renderer->get_buffer_device_address(
             renderer->device,
             &(VkBufferDeviceAddressInfo){
@@ -373,8 +371,8 @@ static void nc__renderer_destroy_retired_transfer_buffers(nc_renderer_t* rendere
 
 static void nc__renderer_retire_transfer_buffer(
     nc_renderer_t* renderer,
-    const VkBuffer buffer,
-    const VmaAllocation allocation
+    VkBuffer buffer,
+    VmaAllocation allocation
 ) {
     if (!buffer) {
         return;
@@ -504,7 +502,7 @@ static bool nc__renderer_extension_list_contains(
 }
 
 static bool nc__renderer_find_required_extensions(
-    const VkPhysicalDevice physical_device,
+    VkPhysicalDevice physical_device,
     const char** out_enabled_extensions,
     bool* khr_get_buffer_device_address
 ) {
@@ -553,7 +551,7 @@ error:
 }
 
 static bool nc__renderer_physical_device_supports_required_features(
-    const VkPhysicalDevice physical_device,
+    VkPhysicalDevice physical_device,
     const bool khr_get_buffer_device_address
 ) {
     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
@@ -595,7 +593,7 @@ static bool nc__renderer_physical_device_supports_required_features(
 
 static bool nc__renderer_find_queue_family(
     const nc_renderer_t* renderer,
-    const VkPhysicalDevice physical_device,
+    VkPhysicalDevice physical_device,
     uint32_t* out_queue_family_index
 ) {
     VkQueueFamilyProperties* queue_families = NULL;
@@ -632,7 +630,7 @@ error:
     return false;
 }
 
-VkDeviceSize nc__renderer_get_vram_size(const VkPhysicalDevice physical_device) {
+VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physical_device) {
     VkPhysicalDeviceMemoryProperties memory_properties;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
 
@@ -977,9 +975,8 @@ static bool nc__renderer_get_swapchain_extent(
     const VkSurfaceCapabilitiesKHR* capabilities,
     VkExtent2D* out_extent
 ) {
-    if (capabilities->currentExtent.width != UINT32_MAX) {
-        *out_extent = capabilities->currentExtent;
-        return out_extent->width > 0 && out_extent->height > 0;
+    if (capabilities->currentExtent.width == 0 || capabilities->currentExtent.height == 0) {
+        return false;
     }
 
     int width;
@@ -1086,7 +1083,7 @@ static bool nc__renderer_create_depth_image(nc_renderer_t* renderer) {
                 .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                 .imageType = VK_IMAGE_TYPE_2D,
                 .format = NC__RENDERER_DEPTH_FORMAT,
-                .extent = { renderer->swapchain_extent.width, renderer->swapchain_extent.height, 1 },
+                .extent = { renderer->viewport.x, renderer->viewport.y, 1, },
                 .mipLevels = 1,
                 .arrayLayers = 1,
                 .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -1149,8 +1146,8 @@ static bool nc__renderer_create_framebuffers(nc_renderer_t* renderer) {
                     .renderPass = renderer->render_pass,
                     .attachmentCount = NC_COUNTOF(attachments),
                     .pAttachments = attachments,
-                    .width = renderer->swapchain_extent.width,
-                    .height = renderer->swapchain_extent.height,
+                    .width = renderer->viewport.x,
+                    .height = renderer->viewport.y,
                     .layers = 1,
                 },
                 NULL,
@@ -1192,7 +1189,7 @@ error:
     return false;
 }
 
-static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
+static void nc__renderer_destroy_swapchain_images(nc_renderer_t* renderer) {
     nc__renderer_destroy_framebuffers(renderer);
     nc__renderer_destroy_depth_image(renderer);
     nc__renderer_destroy_present_semaphores(renderer);
@@ -1208,13 +1205,21 @@ static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
     free(renderer->swapchain_images);
     renderer->swapchain_images = NULL;
     renderer->swapchain_image_count = 0;
+}
 
-    vkDestroySwapchainKHR(renderer->device, renderer->swapchain, NULL);
-    renderer->swapchain = VK_NULL_HANDLE;
+static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
+    nc__renderer_destroy_swapchain_images(renderer);
+
+    if (renderer->swapchain) {
+        vkDestroySwapchainKHR(renderer->device, renderer->swapchain, NULL);
+        renderer->swapchain = VK_NULL_HANDLE;
+    }
 }
 
 static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     VkSurfaceFormatKHR* formats = NULL;
+    VkSwapchainKHR old_swapchain = renderer->swapchain;
+    VkSwapchainKHR new_swapchain = VK_NULL_HANDLE;
     VkSurfaceCapabilitiesKHR capabilities;
     NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
             renderer->physical_device,
@@ -1241,6 +1246,10 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
 
     VkExtent2D extent;
     if (!nc__renderer_get_swapchain_extent(renderer, &capabilities, &extent)) {
+        if (old_swapchain) {
+            vkDestroySwapchainKHR(renderer->device, old_swapchain, NULL);
+            renderer->swapchain = VK_NULL_HANDLE;
+        }
         free(formats);
         return true;
     }
@@ -1254,7 +1263,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     const uint32_t max_image_count = capabilities.maxImageCount ? capabilities.maxImageCount : 3;
     // Ask for triple buffering.
     const uint32_t image_count = vkm_clamp(3, capabilities.minImageCount, max_image_count);
-    NC__CHECK_VK_RESULT(vkCreateSwapchainKHR(
+    const VkResult create_result = vkCreateSwapchainKHR(
             renderer->device,
             &(VkSwapchainCreateInfoKHR){
                 .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -1270,13 +1279,18 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
                 .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
                 .presentMode = VK_PRESENT_MODE_FIFO_KHR,
                 .clipped = VK_TRUE,
+                .oldSwapchain = old_swapchain,
             },
             NULL,
-            &renderer->swapchain));
+            &new_swapchain);
+    if (old_swapchain) {
+        vkDestroySwapchainKHR(renderer->device, old_swapchain, NULL);
+        renderer->swapchain = VK_NULL_HANDLE;
+    }
+    NC__CHECK_VK_RESULT(create_result);
 
+    renderer->swapchain = new_swapchain;
     renderer->swapchain_format = chosen_format.format;
-    renderer->swapchain_color_space = chosen_format.colorSpace;
-    renderer->swapchain_extent = extent;
     renderer->viewport.x = (uint16_t)extent.width;
     renderer->viewport.y = (uint16_t)extent.height;
 
@@ -1334,11 +1348,15 @@ error:
 static bool nc__renderer_recreate_swapchain(nc_renderer_t* renderer) {
     nc__renderer_wait_idle(renderer);
 
-    if (renderer->surface_dirty && !nc__renderer_create_surface(renderer)) {
-        return false;
+    if (renderer->surface_dirty) {
+        nc__renderer_destroy_swapchain(renderer);
+        if (!nc__renderer_create_surface(renderer)) {
+            return false;
+        }
+    } else {
+        nc__renderer_destroy_swapchain_images(renderer);
     }
 
-    nc__renderer_destroy_swapchain(renderer);
     return nc__renderer_create_swapchain(renderer);
 }
 
@@ -1783,7 +1801,7 @@ static bool nc__renderer_write_buffer_reference_data(
 static bool nc__renderer_bind_texture_descriptor_set(
     nc_renderer_t* renderer,
     const nc_renderer_texture_t* texture,
-    const VkSampler sampler
+    VkSampler sampler
 ) {
     if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
         NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
@@ -2991,7 +3009,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
                 .renderPass = renderer->render_pass,
                 .framebuffer = renderer->framebuffers[renderer->frame_swapchain_image_index],
                 .renderArea = {
-                    .extent = renderer->swapchain_extent,
+                    .extent = { renderer->viewport.x, renderer->viewport.y },
                 },
                 .clearValueCount = NC_COUNTOF(clear_values),
                 .pClearValues = clear_values,
