@@ -79,10 +79,9 @@ def process_textures(compress_android, strip_exif):
             block = '4x4'
 
             # -------- ANDROID --------
-            android_out_dir = ANDROID_ASSETS / rel.parent
-            android_out_dir.mkdir(parents=True, exist_ok=True)
-
             if compress_android:
+                android_out_dir = ANDROID_ASSETS / rel.parent
+                android_out_dir.mkdir(parents=True, exist_ok=True)
                 out = android_out_dir / (img.stem + '.astc')
                 print(f'[ANDROID] Compressing {img} -> {out}')
                 run([
@@ -93,10 +92,6 @@ def process_textures(compress_android, strip_exif):
                     block,
                     '-exhaustive',
                 ])
-            else:
-                out = android_out_dir / img.name
-                print(f'[ANDROID] Copying {img} -> {out}')
-                shutil.copy2(img, out)
 
             # -------- PC --------
             pc_out_dir = PC_ASSETS / rel.parent
