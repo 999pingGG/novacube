@@ -2,13 +2,10 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-struct nc_mesh_quad_t {
-    uint greedy_quad;
-    uint plane_direction_and_face_data_offset;
-};
-
 layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer quad_buffer {
-    nc_mesh_quad_t data[];
+    // This data should be nc_mesh_quad_t instead of uvec2,
+    // but this works around a driver bug I've encountered in Adreno 610.
+    uvec2 data[];
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
@@ -102,14 +99,16 @@ void main() {
     int quad_index = gl_VertexIndex / 6;
     int vertex_index_within_quad = gl_VertexIndex % 6;
 
-    nc_mesh_quad_t quad = pc.quads.data[quad_index];
+    uvec2 data = pc.quads.data[quad_index];
 
     // Unpack data
-    uvec2 quad_position = uvec2(quad.greedy_quad & 255, quad.greedy_quad >> 8 & 255);
-    uvec2 quad_size_in_model_voxels = uvec2(quad.greedy_quad >> 16 & 255, quad.greedy_quad >> 24);
-    uint plane = quad.plane_direction_and_face_data_offset & 255;
-    uint direction = quad.plane_direction_and_face_data_offset >> 8 & 255;
-    face_data_offset = quad.plane_direction_and_face_data_offset >> 16;
+    uint greedy_quad = data.x;
+    uvec2 quad_position = uvec2(greedy_quad & 255u, greedy_quad >> 8 & 255u);
+    uvec2 quad_size_in_model_voxels = uvec2(greedy_quad >> 16 & 255u, greedy_quad >> 24);
+    uint plane_direction_and_face_data_offset = data.y;
+    uint plane = plane_direction_and_face_data_offset & 255u;
+    uint direction = plane_direction_and_face_data_offset >> 8 & 255u;
+    face_data_offset = plane_direction_and_face_data_offset >> 16;
 
     uint corner_index = uses_left_handed_quad_basis(direction)
             ? left_handed_corner_order[vertex_index_within_quad]
