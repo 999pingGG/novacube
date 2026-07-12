@@ -18,7 +18,7 @@ layout(push_constant) uniform push_constants {
     chunk_uniforms uniforms;
 } pc;
 
-// Note: mediump is bugged with PowerVR Rogue
+// Do not use `mediump` here, it causes severe rendering corruption in PowerVR Rogue GPUs.
 layout(location = 0) flat out uint face_data_offset;
 layout(location = 1) out vec2 face_uv;
 layout(location = 2) out vec2 face_data_uv;
