@@ -31,10 +31,10 @@ typedef struct TDS_JOIN2(TDS_TYPE, _iter_t) {
 
 TDS_VALUE_T* TDS_FUNCTION(get)(const TDS_TYPE* map, TDS_KEY_T key);
 void TDS_FUNCTION(reserve)(TDS_TYPE* map, TDS_SIZE_T capacity);
-void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value);
+int TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value);
 TDS_JOIN2(TDS_TYPE, _iter_t) TDS_FUNCTION(iter)(const TDS_TYPE* map);
 char TDS_FUNCTION(next)(TDS_JOIN2(TDS_TYPE, _iter_t)* iter);
-void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key);
+int TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key);
 TDS_SIZE_T TDS_FUNCTION(count)(const TDS_TYPE* map);
 void TDS_FUNCTION(clear)(TDS_TYPE* map);
 void TDS_FUNCTION(reclaim)(TDS_TYPE* map);
@@ -162,7 +162,7 @@ void TDS_FUNCTION(reserve)(TDS_TYPE* map, const TDS_SIZE_T capacity) {
     TDS_FUNCTION(rehash)(map, TDS_FUNCTION(prime_capacity)(capacity));
 }
 
-void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
+int TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
     // Ensure the map has room for at least one more entry.
     // Check load factor > 0.75 by using integer math instead of floating-point math.
     // TODO: Use floating point math instead, for cases where we're approaching TDS_SIZE_T limits.
@@ -195,7 +195,7 @@ void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
             // Key doesn't exist, add it.
             map->buckets[index] = new_entry;
             map->count++;
-            return;
+            return 1;
         }
 
 #ifdef TDS_KEY_EQUALS
@@ -205,7 +205,7 @@ void TDS_FUNCTION(set)(TDS_TYPE* map, TDS_KEY_T key, TDS_VALUE_T value) {
 #endif
             // Key matches, update the value.
             cur->value = value;
-            return;
+            return 0;
         }
 
         if (cur->probe_sequence_length < new_entry.probe_sequence_length) {
@@ -241,9 +241,9 @@ char TDS_FUNCTION(next)(TDS_JOIN2(TDS_TYPE, _iter_t)* iter) {
     return 0;
 }
 
-void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key) {
+int TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key) {
     if (!map->buckets) {
-        return;
+        return 0;
     }
 
     const uint64_t hash = TDS_HASH_KEY(key);
@@ -253,7 +253,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key) {
 
         if (!cur->occupied) {
             // Key not found.
-            return;
+            return 0;
         }
 
 #ifdef TDS_KEY_EQUALS
@@ -291,7 +291,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key) {
                 next_index = (index + 1) % map->capacity;
             }
 
-            return;
+            return 1;
         }
 
         index = (index + 1) % map->capacity;
@@ -299,6 +299,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* map, TDS_KEY_T key) {
 
     // This should be unreachable.
     TDS_ASSERT(0);
+    return 0;
 }
 
 TDS_SIZE_T TDS_FUNCTION(count)(const TDS_TYPE* map) {

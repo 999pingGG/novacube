@@ -23,8 +23,8 @@ typedef struct TDS_TYPE {
 
 int TDS_FUNCTION(contains)(const TDS_TYPE* set, TDS_VALUE_T value);
 void TDS_FUNCTION(reserve)(TDS_TYPE* set, TDS_SIZE_T capacity);
-void TDS_FUNCTION(add)(TDS_TYPE* set, TDS_VALUE_T value);
-void TDS_FUNCTION(remove)(TDS_TYPE* set, TDS_VALUE_T value);
+int TDS_FUNCTION(add)(TDS_TYPE* set, TDS_VALUE_T value);
+int TDS_FUNCTION(remove)(TDS_TYPE* set, TDS_VALUE_T value);
 TDS_SIZE_T TDS_FUNCTION(count)(const TDS_TYPE* set);
 void TDS_FUNCTION(clear)(TDS_TYPE* set);
 void TDS_FUNCTION(reclaim)(TDS_TYPE* set);
@@ -148,7 +148,7 @@ void TDS_FUNCTION(reserve)(TDS_TYPE* set, const TDS_SIZE_T capacity) {
     TDS_FUNCTION(rehash)(set, TDS_FUNCTION(prime_capacity)(capacity));
 }
 
-void TDS_FUNCTION(add)(TDS_TYPE* set, const TDS_VALUE_T value) {
+int TDS_FUNCTION(add)(TDS_TYPE* set, const TDS_VALUE_T value) {
     // Ensure the set has room for at least one more entry.
     // Check load factor > 0.75 by using integer math instead of floating-point math.
     // TODO: Use floating point math instead, for cases where we're approaching TDS_SIZE_T limits.
@@ -180,12 +180,12 @@ void TDS_FUNCTION(add)(TDS_TYPE* set, const TDS_VALUE_T value) {
             // Value doesn't exist, add it.
             set->buckets[index] = new_entry;
             set->count++;
-            return;
+            return 1;
         }
 
         if (cur->hash == new_entry.hash && cur->value == value) {
             // Value matches, do nothing.
-            return;
+            return 0;
         }
 
         if (cur->probe_sequence_length < new_entry.probe_sequence_length) {
@@ -201,9 +201,9 @@ void TDS_FUNCTION(add)(TDS_TYPE* set, const TDS_VALUE_T value) {
     }
 }
 
-void TDS_FUNCTION(remove)(TDS_TYPE* set, const TDS_VALUE_T value) {
+int TDS_FUNCTION(remove)(TDS_TYPE* set, const TDS_VALUE_T value) {
     if (!set->buckets) {
-        return;
+        return 0;
     }
 
     const uint64_t hash = rapidhash(&value, sizeof(value));
@@ -213,7 +213,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* set, const TDS_VALUE_T value) {
 
         if (!cur->occupied) {
             // Value not found.
-            return;
+            return 0;
         }
 
         if (cur->hash == hash && cur->value == value) {
@@ -244,7 +244,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* set, const TDS_VALUE_T value) {
                 next_index = (index + 1) % set->capacity;
             }
 
-            return;
+            return 1;
         }
 
         index = (index + 1) % set->capacity;
@@ -252,6 +252,7 @@ void TDS_FUNCTION(remove)(TDS_TYPE* set, const TDS_VALUE_T value) {
 
     // This should be unreachable.
     TDS_ASSERT(0);
+    return 0;
 }
 
 TDS_SIZE_T TDS_FUNCTION(count)(const TDS_TYPE* set) {
