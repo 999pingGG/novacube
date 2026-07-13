@@ -80,21 +80,21 @@ static void nc__app_initialize_test_blocks(nc__app_t* app) {
     }
 }
 
-static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
-    const double radius = vkm_sin(time) * 5.0 + 10.0;
-
-    for (int z = -5; z <= 25; z++) {
-        for (int y = 5; y <= 35; y++) {
-            for (int x = -5; x <= 25; x++) {
-                const vkm_dvec3 center = (vkm_dvec3){ { x - 10.0, y - 20.0, z - 10.0 } };
-                const bool solid = vkm_sqr_magnitude(&center) <= radius * radius;
-                const nc_block_type_t block = solid ? (nc_block_type_t)((rand() + 1) % NC_BLOCK_TYPE_COUNT + 1) : NC_BLOCK_TYPE_AIR;
-                NC_ASSERT(block <= NC_BLOCK_TYPE_COUNT);
-                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, block);
-            }
-        }
-    }
-}
+//static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
+//    const double radius = vkm_sin(time) * 5.0 + 10.0;
+//
+//    for (int z = -5; z <= 25; z++) {
+//        for (int y = 5; y <= 35; y++) {
+//            for (int x = -5; x <= 25; x++) {
+//                const vkm_dvec3 center = (vkm_dvec3){ { x - 10.0, y - 20.0, z - 10.0 } };
+//                const bool solid = vkm_sqr_magnitude(&center) <= radius * radius;
+//                const nc_block_type_t block = solid ? (nc_block_type_t)((rand() + 1) % NC_BLOCK_TYPE_COUNT + 1) : NC_BLOCK_TYPE_AIR;
+//                NC_ASSERT(block <= NC_BLOCK_TYPE_COUNT);
+//                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, block);
+//            }
+//        }
+//    }
+//}
 
 SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     (void)argc;
@@ -168,7 +168,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     time += delta_time;
     last_ticks = ticks;
 
-    nc__app_animated_test_thingy(app, time);
+    //nc__app_animated_test_thingy(app, time);
 
     vkm_vec2 touch_camera_delta;
     nc_gui_get_camera_delta(app->gui, &touch_camera_delta);
@@ -231,6 +231,27 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (nc_cvar_get_show_frame_time()) {
         const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
         nc_gui_append_debug_text(app->gui, debug_buffer, length);
+    }
+
+    if (nc_cvar_get_show_target_block_debug_details()) {
+        nc_terrain_raycast_hit_t hit;
+        if (nc_terrain_raycast(app->terrain, &app->camera, NC_TERRAIN_MAX_BLOCK_MODIFICATION_DISTANCE, &hit)) {
+            const int length = snprintf(
+                    debug_buffer,
+                    sizeof(debug_buffer),
+                    "Targeted block: (%d, %d, %d), distance: %f, top solid block height: %d",
+                    hit.block_position.x,
+                    hit.block_position.y,
+                    hit.block_position.z,
+                    hit.distance,
+                    nc_terrain_get_top_solid_block(
+                            app->terrain,
+                            (vkm_ivec2){ {
+                                hit.block_position.x,
+                                hit.block_position.z,
+                            } }));
+            nc_gui_append_debug_text(app->gui, debug_buffer, length);
+        }
     }
 
 #ifndef ANDROID

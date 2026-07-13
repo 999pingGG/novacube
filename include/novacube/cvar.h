@@ -140,6 +140,7 @@ typedef enum nc_block_highlight_effect_t {
             nc__print_ubvec4, \
             , \
             0, 0, 0, 127) \
+    X(bool, show_target_block_debug_details, NO,, nc__parse_bool, nc__print_bool,, false) \
 
 #define X(type, name, ...) \
     type nc_cvar_get_##name(void); \

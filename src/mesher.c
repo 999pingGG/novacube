@@ -87,6 +87,10 @@ static bool nc__is_solid(const nc_mesher_t* mesher, const uint16_t block_model_i
     return nc_block_model_vec_get(&mesher->block_models, block_model_id).solid;
 }
 
+bool nc_mesher_block_is_solid(const nc_mesher_t* mesher, const uint16_t block_model_id) {
+    return nc__is_solid(mesher, block_model_id);
+}
+
 static const nc_block_model_t* nc__get_block_model(const nc_mesher_t* mesher, const uint16_t block_model_id) {
     NC_ASSERT(block_model_id < mesher->block_models.count);
     // TODO: Instead, get this by reference! Make a new TDS method or something.

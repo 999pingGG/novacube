@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// TODO: Some of those constants and macros don't belong to the mesher.
 #define NC_MESHER_CHUNK_SIZE 16
 #define NC_MESHER_PADDED_CHUNK_SIZE (NC_MESHER_CHUNK_SIZE + 2)
 #define NC_MESHER_BLOCKS_PER_CHUNK (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)
@@ -78,6 +79,8 @@ uint16_t nc_mesher_register_block_model(
         nc_mesher_t* mesher,
         const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
         const uint16_t textures[6]);
+// TODO: This belongs to a centralized block registry, not the mesher.
+bool nc_mesher_block_is_solid(const nc_mesher_t* mesher, uint16_t block_model_id);
 void nc_mesher_compute_chunk(
         nc_mesher_t* mesher,
         const uint16_t* chunk_and_neighbors[3][3][3],
