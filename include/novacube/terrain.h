@@ -6,21 +6,12 @@
 #include <stdint.h>
 
 #include <novacube/camera.h>
+#include <novacube/block.h>
 #include <novacube/cvkm.h>
 #include <novacube/mesher.h>
 #include <novacube/renderer.h>
 
 #define NC_TERRAIN_MAX_BLOCK_MODIFICATION_DISTANCE 5.0f
-
-typedef uint8_t nc_block_type_t;
-enum {
-    NC_BLOCK_TYPE_AIR = 0,
-    NC_BLOCK_TYPE_STONE,
-    NC_BLOCK_TYPE_DIRT,
-    NC_BLOCK_TYPE_GRASS,
-
-    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_GRASS,
-};
 
 typedef struct nc_terrain_t nc_terrain_t;
 

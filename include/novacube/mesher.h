@@ -62,25 +62,20 @@ typedef struct nc_mesh_face_data_t {
 
 typedef struct nc_block_model_t {
     nc_mesh_quad_vec quads;
+    uint16_t voxel_model_id;
     int direction_offsets[6];           // The offsets into the vector at which the quads' direction change.
                                         // Will be useful in the future for quickly splitting the block into more than
                                         // one chunk mesh because different faces need different array textures (a
                                         // single chunk mesh needs to use a single array texture).
-    uint16_t texture_array_layers[6];   // A layer for each direction.
     bool solid;                         // As an optimization.
     bool full_faces[6];                 // For every direction, whether that face is full, for greedy mesher
                                         // optimization purposes... but currently unused.
 } nc_block_model_t;
 
 typedef struct nc_mesher_t nc_mesher_t;
+typedef struct nc_block_registry_t nc_block_registry_t;
 
-nc_mesher_t* nc_mesher_init(void);
-uint16_t nc_mesher_register_block_model(
-        nc_mesher_t* mesher,
-        const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
-        const uint16_t textures[6]);
-// TODO: This belongs to a centralized block registry, not the mesher.
-bool nc_mesher_block_is_solid(const nc_mesher_t* mesher, uint16_t block_model_id);
+nc_mesher_t* nc_mesher_init(const nc_block_registry_t* block_registry);
 void nc_mesher_compute_chunk(
         nc_mesher_t* mesher,
         const uint16_t* chunk_and_neighbors[3][3][3],

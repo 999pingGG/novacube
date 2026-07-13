@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <novacube/block.h>
 #include <novacube/cvkm.h>
 #include <novacube/intrinsics.h>
 #include <novacube/macros.h>
@@ -23,78 +24,22 @@
 #define TDS_TYPE nc_mesh_face_data_vec
 #include <tds/vector.h>
 
-#define TDS_SIZE_T uint16_t
-#define TDS_VALUE_T nc_block_model_t
-#define TDS_TYPE nc_block_model_vec
-#include <tds/vector.h>
-
 typedef struct nc_mesher_t {
-    nc_block_model_vec block_models;
+    const nc_block_registry_t* block_registry;
 } nc_mesher_t;
 
-nc_mesher_t* nc_mesher_init(void) {
-    nc_mesher_t* result = calloc(1, sizeof(*result));
-
-    nc_mesher_register_block_model(
-            result,
-            (const uint16_t[NC_MESHER_INTS_PER_BLOCK_MODEL]){ 0 },
-            (const uint16_t[6]){ 0 });
-
+nc_mesher_t* nc_mesher_init(const nc_block_registry_t* block_registry) {
+    nc_mesher_t* result = malloc(sizeof(*result));
+    result->block_registry = block_registry;
     return result;
 }
 
-uint16_t nc_mesher_register_block_model(
-    nc_mesher_t* mesher,
-    const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
-    const uint16_t textures[6]
-) {
-    NC_ASSERT(mesher->block_models.count < UINT16_MAX);
-    const uint16_t result = mesher->block_models.count;
-
-    bool solid = true;
-    static_assert(
-            (NC_MESHER_BLOCK_MODEL_SIZE & 7) == 0,
-            "Block model size is not a multiple of 8, please update this (optimized) code.");
-    for (int i = 0; i < NC_MESHER_BLOCK_MODEL_SIZE / 8; i++) {
-        if (((const uint64_t*)voxel_data)[i] != 0xffffffffffffffff) {
-            solid = false;
-            break;
-        }
-    }
-
-    nc_block_model_t new_model = (nc_block_model_t){ 0 };
-    memcpy(new_model.texture_array_layers, textures, sizeof(new_model.texture_array_layers));
-
-    if (solid) {
-        new_model.solid = true;
-        memset(new_model.full_faces, true, sizeof(new_model.full_faces));
-        nc_block_model_vec_append(&mesher->block_models, new_model);
-        return result;
-    }
-
-    nc_mesher_compute_block_model(
-            voxel_data,
-            &new_model.quads,
-            new_model.full_faces,
-            new_model.direction_offsets);
-    new_model.solid = false;
-
-    nc_block_model_vec_append(&mesher->block_models, new_model);
-    return result;
+static bool nc__is_solid(const nc_mesher_t* mesher, const uint16_t block_type) {
+    return nc_block_registry_get(mesher->block_registry, (nc_block_type_t)block_type)->fully_solid;
 }
 
-static bool nc__is_solid(const nc_mesher_t* mesher, const uint16_t block_model_id) {
-    return nc_block_model_vec_get(&mesher->block_models, block_model_id).solid;
-}
-
-bool nc_mesher_block_is_solid(const nc_mesher_t* mesher, const uint16_t block_model_id) {
-    return nc__is_solid(mesher, block_model_id);
-}
-
-static const nc_block_model_t* nc__get_block_model(const nc_mesher_t* mesher, const uint16_t block_model_id) {
-    NC_ASSERT(block_model_id < mesher->block_models.count);
-    // TODO: Instead, get this by reference! Make a new TDS method or something.
-    return &((const nc_block_model_t*)mesher->block_models.array)[block_model_id];
+static const nc_block_model_t* nc__get_block_model(const nc_mesher_t* mesher, const uint16_t block_type) {
+    return nc_block_registry_get_model(mesher->block_registry, (nc_block_type_t)block_type);
 }
 
 static void nc__chunk_add_voxel_to_axis_columns(
@@ -291,7 +236,10 @@ void nc_mesher_compute_chunk(
     uint32_t face_masks[6][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE] = { 0 };
 
     *quads_result = (nc_mesh_quad_vec){ 0 };
+    // Something that can help reduce the allocations done without wasting too much memory.
+    nc_mesh_quad_vec_reserve(quads_result, 512);
     *face_data_result = (nc_mesh_face_data_vec){ 0 };
+    nc_mesh_face_data_vec_reserve(face_data_result, 512);
 
     // inner chunk voxels.
     const uint16_t* chunk = chunk_and_neighbors[1][1][1];
@@ -333,7 +281,9 @@ void nc_mesher_compute_chunk(
 
                     for (int direction = 0; direction < 6; direction++, face_data_offset++) {
                         face_data[direction] = (nc_mesh_face_data_t){
-                            .texture_layer = model->texture_array_layers[direction],
+                            .texture_layer = nc_block_registry_get(
+                                    mesher->block_registry,
+                                    (nc_block_type_t)chunk[block_index])->texture_array_layers[direction],
                         };
 
                         const int quads_in_direction = model->direction_offsets[direction] - offset;
@@ -488,11 +438,13 @@ void nc_mesher_compute_chunk(
                         const vkm_ubvec3 block_coords =
                             nc__quad_position_to_block_coords(direction, plane, quad.x + x, quad.y + y);
                         block_index = NC_MESHER_CHUNK_COORDS_TO_INDEX(block_coords.x, block_coords.y, block_coords.z);
-                        const nc_block_model_t* block_model = nc__get_block_model(mesher, chunk[block_index]);
+                        const nc_block_t* block = nc_block_registry_get(
+                                mesher->block_registry,
+                                (nc_block_type_t)chunk[block_index]);
 
                         nc_mesh_face_data_t* face_data = nc_mesh_face_data_vec_grow(face_data_result, 1);
                         *face_data = (nc_mesh_face_data_t){
-                            .texture_layer = block_model->texture_array_layers[direction],
+                            .texture_layer = block->texture_array_layers[direction],
                             .ambient_occlusion = nc__chunk_compute_face_ambient_occlusion(
                                     axis_columns,
                                     direction,
@@ -629,17 +581,6 @@ void nc_mesher_fini(nc_mesher_t* mesher) {
     if (!mesher) {
         return;
     }
-
-    nc_block_model_t* models = mesher->block_models.array;
-    if (!models) {
-        return;
-    }
-
-    for (uint32_t i = 0; i < mesher->block_models.count; i++) {
-        nc_mesh_quad_vec_fini(&models[i].quads);
-    }
-
-    nc_block_model_vec_fini(&mesher->block_models);
 
     free(mesher);
 }

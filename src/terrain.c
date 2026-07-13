@@ -66,7 +66,7 @@ typedef struct nc__terrain_chunk_column_t {
     nc__terrain_chunk_column_dirty_bitset dirty_top_solid_blocks;
     int32_t min_loaded_chunk_y;
     uint32_t ref_count;
-    bool dirty_queued;
+    bool dirty;
 } nc__terrain_chunk_column_t;
 
 #define TDS_TYPE nc__terrain_chunk_column_map
@@ -81,8 +81,8 @@ typedef struct nc_terrain_t {
     nc__terrain_chunk_column_map chunk_columns;
     nc__terrain_chunk_column_coords_vec dirty_chunk_columns;
     nc_renderer_texture_t* texture_array;
+    nc_block_registry_t* block_registry;
     nc_mesher_t* mesher;
-    uint16_t block_type_model_ids[NC_BLOCK_TYPE_COUNT + 1];
 } nc_terrain_t;
 
 static vkm_ivec2 nc__terrain_chunk_column_coords(const vkm_ivec3* chunk_coords) {
@@ -100,7 +100,7 @@ static void nc__terrain_update_chunk_column_from_chunk(
             const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
             for (int y = NC_MESHER_CHUNK_SIZE - 1; y >= 0; y--) {
                 const uint16_t block = chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
-                if (nc_mesher_block_is_solid(terrain->mesher, block)) {
+                if (nc_block_registry_get(terrain->block_registry, (nc_block_type_t)block)->fully_solid) {
                     const int32_t world_y = chunk_bottom + y;
                     if (world_y > column->top_solid_blocks[column_index]) {
                         column->top_solid_blocks[column_index] = world_y;
@@ -150,7 +150,7 @@ static void nc__terrain_update_dirty_chunk_column(
 
                 for (int y = NC_MESHER_CHUNK_SIZE - 1; y >= 0; y--) {
                     const uint16_t block = chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
-                    if (nc_mesher_block_is_solid(terrain->mesher, block)) {
+                    if (nc_block_registry_get(terrain->block_registry, (nc_block_type_t)block)->fully_solid) {
                         column->top_solid_blocks[column_index] = chunk_y * NC_MESHER_CHUNK_SIZE + y;
                         goto found_top_solid_block;
                     }
@@ -161,7 +161,7 @@ found_top_solid_block:
             nc__terrain_chunk_column_dirty_bitset_clear(&column->dirty_top_solid_blocks, column_index);
         }
     }
-    column->dirty_queued = false;
+    column->dirty = false;
 }
 
 static void nc__terrain_queue_dirty_chunk_column(
@@ -169,9 +169,9 @@ static void nc__terrain_queue_dirty_chunk_column(
     const vkm_ivec2 column_coords,
     nc__terrain_chunk_column_t* column
 ) {
-    if (!column->dirty_queued) {
+    if (!column->dirty) {
         nc__terrain_chunk_column_coords_vec_append(&terrain->dirty_chunk_columns, column_coords);
-        column->dirty_queued = true;
+        column->dirty = true;
     }
 }
 
@@ -232,6 +232,36 @@ static void nc__terrain_mark_chunk_and_neighbors_dirty(const nc_terrain_t* terra
                 nc__terrain_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
                 if (neighbor) {
                     neighbor->dirty = true;
+                }
+            }
+        }
+    }
+}
+
+// A block edit can only affect chunks whose one-block meshing border contains the edited block.
+static void nc__terrain_mark_block_chunks_dirty(
+    const nc_terrain_t* terrain,
+    const vkm_ivec3* chunk_coords,
+    const vkm_ivec3* local_coords
+) {
+    const int min_x = local_coords->x == 0 ? -1 : 0;
+    const int max_x = local_coords->x == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+    const int min_y = local_coords->y == 0 ? -1 : 0;
+    const int max_y = local_coords->y == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+    const int min_z = local_coords->z == 0 ? -1 : 0;
+    const int max_z = local_coords->z == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+
+    for (int z = min_z; z <= max_z; z++) {
+        for (int y = min_y; y <= max_y; y++) {
+            for (int x = min_x; x <= max_x; x++) {
+                vkm_ivec3 affected_coords;
+                if (!nc__terrain_offset_chunk_coords(chunk_coords, x, y, z, &affected_coords)) {
+                    continue;
+                }
+
+                nc__terrain_chunk_t* affected = nc__terrain_get_chunk(terrain, &affected_coords);
+                if (affected) {
+                    affected->dirty = true;
                 }
             }
         }
@@ -312,14 +342,15 @@ static bool nc__terrain_set_world_block(
 
     uint16_t* slot = &chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(local_coords.x, local_coords.y, local_coords.z)];
     if (*slot != block) {
-        const bool old_block_was_solid = nc_mesher_block_is_solid(terrain->mesher, *slot);
+        const bool old_block_was_solid =
+                nc_block_registry_get(terrain->block_registry, (nc_block_type_t)*slot)->fully_solid;
         *slot = block;
         nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                 &terrain->chunk_columns,
                 nc__terrain_chunk_column_coords(&chunk_coords));
         NC_ASSERT(column);
         const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(local_coords.x, local_coords.z);
-        if (nc_mesher_block_is_solid(terrain->mesher, block)) {
+        if (nc_block_registry_get(terrain->block_registry, (nc_block_type_t)block)->fully_solid) {
             if (block_coords->y > (*column)->top_solid_blocks[column_index]) {
                 (*column)->top_solid_blocks[column_index] = block_coords->y;
             }
@@ -330,7 +361,7 @@ static bool nc__terrain_set_world_block(
                     nc__terrain_chunk_column_coords(&chunk_coords),
                     *column);
         }
-        nc__terrain_mark_chunk_and_neighbors_dirty(terrain, &chunk_coords);
+        nc__terrain_mark_block_chunks_dirty(terrain, &chunk_coords, &local_coords);
     }
     return true;
 }
@@ -393,7 +424,9 @@ bool nc_terrain_load_or_replace_chunk(
         goto error;
     }
 
-    NC_ASSERT(nc__terrain_chunk_map_set(&terrain->chunks, *coords, chunk));
+    const int chunk_was_added = nc__terrain_chunk_map_set(&terrain->chunks, *coords, chunk);
+    NC_ASSERT(chunk_was_added);
+    (void)chunk_was_added;
 
     const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(coords);
     nc__terrain_chunk_column_t** existing_column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
@@ -412,7 +445,12 @@ bool nc_terrain_load_or_replace_chunk(
             column->top_solid_blocks[i] = INT32_MIN;
         }
         nc__terrain_update_chunk_column_from_chunk(terrain, column, chunk);
-        NC_ASSERT(nc__terrain_chunk_column_map_set(&terrain->chunk_columns, column_coords, column));
+        const int column_was_added = nc__terrain_chunk_column_map_set(
+                &terrain->chunk_columns,
+                column_coords,
+                column);
+        NC_ASSERT(column_was_added);
+        (void)column_was_added;
     }
     nc__terrain_mark_chunk_and_neighbors_dirty(terrain, coords);
     return true;
@@ -442,7 +480,9 @@ void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, con
     (*column)->ref_count--;
     if ((*column)->ref_count == 0) {
         free(*column);
-        NC_ASSERT(nc__terrain_chunk_column_map_remove(&terrain->chunk_columns, column_coords));
+        const int column_was_removed = nc__terrain_chunk_column_map_remove(&terrain->chunk_columns, column_coords);
+        NC_ASSERT(column_was_removed);
+        (void)column_was_removed;
     } else if (coords->y == (*column)->min_loaded_chunk_y) {
         int32_t min_loaded_chunk_y = INT32_MAX;
         nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
@@ -461,53 +501,6 @@ void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, con
 
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain) {
     return nc__terrain_chunk_map_count(&terrain->chunks);
-}
-
-static void nc__terrain_set_model_voxel(
-    uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
-    const int x,
-    const int y,
-    const int z
-) {
-    const int index = NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z);
-    voxel_data[index >> 4] |= (uint16_t)(1 << (index & 15));
-}
-
-static void nc__terrain_initialize_test_block_models(nc_terrain_t* terrain) {
-    uint16_t full_cube_data[NC_MESHER_INTS_PER_BLOCK_MODEL];
-    memset(full_cube_data, 0xff, sizeof(full_cube_data));
-
-    const uint16_t stone_textures[6] = { 0, 0, 0, 0, 0, 0 };
-    const uint16_t dirt_textures[6] = { 1, 1, 1, 1, 1, 1 };
-    const uint16_t grass_textures[6] = { 1, 2, 1, 1, 1, 1 };
-
-    terrain->block_type_model_ids[NC_BLOCK_TYPE_AIR] = 0;
-    terrain->block_type_model_ids[NC_BLOCK_TYPE_STONE] =
-            nc_mesher_register_block_model(terrain->mesher, full_cube_data, stone_textures);
-
-    uint16_t half_cube_data[NC_MESHER_INTS_PER_BLOCK_MODEL] = { 0 };
-    for (int z = 0; z < NC_MESHER_BLOCK_MODEL_LENGTH; z++) {
-        for (int y = 0; y < NC_MESHER_BLOCK_MODEL_LENGTH / 2; y++) {
-            for (int x = 0; x < NC_MESHER_BLOCK_MODEL_LENGTH; x++) {
-                nc__terrain_set_model_voxel(half_cube_data, x, y, z);
-            }
-        }
-    }
-    terrain->block_type_model_ids[NC_BLOCK_TYPE_DIRT] =
-            nc_mesher_register_block_model(terrain->mesher, full_cube_data, dirt_textures);
-
-    uint16_t ramp_data[NC_MESHER_INTS_PER_BLOCK_MODEL] = { 0 };
-    for (int z = 0; z < NC_MESHER_BLOCK_MODEL_LENGTH; z++) {
-        for (int y = 0; y < NC_MESHER_BLOCK_MODEL_LENGTH; y++) {
-            for (int x = 0; x < NC_MESHER_BLOCK_MODEL_LENGTH; x++) {
-                if (y <= x) {
-                    nc__terrain_set_model_voxel(ramp_data, x, y, z);
-                }
-            }
-        }
-    }
-    terrain->block_type_model_ids[NC_BLOCK_TYPE_GRASS] =
-            nc_mesher_register_block_model(terrain->mesher, full_cube_data, grass_textures);
 }
 
 static bool nc__terrain_initialize_test_chunks(nc_terrain_t* terrain, nc_renderer_t* renderer) {
@@ -534,11 +527,13 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
         goto error;
     }
 
-    if (!((result->mesher = nc_mesher_init()))) {
+    if (!((result->block_registry = nc_block_registry_init()))) {
         goto error;
     }
 
-    nc__terrain_initialize_test_block_models(result);
+    if (!((result->mesher = nc_mesher_init(result->block_registry)))) {
+        goto error;
+    }
 
     if (!nc__terrain_initialize_test_chunks(result, renderer)) {
         goto error;
@@ -551,7 +546,7 @@ error:
     return NULL;
 }
 
-static void nc__terrain_load_chunk_and_neighbors(
+static void nc__terrain_get_chunk_and_neighbors(
     const nc_terrain_t* terrain,
     const vkm_ivec3* coords,
     const uint16_t* chunk_and_neighbors[3][3][3]
@@ -585,7 +580,7 @@ static bool nc__terrain_prepare_chunk_render(
     }
 
     const uint16_t* chunk_and_neighbors[3][3][3];
-    nc__terrain_load_chunk_and_neighbors(terrain, &chunk->coords, chunk_and_neighbors);
+    nc__terrain_get_chunk_and_neighbors(terrain, &chunk->coords, chunk_and_neighbors);
 
     nc_mesh_quad_vec quads;
     nc_mesh_face_data_vec face_data;
@@ -808,7 +803,9 @@ void nc_terrain_get_block_highlight_draw(
 }
 
 void nc_terrain_set_block(nc_terrain_t* terrain, const vkm_ivec3* block_coords, nc_block_type_t new_block) {
-    nc__terrain_set_world_block(terrain, block_coords, terrain->block_type_model_ids[new_block]);
+    if (new_block <= NC_BLOCK_TYPE_COUNT) {
+        nc__terrain_set_world_block(terrain, block_coords, new_block);
+    }
 }
 
 void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camera, nc_block_type_t new_block) {
@@ -822,7 +819,7 @@ void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camer
     } else if (new_block <= NC_BLOCK_TYPE_COUNT && !nc__terrain_normal_is_zero(hit.normal)) {
         vkm_ivec3 placement_position;
         if (nc__terrain_offset_block_coords(hit.block_position, hit.normal, &placement_position)) {
-            nc__terrain_set_world_block(terrain, &placement_position, terrain->block_type_model_ids[new_block]);
+            nc__terrain_set_world_block(terrain, &placement_position, new_block);
         }
     }
 }
@@ -865,6 +862,7 @@ void nc_terrain_fini(nc_terrain_t* terrain, nc_renderer_t* renderer) {
     nc__terrain_chunk_column_coords_vec_fini(&terrain->dirty_chunk_columns);
 
     nc_mesher_fini(terrain->mesher);
+    nc_block_registry_fini(terrain->block_registry);
     nc_renderer_destroy_texture(renderer, terrain->texture_array);
 
     free(terrain);

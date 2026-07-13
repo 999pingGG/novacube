@@ -16,6 +16,7 @@ set(NC_SOURCES
         libs/cvkm/cvkm.h
         libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
+        src/block.c
         src/block_model_mesher.c
         src/camera.c
         src/cvar.c
