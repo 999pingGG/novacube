@@ -491,12 +491,14 @@ static bool nc__parse_bool(nc__string_slice_t* slice, bool* result) {
     nc__right_trim_slice(slice);
 
     if (       nc__string_slice_equals_string(slice, "true")
+            || nc__string_slice_equals_string(slice, "1")
             || nc__string_slice_equals_string(slice, "yes")
             || nc__string_slice_equals_string(slice, "please")
             || nc__string_slice_equals_string(slice, "ofc")) {
         *result = true;
         return true;
     } else if (nc__string_slice_equals_string(slice, "false")
+            || nc__string_slice_equals_string(slice, "0")
             || nc__string_slice_equals_string(slice, "no")
             || nc__string_slice_equals_string(slice, "nope")
             || nc__string_slice_equals_string(slice, "nah")) {
