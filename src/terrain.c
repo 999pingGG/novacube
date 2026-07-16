@@ -522,6 +522,7 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
 
     if (!((result->texture_array = nc_renderer_create_texture_array_from_files(
             renderer,
+            NC_RENDERER_TEXTURE_TYPE_COLOR,
             nc__terrain_texture_paths,
             NC_COUNTOF(nc__terrain_texture_paths))))) {
         goto error;

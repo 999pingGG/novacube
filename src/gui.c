@@ -210,7 +210,7 @@ static void nc__gui_destroy_texture(nc_renderer_t* renderer, nc__gui_texture_t* 
 }
 
 static bool nc__gui_load_texture(nc_renderer_t* renderer, const char* path, nc__gui_texture_t* texture) {
-    texture->texture = nc_renderer_create_texture_2d_from_file(renderer, path);
+    texture->texture = nc_renderer_create_texture_2d_from_file(renderer, NC_RENDERER_TEXTURE_TYPE_COLOR, path);
     if (!texture->texture) {
         goto error;
     }
@@ -655,6 +655,7 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
 
     result->font_texture.texture = nc_renderer_create_rgba_texture_2d(
             renderer,
+            NC_RENDERER_TEXTURE_TYPE_DATA,
             (int16_t)font_width,
             (int16_t)font_height,
             font_pixels);

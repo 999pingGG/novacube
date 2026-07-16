@@ -32,6 +32,13 @@ typedef enum nc_renderer_buffer_usage_t {
     NC_RENDERER_BUFFER_USAGE_COUNT = NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
 } nc_renderer_buffer_usage_t;
 
+typedef enum nc_renderer_texture_type_t {
+    // Human-viewable color stored with sRGB encoding. Sampling returns linear RGB; alpha remains linear.
+    NC_RENDERER_TEXTURE_TYPE_COLOR = 1,
+    // Non-color values such as masks, coverage, normals or lookup data. Sampling returns the stored values unchanged.
+    NC_RENDERER_TEXTURE_TYPE_DATA,
+} nc_renderer_texture_type_t;
+
 typedef struct nc_renderer_overlay_draw_command_t {
     const nc_renderer_texture_t* texture;
     SDL_Rect clip_rect;
@@ -110,14 +117,17 @@ bool nc_renderer_queue_buffer_upload(
         uint32_t size);
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
         nc_renderer_t* renderer,
+        nc_renderer_texture_type_t type,
         int16_t width,
         int16_t height,
         const void* pixels);
 nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(
         nc_renderer_t* renderer,
+        nc_renderer_texture_type_t type,
         const char* path);
 nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
         nc_renderer_t* renderer,
+        nc_renderer_texture_type_t type,
         const char* const* paths,
         uint16_t path_count);
 void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture);

@@ -16,6 +16,12 @@ TEXTURE_DIRS = [
     SOURCE_DIR / 'textures',
 ]
 
+# These images carry numeric data rather than human-viewable sRGB color. Keep this list in sync with the texture type
+# passed to the renderer API. Alpha-only masks belong here because alpha is always linear.
+DATA_TEXTURES = {
+    Path('textures/gui/crosshair.png'),
+}
+
 IMAGE_EXTS = ['.png', '.jpg', '.jpeg']
 
 SHADER_DIRS = [
@@ -84,9 +90,10 @@ def process_textures(compress_android, strip_exif):
                 android_out_dir.mkdir(parents=True, exist_ok=True)
                 out = android_out_dir / (img.stem + '.astc')
                 print(f'[ANDROID] Compressing {img} -> {out}')
+                profile = '-cl' if rel in DATA_TEXTURES else '-cs'
                 run([
                     ASTCENC_COMMAND,
-                    '-cl',
+                    profile,
                     str(img),
                     str(out),
                     block,

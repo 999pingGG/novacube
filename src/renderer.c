@@ -30,10 +30,14 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__RENDERER_ASTC_TEXTURES 1
 #define NC__RENDERER_ASSETS_BASE_PATH ""
 #define NC__RENDERER_TEXTURE_EXTENSION ".astc"
+#define NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT VK_FORMAT_R8G8B8A8_SRGB
+#define NC__RENDERER_ALTERNATIVE_SWAPCHAIN_FORMAT VK_FORMAT_B8G8R8A8_SRGB
 #else
 #define NC__RENDERER_ASTC_TEXTURES 0
 #define NC__RENDERER_ASSETS_BASE_PATH "assets/"
 #define NC__RENDERER_TEXTURE_EXTENSION ".png"
+#define NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT VK_FORMAT_B8G8R8A8_SRGB
+#define NC__RENDERER_ALTERNATIVE_SWAPCHAIN_FORMAT VK_FORMAT_R8G8B8A8_SRGB
 #endif
 
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
@@ -60,6 +64,14 @@ NC_IGNORE_ALL_WARNINGS_END
 
 static const char* nc__renderer_crosshair_texture_path =
     NC__RENDERER_ASSETS_BASE_PATH "textures/gui/crosshair" NC__RENDERER_TEXTURE_EXTENSION;
+
+static float nc__renderer_srgb_to_linear(const float srgb) {
+    if (srgb <= 0.04045f) {
+        return srgb * (1.0f / 12.92f);
+    }
+
+    return powf((srgb + 0.055f) * (1.0f / 1.055f), 2.4f);
+}
 
 typedef uint8_t nc__renderer_upload_kind_t;
 enum {
@@ -161,6 +173,14 @@ typedef struct nc__renderer_address_push_constants_t {
     VkDeviceAddress data;
 } nc__renderer_address_push_constants_t;
 
+#define TDS_TYPE nc__renderer_retired_buffer_vec
+#define TDS_VALUE_T nc__renderer_retired_buffer_t
+#include <tds/vector.h>
+
+#define TDS_TYPE nc__renderer_upload_op_vec
+#define TDS_VALUE_T nc__renderer_upload_op_t
+#include <tds/vector.h>
+
 typedef struct nc_renderer_t {
     VkInstance instance;
     VkPhysicalDevice physical_device;
@@ -225,13 +245,9 @@ typedef struct nc_renderer_t {
     uint32_t transfer_size;
     uint32_t transfer_capacity;
 
-    nc__renderer_retired_buffer_t* retired_transfer_buffers;
-    uint32_t retired_transfer_buffer_count;
-    uint32_t retired_transfer_buffer_capacity;
+    nc__renderer_retired_buffer_vec retired_transfer_buffers;
 
-    nc__renderer_upload_op_t* upload_ops;
-    uint32_t upload_count;
-    uint32_t upload_capacity;
+    nc__renderer_upload_op_vec upload_ops;
     bool uploads_dirty;
 
     uint64_t frame_id;
@@ -327,6 +343,7 @@ static const char* nc__renderer_vk_result_string(const VkResult result) {
 #undef NC__VULKAN_ERROR_CASE
 
 static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_t required, const uint32_t minimum) {
+    NC_ASSERT(minimum);
     uint32_t capacity = current ? current : minimum;
     while (capacity < required) {
         if (capacity > UINT32_MAX / 2) {
@@ -458,35 +475,24 @@ static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
 }
 
 static void nc__renderer_destroy_retired_transfer_buffers(nc_renderer_t* renderer) {
-    for (uint32_t i = 0; i < renderer->retired_transfer_buffer_count; i++) {
-        const nc__renderer_retired_buffer_t* retired = &renderer->retired_transfer_buffers[i];
-        vmaDestroyBuffer(renderer->allocator, retired->buffer, retired->allocation);
+    for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_transfer_buffers); i++) {
+        const nc__renderer_retired_buffer_t retired = nc__renderer_retired_buffer_vec_get(&renderer->retired_transfer_buffers, i);
+        vmaDestroyBuffer(renderer->allocator, retired.buffer, retired.allocation);
     }
-    renderer->retired_transfer_buffer_count = 0;
+    nc__renderer_retired_buffer_vec_clear(&renderer->retired_transfer_buffers);
 }
 
-static void nc__renderer_retire_transfer_buffer(
-    nc_renderer_t* renderer,
-    VkBuffer buffer,
-    VmaAllocation allocation
-) {
+static void nc__renderer_retire_transfer_buffer(nc_renderer_t* renderer, VkBuffer buffer, VmaAllocation allocation) {
     if (!buffer) {
         return;
     }
 
-    if (renderer->retired_transfer_buffer_count == renderer->retired_transfer_buffer_capacity) {
-        const uint32_t new_capacity = nc__renderer_next_capacity(
-                renderer->retired_transfer_buffer_capacity,
-                renderer->retired_transfer_buffer_count + 1,
-                4);
-        renderer->retired_transfer_buffers = realloc(
-                renderer->retired_transfer_buffers,
-                new_capacity * sizeof(*renderer->retired_transfer_buffers));
-        renderer->retired_transfer_buffer_capacity = new_capacity;
-    }
-
-    renderer->retired_transfer_buffers[renderer->retired_transfer_buffer_count++] =
-            (nc__renderer_retired_buffer_t){ buffer, allocation };
+    nc__renderer_retired_buffer_vec_append(
+            &renderer->retired_transfer_buffers,
+            (nc__renderer_retired_buffer_t){
+                .buffer = buffer,
+                .allocation = allocation,
+            });
 }
 
 static bool nc__renderer_create_transfer_buffer(nc_renderer_t* renderer, const uint32_t capacity) {
@@ -1037,14 +1043,14 @@ static bool nc__renderer_choose_swapchain_format(
 
     if (format_count == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
         *out_format = (VkSurfaceFormatKHR){
-            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .format = NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT,
             .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         };
         return true;
     }
 
     for (uint32_t i = 0; i < format_count; i++) {
-        if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
+        if (formats[i].format == NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT &&
                 formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             *out_format = formats[i];
             return true;
@@ -1052,15 +1058,15 @@ static bool nc__renderer_choose_swapchain_format(
     }
 
     for (uint32_t i = 0; i < format_count; i++) {
-        if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
+        if (formats[i].format == NC__RENDERER_ALTERNATIVE_SWAPCHAIN_FORMAT &&
                 formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             *out_format = formats[i];
             return true;
         }
     }
 
-    *out_format = formats[0];
-    return true;
+    NC_SET_ERROR("The Vulkan surface has no supported sRGB swapchain format.");
+    goto error;
 
 error:
     return false;
@@ -2113,28 +2119,28 @@ static void nc__renderer_cmd_buffer_upload_barrier(
 }
 
 static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
-    if (!renderer->uploads_dirty || renderer->upload_count == 0) {
+    if (!renderer->uploads_dirty || nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         return true;
     }
 
     NC_ASSERT(renderer->frame_command_buffer);
 
-    for (uint32_t i = 0; i < renderer->upload_count; i++) {
-        nc__renderer_upload_op_t* op = &renderer->upload_ops[i];
-        if (op->kind == NC__RENDERER_UPLOAD_BUFFER) {
+    for (uint32_t i = 0; i < nc__renderer_upload_op_vec_count(&renderer->upload_ops); i++) {
+        const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
             vkCmdCopyBuffer(
                     renderer->frame_command_buffer,
                     renderer->transfer_buffer,
-                    op->buffer->buffer,
+                    op.buffer->buffer,
                     1,
                     &(VkBufferCopy){
-                        .srcOffset = op->source_offset,
+                        .srcOffset = op.source_offset,
                         .dstOffset = 0,
-                        .size = op->size,
+                        .size = op.size,
                     });
-            nc__renderer_cmd_buffer_upload_barrier(renderer, op->buffer);
+            nc__renderer_cmd_buffer_upload_barrier(renderer, op.buffer);
         } else {
-            nc_renderer_texture_t* texture = op->texture.texture;
+            nc_renderer_texture_t* texture = op.texture.texture;
             nc__renderer_cmd_transition_texture(renderer, texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             vkCmdCopyBufferToImage(
                     renderer->frame_command_buffer,
@@ -2143,11 +2149,11 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     1,
                     &(VkBufferImageCopy){
-                        .bufferOffset = op->source_offset,
+                        .bufferOffset = op.source_offset,
                         .imageSubresource = {
                             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                             .mipLevel = 0,
-                            .baseArrayLayer = op->texture.layer,
+                            .baseArrayLayer = op.texture.layer,
                             .layerCount = 1,
                         },
                         .imageExtent = { (uint32_t)texture->width, (uint32_t)texture->height, 1 },
@@ -2156,7 +2162,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         }
     }
 
-    renderer->upload_count = 0;
+    nc__renderer_upload_op_vec_clear(&renderer->upload_ops);
     renderer->uploads_dirty = false;
     return true;
 }
@@ -2166,7 +2172,13 @@ static uint32_t nc__renderer_read_u24(const uint8_t bytes[3]) {
     return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16);
 }
 
-static bool nc__renderer_load_texture_file(const char* path, nc__renderer_texture_file_data_t* out_texture) {
+static bool nc__renderer_load_texture_file(
+    const char* path,
+    const nc_renderer_texture_type_t type,
+    nc__renderer_texture_file_data_t* out_texture
+) {
+    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
+
     size_t file_size = 0;
     uint8_t* file_bytes = SDL_LoadFile(path, &file_size);
     NC_CHECK_SDL_RESULT(file_bytes);
@@ -2209,7 +2221,9 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
     memcpy(out_texture->bytes, file_bytes + sizeof(*header), out_texture->size);
     out_texture->width = (int16_t)x;
     out_texture->height = (int16_t)y;
-    out_texture->format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    out_texture->format = type == NC_RENDERER_TEXTURE_TYPE_COLOR
+            ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+            : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
 
     SDL_free(file_bytes);
     return true;
@@ -2219,7 +2233,13 @@ error:
     return false;
 }
 #else
-static bool nc__renderer_load_texture_file(const char* path, nc__renderer_texture_file_data_t* out_texture) {
+static bool nc__renderer_load_texture_file(
+    const char* path,
+    const nc_renderer_texture_type_t type,
+    nc__renderer_texture_file_data_t* out_texture
+) {
+    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
+
     SDL_Surface* surface = SDL_LoadPNG(path);
     NC_CHECK_SDL_RESULT(surface);
 
@@ -2245,7 +2265,9 @@ static bool nc__renderer_load_texture_file(const char* path, nc__renderer_textur
         .size = (uint32_t)surface->w * (uint32_t)surface->h * 4,
         .width = (int16_t)surface->w,
         .height = (int16_t)surface->h,
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .format = type == NC_RENDERER_TEXTURE_TYPE_COLOR
+                ? VK_FORMAT_R8G8B8A8_SRGB
+                : VK_FORMAT_R8G8B8A8_UNORM,
     };
     out_texture->bytes = memcpy(malloc(out_texture->size), surface->pixels, out_texture->size);
 
@@ -2266,27 +2288,18 @@ static bool nc__renderer_queue_buffer_upload_internal(
 ) {
     NC_ASSERT(size);
 
-    if (renderer->upload_count == renderer->upload_capacity) {
-        const uint32_t new_capacity = nc__renderer_next_capacity(
-                renderer->upload_capacity,
-                renderer->upload_count + 1,
-                16);
-        renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
-        renderer->upload_capacity = new_capacity;
-    }
-
     uint32_t offset = 0;
     if (!nc__renderer_reserve_transfer_bytes(renderer, size, 4, &offset)) {
         return false;
     }
 
     memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
-    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
+    nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_BUFFER,
         .source_offset = offset,
         .size = size,
         .buffer = buffer,
-    };
+    });
     renderer->uploads_dirty = true;
     return true;
 }
@@ -2300,22 +2313,13 @@ static bool nc__renderer_queue_texture_upload(
 ) {
     NC_ASSERT(size);
 
-    if (renderer->upload_count == renderer->upload_capacity) {
-        const uint32_t new_capacity = nc__renderer_next_capacity(
-                renderer->upload_capacity,
-                renderer->upload_count + 1,
-                16);
-        renderer->upload_ops = realloc(renderer->upload_ops, new_capacity * sizeof(*renderer->upload_ops));
-        renderer->upload_capacity = new_capacity;
-    }
-
     uint32_t offset = 0;
     if (!nc__renderer_reserve_transfer_bytes(renderer, size, 16, &offset)) {
         return false;
     }
 
     memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
-    renderer->upload_ops[renderer->upload_count++] = (nc__renderer_upload_op_t){
+    nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_TEXTURE,
         .source_offset = offset,
         .size = size,
@@ -2323,7 +2327,7 @@ static bool nc__renderer_queue_texture_upload(
             .texture = texture,
             .layer = layer,
         },
-    };
+    });
     renderer->uploads_dirty = true;
     return true;
 }
@@ -2481,9 +2485,9 @@ static bool nc__renderer_draw_block_highlight(
     const vkm_ubvec4 color = nc_cvar_get_block_highlight_color();
     const nc__renderer_block_highlight_fragment_uniforms_t fragment_uniforms = {
         .color = {
-            .r = (float)color.r / 255.0f,
-            .g = (float)color.g / 255.0f,
-            .b = (float)color.b / 255.0f,
+            .r = nc__renderer_srgb_to_linear((float)color.r / 255.0f),
+            .g = nc__renderer_srgb_to_linear((float)color.g / 255.0f),
+            .b = nc__renderer_srgb_to_linear((float)color.b / 255.0f),
             .a = (float)color.a / 255.0f,
         },
         .time = draw->time,
@@ -2704,8 +2708,10 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
         goto error;
     }
 
-    result->procedural_overlay_crosshair_texture =
-            nc_renderer_create_texture_2d_from_file(result, nc__renderer_crosshair_texture_path);
+    result->procedural_overlay_crosshair_texture = nc_renderer_create_texture_2d_from_file(
+            result,
+            NC_RENDERER_TEXTURE_TYPE_DATA,
+            nc__renderer_crosshair_texture_path);
     NC_CHECK_RESULT(result->procedural_overlay_crosshair_texture, "Failed to load the procedural crosshair texture.");
 
     SDL_Log("Vulkan renderer initialized on %s.", result->physical_device_properties.deviceName);
@@ -2758,7 +2764,7 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     renderer->frame_fence_pending = false;
     nc__renderer_destroy_retired_transfer_buffers(renderer);
 
-    if (!renderer->uploads_dirty && renderer->upload_count == 0) {
+    if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         renderer->transfer_size = 0;
     }
 
@@ -2909,6 +2915,9 @@ vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {
     return renderer->window_size;
 }
 
+
+// Renderer and initial_size are optional, but specifying one requires the other.
+// In case no initial size is given, this buffer is lazily-initialized.
 nc_renderer_buffer_t* nc_renderer_create_buffer(
     nc_renderer_t* renderer,
     const nc_renderer_buffer_usage_t usage,
@@ -2922,29 +2931,31 @@ nc_renderer_buffer_t* nc_renderer_create_buffer(
     };
 
     NC_ASSERT(usage > 0 && usage <= NC_RENDERER_BUFFER_USAGE_COUNT);
-    NC_ASSERT(initial_size > 0);
 
     nc_renderer_buffer_t* result = calloc(1, sizeof(*result));
     result->usage = nc_to_vk_usage[usage] | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     result->capacity = initial_size;
 
-    NC__CHECK_VK_RESULT(vmaCreateBuffer(
-            renderer->allocator,
-            &(VkBufferCreateInfo){
-                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                .size = initial_size,
-                .usage = result->usage,
-                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            },
-            &(VmaAllocationCreateInfo){
-                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-            },
-            &result->buffer,
-            &result->allocation,
-            NULL));
+    if (renderer) {
+        NC_ASSERT(initial_size);
+        NC__CHECK_VK_RESULT(vmaCreateBuffer(
+                renderer->allocator,
+                &(VkBufferCreateInfo){
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .size = initial_size,
+                    .usage = result->usage,
+                    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                },
+                &(VmaAllocationCreateInfo){
+                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                },
+                &result->buffer,
+                &result->allocation,
+                NULL));
 
-    if (usage == NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ) {
-        result->address = nc__renderer_get_buffer_address(renderer, result->buffer);
+        if (usage == NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ) {
+            result->address = nc__renderer_get_buffer_address(renderer, result->buffer);
+        }
     }
 
     return result;
@@ -2974,7 +2985,7 @@ bool nc_renderer_queue_buffer_upload(
     const uint32_t size
 ) {
     if (size > buffer->capacity) {
-        const uint32_t new_capacity = nc__renderer_next_capacity(buffer->capacity, size, buffer->capacity);
+        const uint32_t new_capacity = nc__renderer_next_capacity(buffer->capacity, size, size);
         VkBuffer new_buffer;
         VmaAllocation new_allocation;
         NC__CHECK_VK_RESULT(vmaCreateBuffer(
@@ -3007,13 +3018,16 @@ error:
 
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
     nc_renderer_t* renderer,
+    const nc_renderer_texture_type_t type,
     const int16_t width,
     const int16_t height,
     const void* pixels
 ) {
+    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
+
     nc_renderer_texture_t* result = nc__renderer_create_texture_object(
             renderer,
-            VK_FORMAT_R8G8B8A8_UNORM,
+            type == NC_RENDERER_TEXTURE_TYPE_COLOR ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
             width,
             height,
             1,
@@ -3031,9 +3045,13 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
     return result;
 }
 
-nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(nc_renderer_t* renderer, const char* path) {
+nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(
+    nc_renderer_t* renderer,
+    const nc_renderer_texture_type_t type,
+    const char* path
+) {
     nc__renderer_texture_file_data_t texture_data;
-    if (!nc__renderer_load_texture_file(path, &texture_data)) {
+    if (!nc__renderer_load_texture_file(path, type, &texture_data)) {
         return NULL;
     }
 
@@ -3066,11 +3084,12 @@ nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(nc_renderer_t* re
 
 nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
     nc_renderer_t* renderer,
+    const nc_renderer_texture_type_t type,
     const char* const* paths,
     const uint16_t path_count
 ) {
     nc__renderer_texture_file_data_t texture_data;
-    if (!nc__renderer_load_texture_file(paths[0], &texture_data)) {
+    if (!nc__renderer_load_texture_file(paths[0], type, &texture_data)) {
         return NULL;
     }
 
@@ -3094,7 +3113,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
     }
 
     for (uint16_t i = 1; i < path_count; i++) {
-        if (!nc__renderer_load_texture_file(paths[i], &texture_data)) {
+        if (!nc__renderer_load_texture_file(paths[i], type, &texture_data)) {
             nc__renderer_destroy_texture_object(renderer, result);
             return NULL;
         }
@@ -3140,9 +3159,9 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         {
             .color = {
                 .float32 = {
-                    NC__RENDERER_CLEAR_RED,
-                    NC__RENDERER_CLEAR_GREEN,
-                    NC__RENDERER_CLEAR_BLUE,
+                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_RED),
+                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_GREEN),
+                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_BLUE),
                     1.0f,
                 },
             },
@@ -3279,8 +3298,8 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         vkDestroyInstance(renderer->instance, NULL);
     }
 
-    free(renderer->retired_transfer_buffers);
-    free(renderer->upload_ops);
+    nc__renderer_retired_buffer_vec_fini(&renderer->retired_transfer_buffers);
+    nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
     SDL_DestroyWindow(renderer->window);
     SDL_Vulkan_UnloadLibrary();
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
