@@ -42,9 +42,12 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
 #define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
 #define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
-#define NC__RENDERER_CLEAR_RED 0.53f
-#define NC__RENDERER_CLEAR_GREEN 0.81f
-#define NC__RENDERER_CLEAR_BLUE 0.92f
+#define NC__RENDERER_CLEAR_RED 0.05f
+#define NC__RENDERER_CLEAR_GREEN 0.05f
+#define NC__RENDERER_CLEAR_BLUE 0.05f
+// TODO: Maybe this value could be tuned down for devices with a `subPixelPrecisionBits` property higher than 4.
+// Need testing on more devices.
+#define NC__RENDERER_QUAD_EXPANSION_PIXELS 0.1f
 #define NC__RENDERER_DEPTH_FORMAT VK_FORMAT_D16_UNORM
 
 #define NC__CHECK_VK_RESULT(result) do { \
@@ -145,6 +148,7 @@ typedef struct nc__renderer_block_highlight_fragment_uniforms_t {
 typedef struct nc__renderer_chunk_uniforms_t {
     vkm_mat4 view_projection;
     vkm_vec3 position;
+    vkm_vec4 quad_expansion;
 } nc__renderer_chunk_uniforms_t;
 
 typedef struct nc__renderer_chunk_push_constants_t {
@@ -1368,6 +1372,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     const uint32_t max_image_count = capabilities.maxImageCount ? capabilities.maxImageCount : 3;
     // Ask for triple buffering.
     const uint32_t image_count = vkm_clamp(3, capabilities.minImageCount, max_image_count);
+    // TODO: This occasionally returns the surface lost error when switching apps.
     const VkResult create_result = vkCreateSwapchainKHR(
             renderer->device,
             &(VkSwapchainCreateInfoKHR){
@@ -1569,6 +1574,7 @@ static bool nc__renderer_create_graphics_pipeline(
     const nc_renderer_t* renderer,
     const char* vertex_shader_path,
     const char* fragment_shader_path,
+    const VkPrimitiveTopology topology,
     const VkPipelineVertexInputStateCreateInfo* vertex_input_state,
     const VkPipelineRasterizationStateCreateInfo* rasterization_state,
     const VkPipelineDepthStencilStateCreateInfo* depth_stencil_state,
@@ -1603,7 +1609,7 @@ static bool nc__renderer_create_graphics_pipeline(
                 .pVertexInputState = vertex_input_state,
                 .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                    .topology = topology,
                 },
                 .pViewportState = &(VkPipelineViewportStateCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -1711,6 +1717,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_back_cull,
             &depth_enabled_write,
@@ -1723,6 +1730,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_enabled_no_write,
@@ -1732,6 +1740,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_enabled_no_write,
@@ -1741,6 +1750,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_enabled_no_write,
@@ -1753,6 +1763,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &(VkPipelineVertexInputStateCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
                 .vertexBindingDescriptionCount = 1,
@@ -1794,6 +1805,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_no_cull,
             &depth_disabled,
@@ -1803,6 +1815,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_no_cull,
             &depth_disabled,
@@ -2400,8 +2413,12 @@ static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_rend
     free(texture);
 }
 
-static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_renderer_chunk_opaque_draw_t* draw) {
-    if (draw->vertex_count == 0) {
+static bool nc__renderer_draw_chunk_opaque(
+        nc_renderer_t* renderer,
+        const nc_renderer_chunk_opaque_draw_t* draw,
+        const vkm_vec4* quad_expansion
+) {
+    if (draw->quad_count == 0) {
         return true;
     }
 
@@ -2413,6 +2430,7 @@ static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_ren
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = view_projection,
         .position = draw->position,
+        .quad_expansion = *quad_expansion,
     };
     nc__renderer_chunk_push_constants_t push_constants = {
         .quad_buffer = draw->chunk_buffer->address,
@@ -2440,7 +2458,7 @@ static bool nc__renderer_draw_chunk_opaque(nc_renderer_t* renderer, const nc_ren
             NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
             sizeof(push_constants.face_data_buffer),
             &push_constants.face_data_buffer);
-    vkCmdDraw(renderer->frame_command_buffer, draw->vertex_count, 1, 0, 0);
+    vkCmdDraw(renderer->frame_command_buffer, 4, draw->quad_count, 0, 0);
     return true;
 }
 
@@ -3149,10 +3167,16 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
 
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
+    const vkm_vec4 quad_expansion = { {
+        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.x,
+        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.y,
+        (float)renderer->viewport.x / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
+        (float)renderer->viewport.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
+    } };
     const nc_renderer_texture_t* bound_chunk_texture = NULL;
     for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
         const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
-        if (draw.vertex_count > 0 && draw.texture != bound_chunk_texture) {
+        if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
             NC_ASSERT(draw.texture->is_array);
             if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
                 return false;
@@ -3160,7 +3184,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             bound_chunk_texture = draw.texture;
         }
 
-        if (!nc__renderer_draw_chunk_opaque(renderer, &draw)) {
+        if (!nc__renderer_draw_chunk_opaque(renderer, &draw, &quad_expansion)) {
             return false;
         }
     }

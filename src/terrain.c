@@ -42,7 +42,7 @@ typedef struct nc__terrain_chunk_t {
     nc_renderer_buffer_t* quad_buffer;
     // SSBO containing an array of nc_mesh_face_data_t.
     nc_renderer_buffer_t* face_data_buffer;
-    uint32_t vertex_count;
+    uint32_t quad_count;
     bool dirty;
 } nc__terrain_chunk_t;
 
@@ -587,8 +587,8 @@ static bool nc__terrain_prepare_chunk_render(
     nc_mesher_compute_chunk(terrain->mesher, chunk_and_neighbors, &quads, &face_data);
 
     bool result = true;
-    chunk->vertex_count = quads.count * 6;
-    if (chunk->vertex_count == 0) {
+    chunk->quad_count = quads.count;
+    if (chunk->quad_count == 0) {
         goto done;
     }
 
@@ -637,13 +637,13 @@ void nc_terrain_get_opaque_draws(
     nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
     while (nc__terrain_chunk_map_next(&it)) {
         const nc__terrain_chunk_t* chunk = *it.value;
-        if (chunk->vertex_count == 0) {
+        if (chunk->quad_count == 0) {
             continue;
         }
 
         nc_renderer_chunk_opaque_draw_vec_append(draws, (nc_renderer_chunk_opaque_draw_t){
             .chunk_buffer = chunk->quad_buffer,
-            .vertex_count = chunk->vertex_count,
+            .quad_count = chunk->quad_count,
             .face_data_buffer = chunk->face_data_buffer,
             .texture = terrain->texture_array,
             .view_projection = view_projection,

@@ -42,8 +42,7 @@ typedef struct nc_renderer_overlay_draw_command_t {
 typedef struct nc_renderer_chunk_opaque_draw_t {
     // SSBO containing an array of nc_mesh_quad_t.
     nc_renderer_buffer_t* chunk_buffer;
-    // Number of generated triangle-list vertices in the greedy chunk.
-    uint32_t vertex_count;
+    uint32_t quad_count;
     // SSBO containing an array of nc_mesh_face_data_t.
     nc_renderer_buffer_t* face_data_buffer;
     const nc_renderer_texture_t* texture;
