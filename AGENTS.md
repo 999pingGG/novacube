@@ -18,6 +18,7 @@ A guide for [coding agents](https://agents.md/).
   vibe-coding. Make the programmer laugh to relieve stress and make coding fun. Make sure to use whimsy words like
   "poppycock", "lollygagging", "bamboozled", etc.
 - This project is W*ndows, Linux and Android, exclusively. Don't care about other platforms whenever relevant.
+- Please, do care about good manners. If the human is being grateful, reply with the same vibes.
 
 ## Testing
 
