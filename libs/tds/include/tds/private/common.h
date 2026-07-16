@@ -29,6 +29,7 @@
     _,\
     TDS_VALUE_T)
 
+// We could have used `< 0` instead, but then we get a compiler warning. This is a silly enough workaround.
 #define TDS_IS_SIGNED(T) ((T)-1 < 1)
 #define TDS_MAX_VALUE(T) (TDS_IS_SIGNED(T) ? (T)((1ull << ((sizeof(T) << 3) - 1)) - 1) : (T)-1)
 #define TDS_COUNTOF(array) (sizeof(array) / sizeof((array)[0]))
@@ -60,6 +61,11 @@
 #ifndef TDS_MEMMOVE
 #include <string.h>
 #define TDS_MEMMOVE memmove
+#endif
+
+#ifndef TDS_MEMCPY
+#include <string.h>
+#define TDS_MEMCPY memcpy
 #endif
 
 #ifndef TDS_ASSERT
