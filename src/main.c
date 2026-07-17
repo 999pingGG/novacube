@@ -203,11 +203,16 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_vec3 right;
     vkm_vec3 up;
     nc_camera_get_basis(&app->camera, &forward, &right, &up);
+    forward.y = 0.0f;
+    float length = vkm_length(&forward);
+    if (length > 0.0f) {
+        vkm_div(&forward, length, &forward);
+    }
 
     const nc_gui_controls_t gui_controls = nc_gui_get_controls(app->gui);
     vkm_vec3 input = { {
         (float)keyboard_state[SDL_SCANCODE_D] - (float)keyboard_state[SDL_SCANCODE_A],
-        (float)keyboard_state[SDL_SCANCODE_SPACE] - (float)keyboard_state[SDL_SCANCODE_LCTRL],
+        (float)keyboard_state[SDL_SCANCODE_SPACE] - (float)keyboard_state[SDL_SCANCODE_LSHIFT],
         (float)keyboard_state[SDL_SCANCODE_W] - (float)keyboard_state[SDL_SCANCODE_S],
     } };
     input.x += (float)((gui_controls & NC_GUI_CONTROL_MOVE_RIGHT) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_LEFT) != 0);
@@ -219,37 +224,37 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     input.x += gui_movement_delta.x;
     input.z += gui_movement_delta.y;
 
-    const float input_length = vkm_length(&input);
-    if (input_length > 1.0f) {
-        vkm_div(&input, input_length, &input);
+    length = vkm_length(&input);
+    if (length > 1.0f) {
+        vkm_div(&input, length, &input);
     }
 
     vkm_vec3 velocity;
     vkm_mul(&right, input.x, &velocity);
     vkm_muladd(&CVKM_VEC3_UP, input.y, &velocity);
     vkm_muladd(&forward, input.z, &velocity);
-    vkm_mul(&velocity, NC__MOVEMENT_SPEED, &velocity);
+    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 3.0f : 1.0f), &velocity);
     vkm_muladd(&velocity, (float)delta_time, &app->camera.position);
 
     char debug_buffer[100];
 
     if (nc_cvar_get_show_fps()) {
-        const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
-        nc_gui_append_debug_text(app->gui, debug_buffer, length);
+        const int printed = snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
     if (nc_cvar_get_show_frame_time()) {
-        const int length = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
-        nc_gui_append_debug_text(app->gui, debug_buffer, length);
+        const int printed = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
     if (nc_cvar_get_show_target_block_debug_details()) {
         nc_terrain_raycast_hit_t hit;
         if (nc_terrain_raycast(app->terrain, &app->camera, NC_TERRAIN_MAX_BLOCK_MODIFICATION_DISTANCE, &hit)) {
-            const int length = snprintf(
+            const int printed = snprintf(
                     debug_buffer,
                     sizeof(debug_buffer),
-                    "Targeted block: (%d, %d, %d), distance: %f, top solid block height: %d",
+                    "Block: (%d, %d, %d), distance: %f, top solid block: %d",
                     hit.block_position.x,
                     hit.block_position.y,
                     hit.block_position.z,
@@ -260,7 +265,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                                 hit.block_position.x,
                                 hit.block_position.z,
                             } }));
-            nc_gui_append_debug_text(app->gui, debug_buffer, length);
+            nc_gui_append_debug_text(app->gui, debug_buffer, printed);
         }
     }
 
