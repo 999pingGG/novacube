@@ -770,7 +770,7 @@ static bool nc__renderer_select_physical_device(
     VkDeviceSize best_memory = 0;
     for (uint32_t i = 0; i < physical_device_count; i++) {
         uint32_t queue_family_index;
-        bool khr_get_buffer_device_address;
+        bool khr_get_buffer_device_address = false;
 
         if (!nc__renderer_find_required_extensions(
                 physical_devices[i],
