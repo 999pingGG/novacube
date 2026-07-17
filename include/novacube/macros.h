@@ -11,7 +11,8 @@ _Pragma("clang diagnostic ignored \"-Weverything\"")
 #define NC_IGNORE_ALL_WARNINGS_END   __pragma(warning(pop))
 #elif defined(__GNUC__)
 #define NC_IGNORE_ALL_WARNINGS_BEGIN _Pragma("GCC diagnostic push") \
-_Pragma("GCC diagnostic ignored \"-Wall\"")
+_Pragma("GCC diagnostic ignored \"-Wmissing-braces\"")
+_Pragma("GCC diagnostic ignored \"-Wempty-body\"")
 #define NC_IGNORE_ALL_WARNINGS_END   _Pragma("GCC diagnostic pop")
 #else
 #define NC_IGNORE_ALL_WARNINGS_BEGIN

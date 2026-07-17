@@ -124,7 +124,7 @@ static uint8_t nc__chunk_get_face_light(
 }
 
 static bool nc__chunk_is_solid_from_axis_columns(
-    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
     const int x,
     const int y,
     const int z
@@ -133,7 +133,7 @@ static bool nc__chunk_is_solid_from_axis_columns(
 }
 
 static uint16_t nc__chunk_build_face_ao_mask(
-    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
     const int direction,
     int x,
     int y,
@@ -234,7 +234,7 @@ static uint8_t nc__chunk_pack_face_ambient_occlusion(const uint16_t ao_mask) {
 }
 
 static uint8_t nc__chunk_compute_face_ambient_occlusion(
-    const uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
     const int direction,
     const int x,
     const int y,
