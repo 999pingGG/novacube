@@ -78,7 +78,8 @@ static uint8_t nc__chunk_get_light(
     const uint8_t* light_levels_and_neighbors[3][3][3],
     int x,
     int y,
-    int z
+    int z,
+    const uint8_t fallback
 ) {
     x += NC_MESHER_CHUNK_SIZE;
     y += NC_MESHER_CHUNK_SIZE;
@@ -93,7 +94,7 @@ static uint8_t nc__chunk_get_light(
 
     const uint8_t* chunk_data = light_levels_and_neighbors[x_chunk][y_chunk][z_chunk];
     if (!chunk_data) {
-        return 0;
+        return fallback;
     }
 
     return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
@@ -120,7 +121,61 @@ static uint8_t nc__chunk_get_face_light(
             light_levels_and_neighbors,
             x + offsets[direction][0],
             y + offsets[direction][1],
-            z + offsets[direction][2]);
+            z + offsets[direction][2],
+            0);
+}
+
+static uint8_t nc__chunk_get_face_plane_light(
+    const uint8_t* light_levels_and_neighbors[3][3][3],
+    const int direction,
+    const int x,
+    const int y,
+    const int z,
+    const int face_x,
+    const int face_y,
+    const uint8_t fallback
+) {
+    int sample_x;
+    int sample_y;
+    int sample_z;
+
+    switch (direction) {
+        case 0:
+            sample_x = x + face_x;
+            sample_y = y - 1;
+            sample_z = z + face_y;
+            break;
+        case 1:
+            sample_x = x + face_x;
+            sample_y = y + 1;
+            sample_z = z + face_y;
+            break;
+        case 2:
+            sample_x = x - 1;
+            sample_y = y + face_y;
+            sample_z = z + face_x;
+            break;
+        case 3:
+            sample_x = x + 1;
+            sample_y = y + face_y;
+            sample_z = z + face_x;
+            break;
+        case 4:
+            sample_x = x + face_x;
+            sample_y = y + face_y;
+            sample_z = z - 1;
+            break;
+        case 5:
+            sample_x = x + face_x;
+            sample_y = y + face_y;
+            sample_z = z + 1;
+            break;
+        default:
+            NC_ASSERT(false);
+            return fallback;
+    }
+
+    return nc__chunk_get_light(light_levels_and_neighbors, sample_x, sample_y, sample_z, fallback);
 }
 
 static bool nc__chunk_is_solid_from_axis_columns(
@@ -132,6 +187,12 @@ static bool nc__chunk_is_solid_from_axis_columns(
     return (axis_columns[0][z][x] >> y & 1) != 0;
 }
 
+static const int8_t nc__chunk_face_sample_offsets[9][2] = {
+    { -1, -1 }, { -1,  0 }, { -1,  1 },
+    {  0, -1 }, {  0,  0 }, {  0,  1 },
+    {  1, -1 }, {  1,  0 }, {  1,  1 },
+};
+
 static uint16_t nc__chunk_build_face_ao_mask(
     uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
     const int direction,
@@ -139,13 +200,6 @@ static uint16_t nc__chunk_build_face_ao_mask(
     int y,
     int z
 ) {
-    // Same 3x3 neighbour layout as TanTanDev's reference implementation.
-    static const int8_t adjacent_ao_offsets[9][2] = {
-        { -1, -1 }, { -1,  0 }, { -1,  1 },
-        {  0, -1 }, {  0,  0 }, {  0,  1 },
-        {  1, -1 }, {  1,  0 }, {  1,  1 },
-    };
-
     uint16_t result = 0;
 
     // Shift into the padded chunk coordinates so chunk-edge AO can hit neighbour chunks too.
@@ -153,9 +207,9 @@ static uint16_t nc__chunk_build_face_ao_mask(
     y++;
     z++;
 
-    for (int i = 0; i < (int)NC_COUNTOF(adjacent_ao_offsets); i++) {
-        const int8_t offset_x = adjacent_ao_offsets[i][0];
-        const int8_t offset_y = adjacent_ao_offsets[i][1];
+    for (int i = 0; i < (int)NC_COUNTOF(nc__chunk_face_sample_offsets); i++) {
+        const int8_t offset_x = nc__chunk_face_sample_offsets[i][0];
+        const int8_t offset_y = nc__chunk_face_sample_offsets[i][1];
         int sample_x;
         int sample_y;
         int sample_z;
@@ -233,14 +287,59 @@ static uint8_t nc__chunk_pack_face_ambient_occlusion(const uint16_t ao_mask) {
     return (uint8_t)(corner_0 | corner_1 << 2 | corner_2 << 4 | corner_3 << 6);
 }
 
-static uint8_t nc__chunk_compute_face_ambient_occlusion(
-    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+static uint8_t nc__chunk_corner_light(
+    const uint8_t light_samples[9],
+    const uint16_t ao_mask,
+    const int side_0_bit,
+    const int corner_bit,
+    const int side_1_bit
+) {
+    const bool side_0 = (ao_mask >> side_0_bit & 1) != 0;
+    const bool corner = (ao_mask >> corner_bit & 1) != 0;
+    const bool side_1 = (ao_mask >> side_1_bit & 1) != 0;
+    const uint8_t center_light = light_samples[4];
+
+    const int light_sum =
+            center_light
+            + (side_0 ? center_light : light_samples[side_0_bit])
+            + (side_1 ? center_light : light_samples[side_1_bit])
+            + (corner || (side_0 && side_1) ? center_light : light_samples[corner_bit]);
+    return (uint8_t)((light_sum + 2) / 4);
+}
+
+static uint16_t nc__chunk_uniform_face_light(const uint8_t light) {
+    NC_ASSERT(light <= 15);
+    return (uint16_t)(light * 0x1111);
+}
+
+static uint16_t nc__chunk_compute_face_light(
+    const uint8_t* light_levels_and_neighbors[3][3][3],
+    const uint16_t ao_mask,
     const int direction,
     const int x,
     const int y,
     const int z
 ) {
-    return nc__chunk_pack_face_ambient_occlusion(nc__chunk_build_face_ao_mask(axis_columns, direction, x, y, z));
+    const uint8_t center_light = nc__chunk_get_face_light(light_levels_and_neighbors, direction, x, y, z);
+    uint8_t light_samples[9];
+    for (int i = 0; i < (int)NC_COUNTOF(light_samples); i++) {
+        light_samples[i] = nc__chunk_get_face_plane_light(
+                light_levels_and_neighbors,
+                direction,
+                x,
+                y,
+                z,
+                nc__chunk_face_sample_offsets[i][0],
+                nc__chunk_face_sample_offsets[i][1],
+                center_light);
+    }
+
+    const uint8_t corner_0 = nc__chunk_corner_light(light_samples, ao_mask, 1, 0, 3);
+    const uint8_t corner_1 = nc__chunk_corner_light(light_samples, ao_mask, 3, 6, 7);
+    const uint8_t corner_2 = nc__chunk_corner_light(light_samples, ao_mask, 7, 8, 5);
+    const uint8_t corner_3 = nc__chunk_corner_light(light_samples, ao_mask, 5, 2, 1);
+
+    return (uint16_t)(corner_0 | corner_1 << 4 | corner_2 << 8 | corner_3 << 12);
 }
 
 static vkm_ubvec3 nc__world_to_sample_coords(const int direction, const int plane, const int x, const int y) {
@@ -348,7 +447,6 @@ void nc_mesher_compute_chunk(
                             .texture_layer = nc_block_registry_get(
                                     mesher->block_registry,
                                     (nc_block_type_t)chunk[block_index])->texture_array_layers[direction],
-                            .light = light_levels_and_neighbors[1][1][1][block_index],
                         };
 
                         const int quads_in_direction = model->direction_offsets[direction] - offset;
@@ -420,13 +518,29 @@ void nc_mesher_compute_chunk(
                 for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
                     const nc_block_model_t* model = nc__get_block_model(mesher, chunk[block_index]);
                     if (!model->solid && model->quads.count) {
-                        if (!nc_block_registry_get(
+                        const uint8_t light_emission = nc_block_registry_get(
                                 mesher->block_registry,
-                                (nc_block_type_t)chunk[block_index])->light_emission) {
-                            for (int direction = 0; direction < 6; direction++) {
-                                face_data[face_data_index + direction].ambient_occlusion =
-                                        nc__chunk_compute_face_ambient_occlusion(axis_columns, direction, x, y, z);
-                            }
+                                (nc_block_type_t)chunk[block_index])->light_emission;
+                        for (int direction = 0; direction < 6; direction++) {
+                            const uint16_t ao_mask = nc__chunk_build_face_ao_mask(
+                                    axis_columns,
+                                    direction,
+                                    x,
+                                    y,
+                                    z);
+                            nc_mesh_face_data_t* direction_data = &face_data[face_data_index + direction];
+                            direction_data->ambient_occlusion = light_emission
+                                    ? 0
+                                    : nc__chunk_pack_face_ambient_occlusion(ao_mask);
+                            direction_data->block_light = light_emission
+                                    ? nc__chunk_uniform_face_light(light_emission)
+                                    : nc__chunk_compute_face_light(
+                                            light_levels_and_neighbors,
+                                            ao_mask,
+                                            direction,
+                                            x,
+                                            y,
+                                            z);
                         }
 
                         face_data_index += 6;
@@ -511,23 +625,27 @@ void nc_mesher_compute_chunk(
                                 mesher->block_registry,
                                 (nc_block_type_t)chunk[block_index]);
 
+                        const uint16_t ao_mask = nc__chunk_build_face_ao_mask(
+                                axis_columns,
+                                direction,
+                                block_coords.x,
+                                block_coords.y,
+                                block_coords.z);
                         nc_mesh_face_data_t* face_data = nc_mesh_face_data_vec_grow(face_data_result, 1);
                         *face_data = (nc_mesh_face_data_t){
                             .texture_layer = block->texture_array_layers[direction],
                             .ambient_occlusion = block->light_emission
                                     ? 0
-                                    : nc__chunk_compute_face_ambient_occlusion(
-                                            axis_columns,
+                                    : nc__chunk_pack_face_ambient_occlusion(ao_mask),
+                            .block_light = block->light_emission
+                                    ? nc__chunk_uniform_face_light(block->light_emission)
+                                    : nc__chunk_compute_face_light(
+                                            light_levels_and_neighbors,
+                                            ao_mask,
                                             direction,
                                             block_coords.x,
                                             block_coords.y,
                                             block_coords.z),
-                            .light = nc__chunk_get_face_light(
-                                    light_levels_and_neighbors,
-                                    direction,
-                                    block_coords.x,
-                                    block_coords.y,
-                                    block_coords.z),
                         };
                     }
                 }

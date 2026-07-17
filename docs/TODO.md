@@ -9,3 +9,4 @@
 - A method to report warnings, non-fatal errors.
 - Change error handling strategy to not duplicate resource-releasing code in both of the success and error paths.
 - Improve build instructions. You need SDL, the Vulkan SDK, Python, git, CMake, in W*ndows enable symlinks; for Android astcenc, the SDK and the NDK.
+- In our deferred material lookup system for terrain, reuse the `texture_layer` as material ID for another indirect lookup. This would allow much greater flexibility without exploding memory usage. Evaluate the mobile performance cost of this.

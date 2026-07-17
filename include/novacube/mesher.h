@@ -55,15 +55,22 @@ typedef struct nc_mesh_quad_t {
 #define TDS_TYPE nc_mesh_quad_vec
 #include <tds/vector.h>
 
-// 4 bytes. Matches the SSBO representation used by chunk.frag
+// 8 bytes. Matches the SSBO representation used by chunk.frag
 typedef struct nc_mesh_face_data_t {
     uint16_t texture_layer;     // Bits 0-10: texture array layer (values 0-2047)
                                 // Bits 11-15: AVAILABLE.
                                 // Max 2048 layers was picked to support at least most entry-level mobile GPUs
                                 // per Vulkan limits.
     uint8_t ambient_occlusion;  // 2 bits for every face corner. 4 different values. A total of 8 bits per face.
-    uint8_t light;              // Bits 0-3: block light level
-                                // Bits 4-7: sky light level.
+    uint8_t unused;             // Could be useful for biome blending, painting blocks, rotating textures,
+                                // animated textures... The possibilities are endless!
+    uint16_t block_light;       // 4 bits for every face corner. A total of 16 bits per face.
+    uint16_t sky_light;         // 4 bits for every face corner. A total of 16 bits per face.
+                                // If we try really hard, we could shave off 3 bits for block lighting and 3
+                                // for sky lighting by using delta encoding. This trick assumes that every corner's
+                                // value will be at most ±3 from a neighbouring corner and compute its value
+                                // from the neighbor's value + the delta.
+                                // But let's leave that complexity out for later, if and when we need it.
 } nc_mesh_face_data_t;
 
 #define TDS_DECLARE

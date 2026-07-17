@@ -12,7 +12,7 @@ layout(set = 0, binding = 0) uniform sampler2DArray terrain_textures;
 
 layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer face_data_array {
     // This should be an array of nc_mesh_face_data_t, but we're working around driver bugs here.
-    uint faces[];
+    uvec2 faces[];
 };
 
 layout(push_constant) uniform push_constants {
@@ -34,17 +34,22 @@ float light_level_intensity(uint level) {
     return mix(ambient_intensity, 1.0, direct_intensity);
 }
 
+uint unpack_corner_light(uint light, int corner) {
+    return light >> (corner * 4) & 0xfu;
+}
+
 void main() {
     // Interpolation and rasterization precision can put fragments on the far edge a hair beyond the quad. Clamp the
     // discrete lookup so those fragments cannot read past the face-data array through the device address.
     uvec2 face_data_coord = min(uvec2(floor(face_data_uv)), face_data_size - uvec2(1));
     uint face_index = face_data_coord.y * face_data_size.x + face_data_coord.x;
-    uint packed_data = pc.face_data.faces[face_data_offset + face_index];
+    uvec2 packed_data = pc.face_data.faces[face_data_offset + face_index];
 
     // unpack data
-    uint texture_array_layer = packed_data & 0x7ffu;
-    uint ambient_occlusion = packed_data >> 16 & 0xffu;
-    uint light = packed_data >> 24;
+    uint texture_array_layer = packed_data.x & 0x7ffu;
+    uint ambient_occlusion = packed_data.x >> 16 & 0xffu;
+    uint block_light = packed_data.y & 0xffffu;
+    uint sky_light = packed_data.y >> 16;
 
     uint corner0_ao = ambient_occlusion >> 0 & 0x3u;
     uint corner1_ao = ambient_occlusion >> 2 & 0x3u;
@@ -52,19 +57,25 @@ void main() {
     uint corner3_ao = ambient_occlusion >> 6 & 0x3u;
 
     vec2 face_cell_uv = fract(face_data_uv);
-    float ao_bottom = mix(
-            ambient_occlusion_intensity(corner0_ao),
-            ambient_occlusion_intensity(corner1_ao),
-            face_cell_uv.x);
-    float ao_top = mix(
-            ambient_occlusion_intensity(corner3_ao),
-            ambient_occlusion_intensity(corner2_ao),
-            face_cell_uv.x);
-    float ao = mix(ao_bottom, ao_top, face_cell_uv.y);
-
-    uint block_light = light & 0xfu;
-    uint sky_light = light >> 4;
-    float illumination = light_level_intensity(max(block_light, sky_light)) * ao;
+    float corner0_illumination = light_level_intensity(max(
+            unpack_corner_light(block_light, 0),
+            unpack_corner_light(sky_light, 0)))
+            * ambient_occlusion_intensity(corner0_ao);
+    float corner1_illumination = light_level_intensity(max(
+            unpack_corner_light(block_light, 1),
+            unpack_corner_light(sky_light, 1)))
+            * ambient_occlusion_intensity(corner1_ao);
+    float corner2_illumination = light_level_intensity(max(
+            unpack_corner_light(block_light, 2),
+            unpack_corner_light(sky_light, 2)))
+            * ambient_occlusion_intensity(corner2_ao);
+    float corner3_illumination = light_level_intensity(max(
+            unpack_corner_light(block_light, 3),
+            unpack_corner_light(sky_light, 3)))
+            * ambient_occlusion_intensity(corner3_ao);
+    float illumination_bottom = mix(corner0_illumination, corner1_illumination, face_cell_uv.x);
+    float illumination_top = mix(corner3_illumination, corner2_illumination, face_cell_uv.x);
+    float illumination = mix(illumination_bottom, illumination_top, face_cell_uv.y);
 
     out_color = texture(terrain_textures, vec3(face_uv, texture_array_layer)) * vec4(vec3(illumination), 1.0);
 }
