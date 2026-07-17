@@ -28,8 +28,8 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
     externalNativeBuild {
         cmake {
@@ -48,5 +48,5 @@ dependencies {
     implementation libs.appcompat
     implementation libs.material
     implementation libs.constraintlayout
-    implementation files('libs/SDL3-3.3.7.aar')
+    implementation files('libs/SDL3-3.5.0.aar')
 }
