@@ -3300,7 +3300,9 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
 
     nc__renderer_retired_buffer_vec_fini(&renderer->retired_transfer_buffers);
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
-    SDL_DestroyWindow(renderer->window);
+    if (renderer->window) {
+        SDL_DestroyWindow(renderer->window);
+    }
     SDL_Vulkan_UnloadLibrary();
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 
