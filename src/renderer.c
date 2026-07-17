@@ -2013,111 +2013,6 @@ static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer,
     vkCmdSetScissor(renderer->frame_command_buffer, 0, 1, &scissor);
 }
 
-static void nc__renderer_cmd_transition_texture(
-    const nc_renderer_t* renderer,
-    nc_renderer_texture_t* texture,
-    const VkImageLayout new_layout
-) {
-    if (texture->layout == new_layout) {
-        return;
-    }
-
-    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    VkAccessFlags src_access = 0;
-    VkAccessFlags dst_access = 0;
-
-    switch (texture->layout) {
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-            break;
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            src_access = VK_ACCESS_SHADER_READ_BIT;
-            break;
-        default:
-            break;
-    }
-
-    switch (new_layout) {
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-            dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            dst_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-            break;
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            dst_access = VK_ACCESS_SHADER_READ_BIT;
-            break;
-        default:
-            NC_ASSERT(false);
-            break;
-    }
-
-    vkCmdPipelineBarrier(
-            renderer->frame_command_buffer,
-            src_stage,
-            dst_stage,
-            0,
-            0,
-            NULL,
-            0,
-            NULL,
-            1,
-            &(VkImageMemoryBarrier){
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                .srcAccessMask = src_access,
-                .dstAccessMask = dst_access,
-                .oldLayout = texture->layout,
-                .newLayout = new_layout,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = texture->image,
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .levelCount = 1,
-                    .layerCount = texture->layer_count,
-                },
-            });
-    texture->layout = new_layout;
-}
-
-static void nc__renderer_cmd_buffer_upload_barrier(
-    const nc_renderer_t* renderer,
-    const nc_renderer_buffer_t* buffer
-) {
-    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-    VkAccessFlags dst_access = VK_ACCESS_SHADER_READ_BIT;
-    if (buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) {
-        dst_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-        dst_access = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-    } else if (buffer->usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) {
-        dst_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-        dst_access = VK_ACCESS_INDEX_READ_BIT;
-    }
-
-    vkCmdPipelineBarrier(
-            renderer->frame_command_buffer,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            dst_stage,
-            0,
-            0,
-            NULL,
-            1,
-            &(VkBufferMemoryBarrier){
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                .dstAccessMask = dst_access,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = buffer->buffer,
-                .offset = 0,
-                .size = buffer->capacity,
-            },
-            0,
-            NULL);
-}
-
 static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     if (!renderer->uploads_dirty || nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         return true;
@@ -2125,7 +2020,91 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
     NC_ASSERT(renderer->frame_command_buffer);
 
-    for (uint32_t i = 0; i < nc__renderer_upload_op_vec_count(&renderer->upload_ops); i++) {
+    const uint32_t upload_count = nc__renderer_upload_op_vec_count(&renderer->upload_ops);
+    uint32_t texture_op_count = 0;
+    for (uint32_t i = 0; i < upload_count; i++) {
+        const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        texture_op_count += op.kind == NC__RENDERER_UPLOAD_TEXTURE;
+    }
+
+    VkImageMemoryBarrier* image_barriers = texture_op_count > 0
+            ? calloc(texture_op_count, sizeof(*image_barriers))
+            : NULL;
+    nc_renderer_texture_t** uploaded_textures = texture_op_count > 0
+            ? calloc(texture_op_count, sizeof(*uploaded_textures))
+            : NULL;
+    uint32_t texture_count = 0;
+    VkPipelineStageFlags texture_src_stages = 0;
+
+    for (uint32_t i = 0; i < upload_count; i++) {
+        const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        if (op.kind != NC__RENDERER_UPLOAD_TEXTURE) {
+            continue;
+        }
+
+        nc_renderer_texture_t* texture = op.texture.texture;
+        bool already_added = false;
+        for (uint32_t j = 0; j < texture_count; j++) {
+            if (uploaded_textures[j] == texture) {
+                already_added = true;
+                break;
+            }
+        }
+        if (already_added) {
+            continue;
+        }
+
+        VkAccessFlags src_access = 0;
+        switch (texture->layout) {
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                texture_src_stages |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                texture_src_stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                src_access = VK_ACCESS_SHADER_READ_BIT;
+                break;
+            default:
+                NC_ASSERT(false);
+                break;
+        }
+
+        uploaded_textures[texture_count] = texture;
+        image_barriers[texture_count] = (VkImageMemoryBarrier){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = src_access,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = texture->layout,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = texture->image,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = texture->layer_count,
+            },
+        };
+        texture_count++;
+    }
+
+    if (texture_count > 0) {
+        vkCmdPipelineBarrier(
+                renderer->frame_command_buffer,
+                texture_src_stages,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                NULL,
+                0,
+                NULL,
+                texture_count,
+                image_barriers);
+    }
+
+    VkPipelineStageFlags buffer_dst_stages = 0;
+    VkAccessFlags buffer_dst_access = 0;
+
+    for (uint32_t i = 0; i < upload_count; i++) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
         if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
             vkCmdCopyBuffer(
@@ -2138,10 +2117,19 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                         .dstOffset = 0,
                         .size = op.size,
                     });
-            nc__renderer_cmd_buffer_upload_barrier(renderer, op.buffer);
+
+            if (op.buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) {
+                buffer_dst_stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                buffer_dst_access |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+            } else if (op.buffer->usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) {
+                buffer_dst_stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                buffer_dst_access |= VK_ACCESS_INDEX_READ_BIT;
+            } else {
+                buffer_dst_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                buffer_dst_access |= VK_ACCESS_SHADER_READ_BIT;
+            }
         } else {
             nc_renderer_texture_t* texture = op.texture.texture;
-            nc__renderer_cmd_transition_texture(renderer, texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             vkCmdCopyBufferToImage(
                     renderer->frame_command_buffer,
                     renderer->transfer_buffer,
@@ -2158,12 +2146,42 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                         },
                         .imageExtent = { (uint32_t)texture->width, (uint32_t)texture->height, 1 },
                     });
-            nc__renderer_cmd_transition_texture(renderer, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+    }
+
+    for (uint32_t i = 0; i < texture_count; i++) {
+        image_barriers[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        image_barriers[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        image_barriers[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        image_barriers[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        uploaded_textures[i]->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    // All uploads precede all drawing, so one global memory dependency is enough.
+    // The access and stage masks still limit the dependency's scope.
+    const VkMemoryBarrier buffer_barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = buffer_dst_access,
+    };
+    if (buffer_dst_stages || texture_count > 0) {
+        vkCmdPipelineBarrier(
+                renderer->frame_command_buffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                buffer_dst_stages | (texture_count > 0 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+                0,
+                buffer_dst_stages ? 1 : 0,
+                buffer_dst_stages ? &buffer_barrier : NULL,
+                0,
+                NULL,
+                texture_count,
+                image_barriers);
     }
 
     nc__renderer_upload_op_vec_clear(&renderer->upload_ops);
     renderer->uploads_dirty = false;
+    free(uploaded_textures);
+    free(image_barriers);
     return true;
 }
 
