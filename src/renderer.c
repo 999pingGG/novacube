@@ -903,17 +903,19 @@ static bool nc__renderer_create_device(
 #if NC__RENDERER_ASTC_TEXTURES
     enabled_features.features.textureCompressionASTC_LDR = VK_TRUE;
 #endif
-    if (renderer->khr_get_buffer_device_address) {
-        scalar_block_layout_features.pNext = &(VkPhysicalDeviceBufferDeviceAddressFeaturesKHR){
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
-            .bufferDeviceAddress = VK_TRUE,
-        };
-    } else {
-        scalar_block_layout_features.pNext = &(VkPhysicalDeviceBufferDeviceAddressFeaturesEXT){
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
-            .bufferDeviceAddress = VK_TRUE,
-        };
-    }
+    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
+        .bufferDeviceAddress = VK_TRUE,
+    };
+
+    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
+        .bufferDeviceAddress = VK_TRUE,
+    };
+
+    scalar_block_layout_features.pNext = renderer->khr_get_buffer_device_address
+            ? (void*)&buffer_device_address_features
+            : (void*)&buffer_device_address_features_ext;
 
     NC__CHECK_VK_RESULT(vkCreateDevice(
             renderer->physical_device,
