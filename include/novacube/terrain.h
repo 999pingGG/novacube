@@ -32,7 +32,6 @@ uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer);
 void nc_terrain_get_opaque_draws(
         const nc_terrain_t* terrain,
-        const vkm_mat4* view_projection,
         nc_renderer_chunk_opaque_draw_vec* draws);
 bool nc_terrain_raycast(
         const nc_terrain_t* terrain,
@@ -41,7 +40,6 @@ bool nc_terrain_raycast(
         nc_terrain_raycast_hit_t* hit);
 void nc_terrain_get_block_highlight_draw(
         const nc_terrain_t* terrain,
-        const vkm_mat4* view_projection,
         float time,
         const nc_camera_t* camera,
         nc_renderer_block_highlight_draw_t* draw);

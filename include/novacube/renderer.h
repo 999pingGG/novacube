@@ -53,7 +53,6 @@ typedef struct nc_renderer_chunk_opaque_draw_t {
     // SSBO containing an array of nc_mesh_face_data_t.
     nc_renderer_buffer_t* face_data_buffer;
     const nc_renderer_texture_t* texture;
-    const vkm_mat4* view_projection;
     vkm_vec3 position;
 } nc_renderer_chunk_opaque_draw_t;
 
@@ -80,14 +79,25 @@ typedef struct nc_renderer_procedural_overlay_draw_t {
 } nc_renderer_procedural_overlay_draw_t;
 
 typedef struct nc_renderer_block_highlight_draw_t {
-    const vkm_mat4* view_projection;
     vkm_vec3 position;
     vkm_vec3 normal;
     float time;
     bool shown;
 } nc_renderer_block_highlight_draw_t;
 
+#define NC_RENDERER_SKY_GRADIENT_COLOR_COUNT 4
+
+typedef struct nc_renderer_sky_draw_t {
+    // Linear RGB colors ordered from the lowest to the highest elevation.
+    vkm_vec4 gradient_colors[NC_RENDERER_SKY_GRADIENT_COLOR_COUNT];
+    // Strictly increasing direction.y values in the [-1, 1] range.
+    vkm_vec4 gradient_stops;
+} nc_renderer_sky_draw_t;
+
 typedef struct nc_renderer_frame_t {
+    const vkm_mat4* view_projection;
+    vkm_vec3 camera_position;
+    const nc_renderer_sky_draw_t* sky_draw;
     const nc_renderer_chunk_opaque_draw_vec* opaque_draws;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;

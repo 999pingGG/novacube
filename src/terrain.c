@@ -1068,7 +1068,6 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
 
 void nc_terrain_get_opaque_draws(
     const nc_terrain_t* terrain,
-    const vkm_mat4* view_projection,
     nc_renderer_chunk_opaque_draw_vec* draws
 ) {
     *draws = (nc_renderer_chunk_opaque_draw_vec){ 0 };
@@ -1089,7 +1088,6 @@ void nc_terrain_get_opaque_draws(
             .quad_count = chunk->quad_count,
             .face_data_buffer = chunk->face_data_buffer,
             .texture = terrain->texture_array,
-            .view_projection = view_projection,
             .position = { {
                 .x = (float)block_coords.x,
                 .y = (float)block_coords.y,
@@ -1223,7 +1221,6 @@ bool nc_terrain_raycast(
 
 void nc_terrain_get_block_highlight_draw(
     const nc_terrain_t* terrain,
-    const vkm_mat4* view_projection,
     const float time,
     const nc_camera_t* camera,
     nc_renderer_block_highlight_draw_t* draw
@@ -1237,7 +1234,6 @@ void nc_terrain_get_block_highlight_draw(
     }
 
     *draw = (nc_renderer_block_highlight_draw_t){
-        .view_projection = view_projection,
         .position = { { (float)hit.block_position.x, (float)hit.block_position.y, (float)hit.block_position.z } },
         .normal = { { hit.normal.x, hit.normal.y, hit.normal.z } },
         .time = time,

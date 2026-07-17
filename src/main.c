@@ -301,15 +301,37 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     nc_renderer_overlay_draw_t overlay_draw;
     nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
     nc_renderer_block_highlight_draw_t highlight_draw;
-    nc_terrain_get_opaque_draws(
-            app->terrain,
-            &view_projection,
-            &app->chunk_opaque_draws);
+    nc_terrain_get_opaque_draws(app->terrain, &app->chunk_opaque_draws);
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
     nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
-    nc_terrain_get_block_highlight_draw(app->terrain, &view_projection, (float)time, &app->camera, &highlight_draw);
+    nc_terrain_get_block_highlight_draw(app->terrain, (float)time, &app->camera, &highlight_draw);
+
+    static const nc_renderer_sky_draw_t day_sky_draw = {
+        .gradient_colors = {
+            // Linear equivalents of sRGB #29335c, #598cd9, #1f52b3 and #06143d.
+            { { 0.0222271f, 0.0331047f, 0.1071563f, 1.0f } },
+            { { 0.0998870f, 0.2622302f, 0.6939078f, 1.0f } },
+            { { 0.0137825f, 0.0846083f, 0.4508418f, 1.0f } },
+            { { 0.0018575f, 0.0069412f, 0.0465830f, 1.0f } },
+        },
+        .gradient_stops = { { -0.25f, 0.0f, 0.40f, 1.0f } },
+    };
+
+    static const nc_renderer_sky_draw_t night_sky_draw = {
+        .gradient_colors = {
+            // Linear equivalents of sRGB #020308, #33264f, #101b3d and #030817.
+            { { 0.0006191f, 0.0009287f, 0.0023993f, 1.0f } },
+            { { 0.0331047f, 0.0193778f, 0.0782883f, 1.0f } },
+            { { 0.0052084f, 0.0109793f, 0.0465830f, 1.0f } },
+            { { 0.0009287f, 0.0023993f, 0.0085403f, 1.0f } },
+        },
+        .gradient_stops = { { -0.18f, 0.03f, 0.42f, 1.0f } },
+    };
 
     const bool success = nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
+        .view_projection = &view_projection,
+        .camera_position = app->camera.position,
+        .sky_draw = vkm_sin(time) > 0.0 ? &day_sky_draw : &night_sky_draw,
         .opaque_draws = &app->chunk_opaque_draws,
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,

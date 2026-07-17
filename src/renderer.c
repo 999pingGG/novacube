@@ -46,9 +46,6 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
 #define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
 #define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
-#define NC__RENDERER_CLEAR_RED 0.05f
-#define NC__RENDERER_CLEAR_GREEN 0.05f
-#define NC__RENDERER_CLEAR_BLUE 0.05f
 // TODO: Maybe this value could be tuned down for devices with a `subPixelPrecisionBits` property higher than 4.
 // Need testing on more devices.
 #define NC__RENDERER_QUAD_EXPANSION_PIXELS 0.1f
@@ -163,6 +160,13 @@ typedef struct nc__renderer_chunk_uniforms_t {
     vkm_vec4 quad_expansion;
 } nc__renderer_chunk_uniforms_t;
 
+typedef struct nc__renderer_sky_uniforms_t {
+    vkm_mat4 inverse_view_projection;
+    vkm_vec4 camera_position;
+    vkm_vec4 gradient_colors[NC_RENDERER_SKY_GRADIENT_COLOR_COUNT];
+    vkm_vec4 gradient_stops;
+} nc__renderer_sky_uniforms_t;
+
 typedef struct nc__renderer_chunk_push_constants_t {
     VkDeviceAddress quad_buffer;
     VkDeviceAddress uniforms;
@@ -224,6 +228,7 @@ typedef struct nc_renderer_t {
     VkPipeline outline_block_highlight_pipeline;
     VkPipeline vignette_block_highlight_pipeline;
     VkPipeline plasma_block_highlight_pipeline;
+    VkPipeline sky_pipeline;
     VkSampler chunk_sampler;
     VkSampler gui_sampler;
     nc_renderer_texture_t* procedural_overlay_crosshair_texture;
@@ -1126,7 +1131,7 @@ static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
                     {
                         .format = renderer->swapchain_format,
                         .samples = VK_SAMPLE_COUNT_1_BIT,
-                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -1669,10 +1674,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
     };
-    const VkPipelineRasterizationStateCreateInfo raster_no_cull = {
+    const VkPipelineRasterizationStateCreateInfo raster_front_cull = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_NONE,
+        .cullMode = VK_CULL_MODE_FRONT_BIT,
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
     };
@@ -1691,6 +1696,13 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
     const VkPipelineDepthStencilStateCreateInfo depth_disabled = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+    };
+    const VkPipelineDepthStencilStateCreateInfo depth_sky = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+
     };
     const VkPipelineColorBlendAttachmentState no_blend = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -1800,38 +1812,55 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
                     },
                 },
             },
-            &raster_no_cull,
+            &raster_front_cull,
             &depth_disabled,
             &alpha_blend,
             &renderer->gui_pipeline)) {
         return false;
     }
 
-    return nc__renderer_create_graphics_pipeline(
+    if (!nc__renderer_create_graphics_pipeline(
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
-            &raster_no_cull,
+            &raster_back_cull,
             &depth_disabled,
             &subtract_blend,
-            &renderer->procedural_overlay_invert_pipeline) &&
-            nc__renderer_create_graphics_pipeline(
+            &renderer->procedural_overlay_invert_pipeline)) {
+        return false;
+    }
+
+    if (!nc__renderer_create_graphics_pipeline(
             renderer,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
-            &raster_no_cull,
+            &raster_back_cull,
             &depth_disabled,
             &no_blend,
-            &renderer->procedural_overlay_stick_pipeline);
+            &renderer->procedural_overlay_stick_pipeline)) {
+        return false;
+    }
+
+    return nc__renderer_create_graphics_pipeline(
+            renderer,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_sky,
+            &no_blend,
+            &renderer->sky_pipeline);
 }
 
 static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     vkDestroyPipeline(renderer->device, renderer->procedural_overlay_stick_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->procedural_overlay_invert_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->sky_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->gui_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->chunk_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->plasma_block_highlight_pipeline, NULL);
@@ -1840,6 +1869,7 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
 
     renderer->procedural_overlay_stick_pipeline = VK_NULL_HANDLE;
     renderer->procedural_overlay_invert_pipeline = VK_NULL_HANDLE;
+    renderer->sky_pipeline = VK_NULL_HANDLE;
     renderer->gui_pipeline = VK_NULL_HANDLE;
     renderer->chunk_pipeline = VK_NULL_HANDLE;
     renderer->plasma_block_highlight_pipeline = VK_NULL_HANDLE;
@@ -2438,6 +2468,7 @@ static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_rend
 static bool nc__renderer_draw_chunk_opaque(
         nc_renderer_t* renderer,
         const nc_renderer_chunk_opaque_draw_t* draw,
+        const vkm_mat4* view_projection,
         const vkm_vec4* quad_expansion
 ) {
     if (draw->quad_count == 0) {
@@ -2446,11 +2477,8 @@ static bool nc__renderer_draw_chunk_opaque(
 
     NC_ASSERT(draw->texture->is_array);
 
-    vkm_mat4 view_projection;
-    nc__renderer_pre_rotate_view_projection(renderer, draw->view_projection, &view_projection);
-
     const nc__renderer_chunk_uniforms_t uniforms = {
-        .view_projection = view_projection,
+        .view_projection = *view_projection,
         .position = draw->position,
         .quad_expansion = *quad_expansion,
     };
@@ -2484,19 +2512,62 @@ static bool nc__renderer_draw_chunk_opaque(
     return true;
 }
 
+static bool nc__renderer_draw_sky(
+    nc_renderer_t* renderer,
+    const nc_renderer_sky_draw_t* draw,
+    const vkm_mat4* inverse_view_projection,
+    const vkm_vec3* camera_position
+) {
+    const nc__renderer_sky_uniforms_t uniforms = {
+        .inverse_view_projection = *inverse_view_projection,
+        .camera_position = { { camera_position->x, camera_position->y, camera_position->z, 1.0f } },
+        .gradient_colors = {
+            draw->gradient_colors[0],
+            draw->gradient_colors[1],
+            draw->gradient_colors[2],
+            draw->gradient_colors[3],
+        },
+        .gradient_stops = draw->gradient_stops,
+    };
+    VkDeviceAddress uniforms_address;
+    if (!nc__renderer_write_buffer_reference_data(
+            renderer,
+            &uniforms,
+            sizeof(uniforms),
+            &uniforms_address)) {
+        return false;
+    }
+
+    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->sky_pipeline);
+    vkCmdPushConstants(
+            renderer->frame_command_buffer,
+            renderer->pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+            sizeof(uniforms_address),
+            &uniforms_address);
+    vkCmdPushConstants(
+            renderer->frame_command_buffer,
+            renderer->pipeline_layout,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
+            sizeof(uniforms_address),
+            &uniforms_address);
+    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    return true;
+}
+
 static bool nc__renderer_draw_block_highlight(
     nc_renderer_t* renderer,
-    const nc_renderer_block_highlight_draw_t* draw
+    const nc_renderer_block_highlight_draw_t* draw,
+    const vkm_mat4* view_projection
 ) {
     if (!draw->shown) {
         return true;
     }
 
-    vkm_mat4 view_projection;
-    nc__renderer_pre_rotate_view_projection(renderer, draw->view_projection, &view_projection);
-
     const nc__renderer_block_highlight_vertex_uniforms_t vertex_uniforms = {
-        .view_projection = view_projection,
+        .view_projection = *view_projection,
         .block_position_and_scale = { { draw->position.x, draw->position.y, draw->position.z, 1.02f } },
     };
 
@@ -3164,6 +3235,8 @@ void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t*
 
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame) {
     NC_ASSERT(renderer->frame_command_buffer);
+    NC_ASSERT(frame->view_projection);
+    NC_ASSERT(frame->sky_draw);
 
     if (!nc__renderer_flush_uploads(renderer)) {
         return false;
@@ -3173,17 +3246,13 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         return true;
     }
 
+    vkm_mat4 view_projection;
+    vkm_mat4 inverse_view_projection;
+    nc__renderer_pre_rotate_view_projection(renderer, frame->view_projection, &view_projection);
+    vkm_invert(&view_projection, &inverse_view_projection);
+
     const VkClearValue clear_values[] = {
-        {
-            .color = {
-                .float32 = {
-                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_RED),
-                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_GREEN),
-                    nc__renderer_srgb_to_linear(NC__RENDERER_CLEAR_BLUE),
-                    1.0f,
-                },
-            },
-        },
+        { 0 },
         {
             .depthStencil = { .depth = 1.0f },
         },
@@ -3221,11 +3290,18 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             bound_chunk_texture = draw.texture;
         }
 
-        if (!nc__renderer_draw_chunk_opaque(renderer, &draw, &quad_expansion)) {
+        if (!nc__renderer_draw_chunk_opaque(renderer, &draw, &view_projection, &quad_expansion)) {
             return false;
         }
     }
-    if (!nc__renderer_draw_block_highlight(renderer, frame->block_highlight_draw)) {
+    if (!nc__renderer_draw_sky(
+            renderer,
+            frame->sky_draw,
+            &inverse_view_projection,
+            &frame->camera_position)) {
+        return false;
+    }
+    if (!nc__renderer_draw_block_highlight(renderer, frame->block_highlight_draw, &view_projection)) {
         return false;
     }
     for (uint32_t i = 0; i < frame->overlay_draw_count; i++) {
