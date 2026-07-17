@@ -13,13 +13,16 @@ enum {
     NC_BLOCK_TYPE_STONE,
     NC_BLOCK_TYPE_DIRT,
     NC_BLOCK_TYPE_GRASS,
+    NC_BLOCK_TYPE_TORCH,
+    NC_BLOCK_TYPE_TEST,
 
-    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_GRASS,
+    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_TEST,
 };
 
 typedef struct nc_block_t {
     uint16_t texture_array_layers[6];
     uint16_t voxel_model_id;
+    uint8_t light_emission;             // Value goes from 0-15, we have 4 spare bits here.
     bool fully_solid;
 } nc_block_t;
 

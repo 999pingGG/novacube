@@ -78,6 +78,9 @@ static void nc__app_initialize_test_blocks(nc__app_t* app) {
             }
         }
     }
+
+    nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { 9, 15, -14 } }, NC_BLOCK_TYPE_TORCH);
+    nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { 10, 15, -14 } }, NC_BLOCK_TYPE_TORCH);
 }
 
 //static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
@@ -88,7 +91,14 @@ static void nc__app_initialize_test_blocks(nc__app_t* app) {
 //            for (int x = -5; x <= 25; x++) {
 //                const vkm_dvec3 center = (vkm_dvec3){ { x - 10.0, y - 20.0, z - 10.0 } };
 //                const bool solid = vkm_sqr_magnitude(&center) <= radius * radius;
-//                const nc_block_type_t block = solid ? (nc_block_type_t)((rand() + 1) % NC_BLOCK_TYPE_COUNT + 1) : NC_BLOCK_TYPE_AIR;
+//                static const nc_block_type_t blocks[] = {
+//                    NC_BLOCK_TYPE_STONE,
+//                    NC_BLOCK_TYPE_DIRT,
+//                    NC_BLOCK_TYPE_GRASS,
+//                    NC_BLOCK_TYPE_TEST,
+//                };
+//
+//                const nc_block_type_t block = solid ? blocks[rand() % NC_COUNTOF(blocks)] : NC_BLOCK_TYPE_AIR;
 //                NC_ASSERT(block <= NC_BLOCK_TYPE_COUNT);
 //                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, block);
 //            }

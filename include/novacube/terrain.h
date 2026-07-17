@@ -22,9 +22,8 @@ typedef struct nc_terrain_raycast_hit_t {
 } nc_terrain_raycast_hit_t;
 
 nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer);
-bool nc_terrain_load_or_replace_chunk(
+void nc_terrain_load_or_replace_chunk(
         nc_terrain_t* terrain,
-        nc_renderer_t* renderer,
         const vkm_ivec3* coords,
         const uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK]);
 void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_ivec3* coords);

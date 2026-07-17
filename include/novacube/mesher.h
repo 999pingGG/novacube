@@ -17,9 +17,18 @@
 #define NC_MESHER_VOXELS_PER_BLOCK_MODEL \
         (NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH)
 #define NC_MESHER_BLOCK_MODEL_SIZE (NC_MESHER_VOXELS_PER_BLOCK_MODEL / 8)
-#define NC_MESHER_INTS_PER_BLOCK_MODEL ((NC_MESHER_VOXELS_PER_BLOCK_MODEL + 15) / 16)
-#define NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) \
-        ((x) + ((y) * NC_MESHER_BLOCK_MODEL_LENGTH) + ((z) * NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH))
+#define NC_MESHER_INTS_PER_BLOCK_MODEL \
+        ((NC_MESHER_VOXELS_PER_BLOCK_MODEL + NC_MESHER_CHUNK_SIZE - 1) / NC_MESHER_CHUNK_SIZE)
+#define NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) ( \
+        (x) \
+        + ((y) * NC_MESHER_BLOCK_MODEL_LENGTH) \
+        + ((z) * NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH))
+#define NC_MESHER_BLOCK_MODEL_SET(data, x, y, z) \
+        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_MESHER_CHUNK_SIZE] |= \
+                (uint16_t)(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_MESHER_CHUNK_SIZE)))
+#define NC_MESHER_BLOCK_MODEL_UNSET(data, x, y, z) \
+        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_MESHER_CHUNK_SIZE] &= \
+                (uint16_t)~(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_MESHER_CHUNK_SIZE)))
 
 typedef struct nc_greedy_quad_t {
     uint8_t x;
@@ -49,10 +58,12 @@ typedef struct nc_mesh_quad_t {
 // 4 bytes. Matches the SSBO representation used by chunk.frag
 typedef struct nc_mesh_face_data_t {
     uint16_t texture_layer;     // Bits 0-10: texture array layer (values 0-2047)
+                                // Bits 11-15: AVAILABLE.
                                 // Max 2048 layers was picked to support at least most entry-level mobile GPUs
                                 // per Vulkan limits.
     uint8_t ambient_occlusion;  // 2 bits for every face corner. 4 different values. A total of 8 bits per face.
-    uint8_t unused;             // Reserved for future biome blending, lighting, or something.
+    uint8_t light;              // Bits 0-3: block light level
+                                // Bits 4-7: sky light level.
 } nc_mesh_face_data_t;
 
 #define TDS_DECLARE
@@ -79,6 +90,7 @@ nc_mesher_t* nc_mesher_init(const nc_block_registry_t* block_registry);
 void nc_mesher_compute_chunk(
         nc_mesher_t* mesher,
         const uint16_t* chunk_and_neighbors[3][3][3],
+        const uint8_t* light_levels_and_neighbors[3][3][3],
         nc_mesh_quad_vec* quads_result,
         nc_mesh_face_data_vec* face_data_result);
 void nc_mesher_compute_block_model(
