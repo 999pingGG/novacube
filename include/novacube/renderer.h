@@ -97,6 +97,8 @@ typedef struct nc_renderer_sky_draw_t {
 typedef struct nc_renderer_frame_t {
     const vkm_mat4* view_projection;
     vkm_vec3 camera_position;
+    // Multiplier for sky light, in the [0, 1] range.
+    float sunlight_intensity;
     const nc_renderer_sky_draw_t* sky_draw;
     const nc_renderer_chunk_opaque_draw_vec* opaque_draws;
     const nc_renderer_overlay_draw_t* overlay_draws;

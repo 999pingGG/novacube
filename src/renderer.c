@@ -157,6 +157,7 @@ typedef struct nc__renderer_block_highlight_fragment_uniforms_t {
 typedef struct nc__renderer_chunk_uniforms_t {
     vkm_mat4 view_projection;
     vkm_vec3 position;
+    float sunlight_intensity;
     vkm_vec4 quad_expansion;
 } nc__renderer_chunk_uniforms_t;
 
@@ -1534,8 +1535,8 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
                     },
                     {
                         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                        .offset = NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
-                        .size = sizeof(VkDeviceAddress),
+                        .offset = sizeof(VkDeviceAddress),
+                        .size = 2 * sizeof(VkDeviceAddress),
                     },
                 },
             },
@@ -2471,7 +2472,8 @@ static bool nc__renderer_draw_chunk_opaque(
         nc_renderer_t* renderer,
         const nc_renderer_chunk_opaque_draw_t* draw,
         const vkm_mat4* view_projection,
-        const vkm_vec4* quad_expansion
+        const vkm_vec4* quad_expansion,
+        const float sunlight_intensity
 ) {
     if (draw->quad_count == 0) {
         return true;
@@ -2482,6 +2484,7 @@ static bool nc__renderer_draw_chunk_opaque(
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = *view_projection,
         .position = draw->position,
+        .sunlight_intensity = sunlight_intensity,
         .quad_expansion = *quad_expansion,
     };
     nc__renderer_chunk_push_constants_t push_constants = {
@@ -2507,9 +2510,9 @@ static bool nc__renderer_draw_chunk_opaque(
             renderer->frame_command_buffer,
             renderer->pipeline_layout,
             VK_SHADER_STAGE_FRAGMENT_BIT,
-            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
-            sizeof(push_constants.face_data_buffer),
-            &push_constants.face_data_buffer);
+            sizeof(VkDeviceAddress),
+            2 * sizeof(VkDeviceAddress),
+            &push_constants.uniforms);
     vkCmdDraw(renderer->frame_command_buffer, 4, draw->quad_count, 0, 0);
     return true;
 }
@@ -2859,7 +2862,6 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
         renderer->transfer_size = 0;
     }
 
-    NC__CHECK_VK_RESULT(vkResetCommandPool(renderer->device, renderer->command_pool, 0));
     NC__CHECK_VK_RESULT(vkResetDescriptorPool(renderer->device, renderer->frame_descriptor_pool, 0));
     renderer->frame_descriptor_set_count = 0;
 
@@ -2867,7 +2869,6 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
         goto error;
     }
 
-    vkResetCommandBuffer(renderer->frame_command_buffer, 0);
     NC__CHECK_VK_RESULT(vkBeginCommandBuffer(
             renderer->frame_command_buffer,
             &(VkCommandBufferBeginInfo){
@@ -3239,6 +3240,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     NC_ASSERT(renderer->frame_command_buffer);
     NC_ASSERT(frame->view_projection);
     NC_ASSERT(frame->sky_draw);
+    NC_ASSERT(frame->sunlight_intensity >= 0.0f && frame->sunlight_intensity <= 1.0f);
 
     if (!nc__renderer_flush_uploads(renderer)) {
         return false;
@@ -3292,7 +3294,12 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             bound_chunk_texture = draw.texture;
         }
 
-        if (!nc__renderer_draw_chunk_opaque(renderer, &draw, &view_projection, &quad_expansion)) {
+        if (!nc__renderer_draw_chunk_opaque(
+                renderer,
+                &draw,
+                &view_projection,
+                &quad_expansion,
+                frame->sunlight_intensity)) {
             return false;
         }
     }

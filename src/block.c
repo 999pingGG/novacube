@@ -103,29 +103,28 @@ static void nc__block_registry_register_blocks(nc_block_registry_t* registry) {
     registry->blocks[NC_BLOCK_TYPE_STONE] = (nc_block_t){
         .texture_array_layers = { 0, 0, 0, 0, 0, 0 },
         .voxel_model_id = full_cube_id,
-        .fully_solid = true,
+        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_DIRT] = (nc_block_t){
         .texture_array_layers = { 1, 1, 1, 1, 1, 1 },
         .voxel_model_id = full_cube_id,
-        .fully_solid = true,
+        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_GRASS] = (nc_block_t){
         .texture_array_layers = { 1, 2, 1, 1, 1, 1 },
         .voxel_model_id = full_cube_id,
-        .fully_solid = true,
+        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_TORCH] = (nc_block_t){
         .texture_array_layers = { 3, 4, 3, 3, 3, 3 },
         .voxel_model_id = torch_id,
         .light_emission = 15,
-        .fully_solid = false,
     };
     registry->blocks[NC_BLOCK_TYPE_TEST] = (nc_block_t){
         .texture_array_layers = { 5, 5, 5, 5, 5, 5 },
         .voxel_model_id = full_cube_id,
         .light_emission = 0,
-        .fully_solid = true,
+        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
 }
 

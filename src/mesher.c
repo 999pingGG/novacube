@@ -14,6 +14,9 @@
 #include <novacube/mesher.h>
 #include <novacube/standard_functions.h>
 
+#define NC__MESHER_BLOCK_LIGHT_SHIFT 0
+#define NC__MESHER_SKY_LIGHT_SHIFT 4
+
 #define TDS_IMPLEMENT
 #define TDS_VALUE_T nc_mesh_quad_t
 #define TDS_TYPE nc_mesh_quad_vec
@@ -35,7 +38,8 @@ nc_mesher_t* nc_mesher_init(const nc_block_registry_t* block_registry) {
 }
 
 static bool nc__is_solid(const nc_mesher_t* mesher, const uint16_t block_type) {
-    return nc_block_registry_get(mesher->block_registry, (nc_block_type_t)block_type)->fully_solid;
+    return (nc_block_registry_get(mesher->block_registry, (nc_block_type_t)block_type)->flags
+            & NC_BLOCK_FLAG_FULLY_SOLID) != 0;
 }
 
 static const nc_block_model_t* nc__get_block_model(const nc_mesher_t* mesher, const uint16_t block_type) {
@@ -79,7 +83,8 @@ static uint8_t nc__chunk_get_light(
     int x,
     int y,
     int z,
-    const uint8_t fallback
+    const uint8_t fallback,
+    const int shift
 ) {
     x += NC_MESHER_CHUNK_SIZE;
     y += NC_MESHER_CHUNK_SIZE;
@@ -97,7 +102,7 @@ static uint8_t nc__chunk_get_light(
         return fallback;
     }
 
-    return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
+    return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)] >> shift & 0xf;
 }
 
 static uint8_t nc__chunk_get_face_light(
@@ -105,7 +110,8 @@ static uint8_t nc__chunk_get_face_light(
     const int direction,
     const int x,
     const int y,
-    const int z
+    const int z,
+    const int shift
 ) {
     static const int offsets[6][3] = {
         {  0, -1,  0 },
@@ -122,7 +128,8 @@ static uint8_t nc__chunk_get_face_light(
             x + offsets[direction][0],
             y + offsets[direction][1],
             z + offsets[direction][2],
-            0);
+            0,
+            shift);
 }
 
 static uint8_t nc__chunk_get_face_plane_light(
@@ -133,7 +140,8 @@ static uint8_t nc__chunk_get_face_plane_light(
     const int z,
     const int face_x,
     const int face_y,
-    const uint8_t fallback
+    const uint8_t fallback,
+    const int shift
 ) {
     int sample_x;
     int sample_y;
@@ -175,7 +183,7 @@ static uint8_t nc__chunk_get_face_plane_light(
             return fallback;
     }
 
-    return nc__chunk_get_light(light_levels_and_neighbors, sample_x, sample_y, sample_z, fallback);
+    return nc__chunk_get_light(light_levels_and_neighbors, sample_x, sample_y, sample_z, fallback, shift);
 }
 
 static bool nc__chunk_is_solid_from_axis_columns(
@@ -328,9 +336,11 @@ static uint16_t nc__chunk_compute_face_light(
     const int direction,
     const int x,
     const int y,
-    const int z
+    const int z,
+    const int shift
 ) {
-    const uint8_t center_light = nc__chunk_get_face_light(light_levels_and_neighbors, direction, x, y, z);
+    NC_ASSERT(shift == NC__MESHER_BLOCK_LIGHT_SHIFT || shift == NC__MESHER_SKY_LIGHT_SHIFT);
+    const uint8_t center_light = nc__chunk_get_face_light(light_levels_and_neighbors, direction, x, y, z, shift);
     uint8_t light_samples[9];
     for (int i = 0; i < (int)NC_COUNTOF(light_samples); i++) {
         light_samples[i] = nc__chunk_get_face_plane_light(
@@ -341,7 +351,8 @@ static uint16_t nc__chunk_compute_face_light(
                 z,
                 nc__chunk_face_sample_offsets[i][0],
                 nc__chunk_face_sample_offsets[i][1],
-                center_light);
+                center_light,
+                shift);
     }
 
     const uint8_t corner_0 = nc__chunk_corner_light(light_samples, ao_mask, 1, 0, 3);
@@ -550,7 +561,16 @@ void nc_mesher_compute_chunk(
                                             direction,
                                             x,
                                             y,
-                                            z);
+                                            z,
+                                            NC__MESHER_BLOCK_LIGHT_SHIFT);
+                            direction_data->sky_light = nc__chunk_compute_face_light(
+                                    light_levels_and_neighbors,
+                                    ao_mask,
+                                    direction,
+                                    x,
+                                    y,
+                                    z,
+                                    NC__MESHER_SKY_LIGHT_SHIFT);
                         }
 
                         face_data_index += 6;
@@ -655,7 +675,16 @@ void nc_mesher_compute_chunk(
                                             direction,
                                             block_coords.x,
                                             block_coords.y,
-                                            block_coords.z),
+                                            block_coords.z,
+                                            NC__MESHER_BLOCK_LIGHT_SHIFT),
+                            .sky_light = nc__chunk_compute_face_light(
+                                    light_levels_and_neighbors,
+                                    ao_mask,
+                                    direction,
+                                    block_coords.x,
+                                    block_coords.y,
+                                    block_coords.z,
+                                    NC__MESHER_SKY_LIGHT_SHIFT),
                         };
                     }
                 }

@@ -45,7 +45,9 @@ void nc_terrain_get_block_highlight_draw(
         nc_renderer_block_highlight_draw_t* draw);
 void nc_terrain_set_block(nc_terrain_t* terrain, const vkm_ivec3* block_coords, nc_block_type_t new_block);
 void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camera, nc_block_type_t new_block);
-int32_t nc_terrain_get_top_solid_block(const nc_terrain_t* terrain, const vkm_ivec2 block_column_coords);
+int32_t nc_terrain_get_top_light_blocking_block(
+        const nc_terrain_t* terrain,
+        const vkm_ivec2 block_column_coords);
 void nc_terrain_fini(nc_terrain_t* terrain, nc_renderer_t* renderer);
 
 #endif

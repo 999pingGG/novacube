@@ -15,7 +15,16 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly b
     uvec2 faces[];
 };
 
+layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
+    mat4 view_projection;
+    vec3 position;
+    // Only this value is used by the fragment shader.
+    float sunlight_intensity;
+    vec4 quad_expansion;
+};
+
 layout(push_constant) uniform push_constants {
+    layout(offset = 8) chunk_uniforms uniforms;
     layout(offset = 16) face_data_array face_data;
 } pc;
 
@@ -28,10 +37,15 @@ float ambient_occlusion_intensity(uint occlusion) {
     return ambient_occlusion_curve[occlusion];
 }
 
-float light_level_intensity(uint level) {
+float direct_light_level_intensity(uint level) {
     float normalized_level = float(level) * (1.0 / 15.0);
-    float direct_intensity = pow(normalized_level, 2.2);
-    return mix(ambient_intensity, 1.0, direct_intensity);
+    return pow(normalized_level, 2.2);
+}
+
+float combined_light_intensity(uint block_level, uint sky_level) {
+    float block_intensity = direct_light_level_intensity(block_level);
+    float sky_intensity = direct_light_level_intensity(sky_level) * pc.uniforms.sunlight_intensity;
+    return mix(ambient_intensity, 1.0, max(block_intensity, sky_intensity));
 }
 
 uint unpack_corner_light(uint light, int corner) {
@@ -57,21 +71,21 @@ void main() {
     uint corner3_ao = ambient_occlusion >> 6 & 0x3u;
 
     vec2 face_cell_uv = fract(face_data_uv);
-    float corner0_illumination = light_level_intensity(max(
+    float corner0_illumination = combined_light_intensity(
             unpack_corner_light(block_light, 0),
-            unpack_corner_light(sky_light, 0)))
+            unpack_corner_light(sky_light, 0))
             * ambient_occlusion_intensity(corner0_ao);
-    float corner1_illumination = light_level_intensity(max(
+    float corner1_illumination = combined_light_intensity(
             unpack_corner_light(block_light, 1),
-            unpack_corner_light(sky_light, 1)))
+            unpack_corner_light(sky_light, 1))
             * ambient_occlusion_intensity(corner1_ao);
-    float corner2_illumination = light_level_intensity(max(
+    float corner2_illumination = combined_light_intensity(
             unpack_corner_light(block_light, 2),
-            unpack_corner_light(sky_light, 2)))
+            unpack_corner_light(sky_light, 2))
             * ambient_occlusion_intensity(corner2_ao);
-    float corner3_illumination = light_level_intensity(max(
+    float corner3_illumination = combined_light_intensity(
             unpack_corner_light(block_light, 3),
-            unpack_corner_light(sky_light, 3)))
+            unpack_corner_light(sky_light, 3))
             * ambient_occlusion_intensity(corner3_ao);
     float illumination_bottom = mix(corner0_illumination, corner1_illumination, face_cell_uv.x);
     float illumination_top = mix(corner3_illumination, corner2_illumination, face_cell_uv.x);

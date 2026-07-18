@@ -19,11 +19,17 @@ enum {
     NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_TEST,
 };
 
+typedef uint8_t nc_block_flags_t;
+enum {
+    NC_BLOCK_FLAG_FULLY_SOLID = 1 << 0,
+    NC_BLOCK_FLAG_BLOCKS_LIGHT = 1 << 1,
+};
+
 typedef struct nc_block_t {
     uint16_t texture_array_layers[6];
     uint16_t voxel_model_id;
     uint8_t light_emission;             // Value goes from 0-15, we have 4 spare bits here.
-    bool fully_solid;
+    nc_block_flags_t flags;
 } nc_block_t;
 
 typedef struct nc_block_registry_t nc_block_registry_t;

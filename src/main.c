@@ -62,7 +62,7 @@ static void nc__app_fini(nc__app_t* app) {
 static void nc__app_initialize_test_blocks(nc__app_t* app) {
     for (int z = -10 * NC_MESHER_CHUNK_SIZE; z < 9 * NC_MESHER_CHUNK_SIZE; z++) {
         for (int x = -10 * NC_MESHER_CHUNK_SIZE; x < 9 * NC_MESHER_CHUNK_SIZE; x++) {
-            const int height = (int)(((15.0f + vkm_sin((float)z / 3.0f) * 3.0f) + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
+            const int height = (int)((15.0f + vkm_sin((float)z / 3.0f) * 3.0f + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
 
             for (int y = 0; y < height; y++) {
                 nc_block_type_t type;
@@ -254,12 +254,12 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             const int printed = snprintf(
                     debug_buffer,
                     sizeof(debug_buffer),
-                    "Block: (%d, %d, %d), distance: %f, top solid block: %d",
+                    "Block: (%d, %d, %d), distance: %f, top light blocking: %d",
                     hit.block_position.x,
                     hit.block_position.y,
                     hit.block_position.z,
                     hit.distance,
-                    nc_terrain_get_top_solid_block(
+                    nc_terrain_get_top_light_blocking_block(
                             app->terrain,
                             (vkm_ivec2){ {
                                 hit.block_position.x,
@@ -331,7 +331,8 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     const bool success = nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
         .view_projection = &view_projection,
         .camera_position = app->camera.position,
-        .sky_draw = vkm_sin(time) > 0.0 ? &day_sky_draw : &night_sky_draw,
+        .sunlight_intensity = vkm_clamp(vkm_sin((float)time * 0.2f) * 0.96f + 0.6f, 0.02f, 1.0f),
+        .sky_draw = vkm_sin(time * 0.2) > 0.0 ? &day_sky_draw : &night_sky_draw,
         .opaque_draws = &app->chunk_opaque_draws,
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,

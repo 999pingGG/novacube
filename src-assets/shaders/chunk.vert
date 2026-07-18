@@ -11,6 +11,8 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly b
 layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
     mat4 view_projection;
     vec3 position;
+    // Used by the fragment shader.
+    float sunlight_intensity;
     // XY expands from pixels to NDC; ZW is its CPU-precomputed reciprocal.
     vec4 quad_expansion;
 };
