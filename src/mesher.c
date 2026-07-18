@@ -299,12 +299,22 @@ static uint8_t nc__chunk_corner_light(
     const bool side_1 = (ao_mask >> side_1_bit & 1) != 0;
     const uint8_t center_light = light_samples[4];
 
-    const int light_sum =
-            center_light
-            + (side_0 ? center_light : light_samples[side_0_bit])
-            + (side_1 ? center_light : light_samples[side_1_bit])
-            + (corner || (side_0 && side_1) ? center_light : light_samples[corner_bit]);
-    return (uint8_t)((light_sum + 2) / 4);
+    int light_sum = center_light;
+    int sample_count = 1;
+    if (!side_0) {
+        light_sum += light_samples[side_0_bit];
+        sample_count++;
+    }
+    if (!side_1) {
+        light_sum += light_samples[side_1_bit];
+        sample_count++;
+    }
+    if (!corner && !(side_0 && side_1)) {
+        light_sum += light_samples[corner_bit];
+        sample_count++;
+    }
+
+    return (uint8_t)((light_sum + sample_count / 2) / sample_count);
 }
 
 static uint16_t nc__chunk_uniform_face_light(const uint8_t light) {
