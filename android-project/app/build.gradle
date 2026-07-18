@@ -5,19 +5,20 @@ plugins {
 android {
     namespace 'net.novacubegame'
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
         applicationId "net.novacubegame"
         minSdk 24
-        targetSdk 36
+        targetSdk 37
         versionCode 1
         versionName "1.0"
 
         ndk {
             abiFilters 'arm64-v8a', 'x86_64'
         }
+        resConfigs "en"
     }
 
     buildTypes {
@@ -45,8 +46,5 @@ android {
 }
 
 dependencies {
-    implementation libs.appcompat
-    implementation libs.material
-    implementation libs.constraintlayout
     implementation files('libs/SDL3-3.5.0.aar')
 }
