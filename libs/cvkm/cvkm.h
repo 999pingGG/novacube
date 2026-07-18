@@ -603,6 +603,226 @@ CVKM_VEC4_ALL_OPERATIONS(ulvec4, uint64_t)
 CVKM_VEC4_ALL_OPERATIONS(vec4, float)
 CVKM_VEC4_ALL_OPERATIONS(dvec4, double)
 
+static float vkm_lerpf(const float a, const float b, const float t) {
+  return a + (b - a) * t;
+}
+
+static double vkm_lerp(const double a, const double b, const double t) {
+  return a + (b - a) * t;
+}
+
+#define CVKM_INT_LERP_OPERATION(type, suffix) static type vkm_lerp##suffix(\
+  const type a,\
+  const type b,\
+  const double t\
+) {\
+  return a + (type)((double)(b - a) * t);\
+}
+
+CVKM_INT_LERP_OPERATION(int8_t, b)
+CVKM_INT_LERP_OPERATION(uint8_t, ub)
+CVKM_INT_LERP_OPERATION(int16_t, s)
+CVKM_INT_LERP_OPERATION(uint16_t, us)
+CVKM_INT_LERP_OPERATION(int32_t, i)
+CVKM_INT_LERP_OPERATION(uint32_t, u)
+CVKM_INT_LERP_OPERATION(int64_t, l)
+CVKM_INT_LERP_OPERATION(uint64_t, ul)
+
+#define CVKM_VEC2_INT_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const double t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (scalar_type)((double)(b->x - a->x) * t),\
+    a->y + (scalar_type)((double)(b->y - a->y) * t),\
+  } };\
+}
+
+#define CVKM_VEC3_INT_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const double t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (scalar_type)((double)(b->x - a->x) * t),\
+    a->y + (scalar_type)((double)(b->y - a->y) * t),\
+    a->z + (scalar_type)((double)(b->z - a->z) * t),\
+  } };\
+}
+
+#define CVKM_VEC4_INT_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const double t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (scalar_type)((double)(b->x - a->x) * t),\
+    a->y + (scalar_type)((double)(b->y - a->y) * t),\
+    a->z + (scalar_type)((double)(b->z - a->z) * t),\
+    a->w + (scalar_type)((double)(b->w - a->w) * t),\
+  } };\
+}
+
+#define CVKM_VEC2_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const scalar_type t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (b->x - a->x) * t,\
+    a->y + (b->y - a->y) * t,\
+  } };\
+}
+
+#define CVKM_VEC3_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const scalar_type t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (b->x - a->x) * t,\
+    a->y + (b->y - a->y) * t,\
+    a->z + (b->z - a->z) * t,\
+  } };\
+}
+
+#define CVKM_VEC4_LERP_OPERATION(vec_type, scalar_type) static void vkm_##vec_type##_lerp(\
+  const vkm_##vec_type* a,\
+  const vkm_##vec_type* b,\
+  const scalar_type t,\
+  vkm_##vec_type* result\
+) {\
+  *result = (vkm_##vec_type){ {\
+    a->x + (b->x - a->x) * t,\
+    a->y + (b->y - a->y) * t,\
+    a->z + (b->z - a->z) * t,\
+    a->w + (b->w - a->w) * t,\
+  } };\
+}
+
+CVKM_VEC2_LERP_OPERATION(vec2, float)
+CVKM_VEC2_LERP_OPERATION(dvec2, double)
+CVKM_VEC3_LERP_OPERATION(vec3, float)
+CVKM_VEC3_LERP_OPERATION(dvec3, double)
+CVKM_VEC4_LERP_OPERATION(vec4, float)
+CVKM_VEC4_LERP_OPERATION(dvec4, double)
+
+CVKM_VEC2_INT_LERP_OPERATION(bvec2, int8_t)
+CVKM_VEC2_INT_LERP_OPERATION(ubvec2, uint8_t)
+CVKM_VEC2_INT_LERP_OPERATION(svec2, int16_t)
+CVKM_VEC2_INT_LERP_OPERATION(usvec2, uint16_t)
+CVKM_VEC2_INT_LERP_OPERATION(ivec2, int32_t)
+CVKM_VEC2_INT_LERP_OPERATION(uvec2, uint32_t)
+CVKM_VEC2_INT_LERP_OPERATION(lvec2, int64_t)
+CVKM_VEC2_INT_LERP_OPERATION(ulvec2, uint64_t)
+
+CVKM_VEC3_INT_LERP_OPERATION(bvec3, int8_t)
+CVKM_VEC3_INT_LERP_OPERATION(ubvec3, uint8_t)
+CVKM_VEC3_INT_LERP_OPERATION(svec3, int16_t)
+CVKM_VEC3_INT_LERP_OPERATION(usvec3, uint16_t)
+CVKM_VEC3_INT_LERP_OPERATION(ivec3, int32_t)
+CVKM_VEC3_INT_LERP_OPERATION(uvec3, uint32_t)
+CVKM_VEC3_INT_LERP_OPERATION(lvec3, int64_t)
+CVKM_VEC3_INT_LERP_OPERATION(ulvec3, uint64_t)
+
+CVKM_VEC4_INT_LERP_OPERATION(bvec4, int8_t)
+CVKM_VEC4_INT_LERP_OPERATION(ubvec4, uint8_t)
+CVKM_VEC4_INT_LERP_OPERATION(svec4, int16_t)
+CVKM_VEC4_INT_LERP_OPERATION(usvec4, uint16_t)
+CVKM_VEC4_INT_LERP_OPERATION(ivec4, int32_t)
+CVKM_VEC4_INT_LERP_OPERATION(uvec4, uint32_t)
+CVKM_VEC4_INT_LERP_OPERATION(lvec4, int64_t)
+CVKM_VEC4_INT_LERP_OPERATION(ulvec4, uint64_t)
+
+#define vkm_lerp(a, ...) _Generic(a,\
+  int8_t: vkm_lerpb,\
+  uint8_t: vkm_lerpub,\
+  int16_t: vkm_lerps,\
+  uint16_t: vkm_lerpus,\
+  int32_t: vkm_lerpi,\
+  uint32_t: vkm_lerpu,\
+  int64_t: vkm_lerpl,\
+  uint64_t: vkm_lerpul,\
+  float: vkm_lerpf,\
+  double: vkm_lerp,\
+  vkm_bvec2*: vkm_bvec2_lerp,\
+  vkm_ubvec2*: vkm_ubvec2_lerp,\
+  vkm_svec2*: vkm_svec2_lerp,\
+  vkm_usvec2*: vkm_usvec2_lerp,\
+  vkm_ivec2*: vkm_ivec2_lerp,\
+  vkm_uvec2*: vkm_uvec2_lerp,\
+  vkm_lvec2*: vkm_lvec2_lerp,\
+  vkm_ulvec2*: vkm_ulvec2_lerp,\
+  vkm_vec2*: vkm_vec2_lerp,\
+  vkm_dvec2*: vkm_dvec2_lerp,\
+  vkm_bvec3*: vkm_bvec3_lerp,\
+  vkm_ubvec3*: vkm_ubvec3_lerp,\
+  vkm_svec3*: vkm_svec3_lerp,\
+  vkm_usvec3*: vkm_usvec3_lerp,\
+  vkm_ivec3*: vkm_ivec3_lerp,\
+  vkm_uvec3*: vkm_uvec3_lerp,\
+  vkm_lvec3*: vkm_lvec3_lerp,\
+  vkm_ulvec3*: vkm_ulvec3_lerp,\
+  vkm_vec3*: vkm_vec3_lerp,\
+  vkm_dvec3*: vkm_dvec3_lerp,\
+  vkm_bvec4*: vkm_bvec4_lerp,\
+  vkm_ubvec4*: vkm_ubvec4_lerp,\
+  vkm_svec4*: vkm_svec4_lerp,\
+  vkm_usvec4*: vkm_usvec4_lerp,\
+  vkm_ivec4*: vkm_ivec4_lerp,\
+  vkm_uvec4*: vkm_uvec4_lerp,\
+  vkm_lvec4*: vkm_lvec4_lerp,\
+  vkm_ulvec4*: vkm_ulvec4_lerp,\
+  vkm_vec4*: vkm_vec4_lerp,\
+  vkm_dvec4*: vkm_dvec4_lerp,\
+  const int8_t: vkm_lerpb,\
+  const uint8_t: vkm_lerpub,\
+  const int16_t: vkm_lerps,\
+  const uint16_t: vkm_lerpus,\
+  const int32_t: vkm_lerpi,\
+  const uint32_t: vkm_lerpu,\
+  const int64_t: vkm_lerpl,\
+  const uint64_t: vkm_lerpul,\
+  const float: vkm_lerpf,\
+  const double: vkm_lerp,\
+  const vkm_bvec2*: vkm_bvec2_lerp,\
+  const vkm_ubvec2*: vkm_ubvec2_lerp,\
+  const vkm_svec2*: vkm_svec2_lerp,\
+  const vkm_usvec2*: vkm_usvec2_lerp,\
+  const vkm_ivec2*: vkm_ivec2_lerp,\
+  const vkm_uvec2*: vkm_uvec2_lerp,\
+  const vkm_lvec2*: vkm_lvec2_lerp,\
+  const vkm_ulvec2*: vkm_ulvec2_lerp,\
+  const vkm_vec2*: vkm_vec2_lerp,\
+  const vkm_dvec2*: vkm_dvec2_lerp,\
+  const vkm_bvec3*: vkm_bvec3_lerp,\
+  const vkm_ubvec3*: vkm_ubvec3_lerp,\
+  const vkm_svec3*: vkm_svec3_lerp,\
+  const vkm_usvec3*: vkm_usvec3_lerp,\
+  const vkm_ivec3*: vkm_ivec3_lerp,\
+  const vkm_uvec3*: vkm_uvec3_lerp,\
+  const vkm_lvec3*: vkm_lvec3_lerp,\
+  const vkm_ulvec3*: vkm_ulvec3_lerp,\
+  const vkm_vec3*: vkm_vec3_lerp,\
+  const vkm_dvec3*: vkm_dvec3_lerp,\
+  const vkm_bvec4*: vkm_bvec4_lerp,\
+  const vkm_ubvec4*: vkm_ubvec4_lerp,\
+  const vkm_svec4*: vkm_svec4_lerp,\
+  const vkm_usvec4*: vkm_usvec4_lerp,\
+  const vkm_ivec4*: vkm_ivec4_lerp,\
+  const vkm_uvec4*: vkm_uvec4_lerp,\
+  const vkm_lvec4*: vkm_lvec4_lerp,\
+  const vkm_ulvec4*: vkm_ulvec4_lerp,\
+  const vkm_vec4*: vkm_vec4_lerp,\
+  const vkm_dvec4*: vkm_dvec4_lerp\
+)(a, __VA_ARGS__)
+
 static void vkm_quat_mul(const vkm_quat* p, const vkm_quat* q, vkm_quat* result) {
   const vkm_quat p_copy = *p;
   const vkm_quat q_copy = *q;
