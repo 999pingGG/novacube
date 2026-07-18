@@ -328,11 +328,20 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .gradient_stops = { { -0.18f, 0.03f, 0.42f, 1.0f } },
     };
 
+    const float time_of_day = vkm_clamp(vkm_sin((float)time * 0.2f) * 0.96f + 0.6f, 0.0f, 1.0f);
+
+    nc_renderer_sky_draw_t sky_draw;
+    vkm_lerp(&night_sky_draw.gradient_colors[0], &day_sky_draw.gradient_colors[0], time_of_day, &sky_draw.gradient_colors[0]);
+    vkm_lerp(&night_sky_draw.gradient_colors[1], &day_sky_draw.gradient_colors[1], time_of_day, &sky_draw.gradient_colors[1]);
+    vkm_lerp(&night_sky_draw.gradient_colors[2], &day_sky_draw.gradient_colors[2], time_of_day, &sky_draw.gradient_colors[2]);
+    vkm_lerp(&night_sky_draw.gradient_colors[3], &day_sky_draw.gradient_colors[3], time_of_day, &sky_draw.gradient_colors[3]);
+    vkm_lerp(&night_sky_draw.gradient_stops, &day_sky_draw.gradient_stops, time_of_day, &sky_draw.gradient_stops);
+
     const bool success = nc_renderer_draw(app->renderer, &(nc_renderer_frame_t){
         .view_projection = &view_projection,
         .camera_position = app->camera.position,
-        .sunlight_intensity = vkm_clamp(vkm_sin((float)time * 0.2f) * 0.96f + 0.6f, 0.02f, 1.0f),
-        .sky_draw = vkm_sin(time * 0.2) > 0.0 ? &day_sky_draw : &night_sky_draw,
+        .sunlight_intensity = time_of_day * 0.98f + 0.02f,
+        .sky_draw = &sky_draw,
         .opaque_draws = &app->chunk_opaque_draws,
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,
