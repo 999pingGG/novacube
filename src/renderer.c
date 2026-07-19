@@ -41,7 +41,8 @@ NC_IGNORE_ALL_WARNINGS_END
 #endif
 
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
-#define NC__RENDERER_INITIAL_TRANSFER_CAPACITY 65536
+#define NC__RENDERER_TRANSFER_PAGE_CAPACITY (1024 * 1024)
+#define NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES 60
 #define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 4096
 #define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
 #define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
@@ -92,6 +93,7 @@ typedef struct nc__renderer_upload_op_t {
             uint16_t layer;
         } texture;
     };
+    uint32_t source_page;
     uint32_t source_offset;
     uint32_t size;
     nc__renderer_upload_kind_t kind;
@@ -107,10 +109,15 @@ typedef struct nc__renderer_astc_header_t {
     uint8_t dim_z[3];
 } nc__renderer_astc_header_t;
 
-typedef struct nc__renderer_retired_buffer_t {
+typedef struct nc__renderer_transfer_page_t {
     VkBuffer buffer;
+    VkDeviceAddress address;
     VmaAllocation allocation;
-} nc__renderer_retired_buffer_t;
+    void* mapping;
+    uint64_t last_used_frame;
+    uint32_t size;
+    uint32_t capacity;
+} nc__renderer_transfer_page_t;
 
 typedef struct nc_renderer_texture_t {
     VkImage image;
@@ -178,8 +185,8 @@ typedef struct nc__renderer_address_push_constants_t {
     VkDeviceAddress data;
 } nc__renderer_address_push_constants_t;
 
-#define TDS_TYPE nc__renderer_retired_buffer_vec
-#define TDS_VALUE_T nc__renderer_retired_buffer_t
+#define TDS_TYPE nc__renderer_transfer_page_vec
+#define TDS_VALUE_T nc__renderer_transfer_page_t
 #include <tds/vector.h>
 
 #define TDS_TYPE nc__renderer_upload_op_vec
@@ -244,14 +251,7 @@ typedef struct nc_renderer_t {
     bool frame_has_swapchain_image;
     uint32_t frame_swapchain_image_index;
 
-    VkBuffer transfer_buffer;
-    VkDeviceAddress transfer_buffer_address;
-    VmaAllocation transfer_allocation;
-    void* mapped_transfer_buffer;
-    uint32_t transfer_size;
-    uint32_t transfer_capacity;
-
-    nc__renderer_retired_buffer_vec retired_transfer_buffers;
+    nc__renderer_transfer_page_vec transfer_pages;
 
     nc__renderer_upload_op_vec upload_ops;
     bool uploads_dirty;
@@ -363,14 +363,6 @@ static uint32_t nc__renderer_next_capacity(const uint32_t current, const uint32_
     return capacity;
 }
 
-static uint32_t nc__renderer_align_u32(const uint32_t value, const uint32_t alignment) {
-    if (alignment <= 1) {
-        return value;
-    }
-
-    return (value + alignment - 1) / alignment * alignment;
-}
-
 static bool nc__renderer_surface_transform_swaps_extent(const VkSurfaceTransformFlagBitsKHR transform) {
     return transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
             transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
@@ -480,29 +472,14 @@ static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
     renderer->frame_fence_pending = false;
 }
 
-static void nc__renderer_destroy_retired_transfer_buffers(nc_renderer_t* renderer) {
-    for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_transfer_buffers); i++) {
-        const nc__renderer_retired_buffer_t retired = nc__renderer_retired_buffer_vec_get(&renderer->retired_transfer_buffers, i);
-        vmaDestroyBuffer(renderer->allocator, retired.buffer, retired.allocation);
-    }
-    nc__renderer_retired_buffer_vec_clear(&renderer->retired_transfer_buffers);
-}
-
-static void nc__renderer_retire_transfer_buffer(nc_renderer_t* renderer, VkBuffer buffer, VmaAllocation allocation) {
-    if (!buffer) {
-        return;
-    }
-
-    nc__renderer_retired_buffer_vec_append(
-            &renderer->retired_transfer_buffers,
-            (nc__renderer_retired_buffer_t){
-                .buffer = buffer,
-                .allocation = allocation,
-            });
-}
-
-static bool nc__renderer_create_transfer_buffer(nc_renderer_t* renderer, const uint32_t capacity) {
+static bool nc__renderer_create_transfer_page(
+    nc_renderer_t* renderer,
+    const uint32_t capacity,
+    nc__renderer_transfer_page_t* page
+) {
     VmaAllocationInfo allocation_info;
+    VkBuffer buffer;
+    VmaAllocation allocation;
     NC__CHECK_VK_RESULT(vmaCreateBuffer(
             renderer->allocator,
             &(VkBufferCreateInfo){
@@ -515,83 +492,122 @@ static bool nc__renderer_create_transfer_buffer(nc_renderer_t* renderer, const u
                 .usage = VMA_MEMORY_USAGE_AUTO,
                 .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
             },
-            &renderer->transfer_buffer,
-            &renderer->transfer_allocation,
+            &buffer,
+            &allocation,
             &allocation_info));
     NC_ASSERT(allocation_info.pMappedData);
-    renderer->mapped_transfer_buffer = allocation_info.pMappedData;
-    renderer->transfer_capacity = capacity;
-    renderer->transfer_buffer_address = nc__renderer_get_buffer_address(renderer, renderer->transfer_buffer);
+    *page = (nc__renderer_transfer_page_t){
+        .buffer = buffer,
+        .address = nc__renderer_get_buffer_address(renderer, buffer),
+        .allocation = allocation,
+        .mapping = allocation_info.pMappedData,
+        .last_used_frame = renderer->frame_id,
+        .capacity = capacity,
+    };
     return true;
 
 error:
     return false;
 }
 
-static bool nc__renderer_grow_transfer_buffer(nc_renderer_t* renderer, const uint32_t required) {
-    const uint32_t new_capacity = nc__renderer_next_capacity(
-            renderer->transfer_capacity,
-            required,
-            NC__RENDERER_INITIAL_TRANSFER_CAPACITY);
-    VkBuffer old_buffer = renderer->transfer_buffer;
-    VmaAllocation old_allocation = renderer->transfer_allocation;
-    void* old_mapping = renderer->mapped_transfer_buffer;
-    const VkDeviceAddress old_address = renderer->transfer_buffer_address;
-
-    renderer->transfer_buffer = VK_NULL_HANDLE;
-    renderer->transfer_allocation = VK_NULL_HANDLE;
-    renderer->mapped_transfer_buffer = NULL;
-    renderer->transfer_buffer_address = 0;
-
-    if (!nc__renderer_create_transfer_buffer(renderer, new_capacity)) {
-        renderer->transfer_buffer = old_buffer;
-        renderer->transfer_allocation = old_allocation;
-        renderer->mapped_transfer_buffer = old_mapping;
-        renderer->transfer_buffer_address = old_address;
+static bool nc__renderer_initialize_transfer_pages(nc_renderer_t* renderer) {
+    nc__renderer_transfer_page_t page;
+    if (!nc__renderer_create_transfer_page(renderer, NC__RENDERER_TRANSFER_PAGE_CAPACITY, &page)) {
         return false;
     }
-
-    if (old_mapping && renderer->transfer_size > 0) {
-        memcpy(renderer->mapped_transfer_buffer, old_mapping, renderer->transfer_size);
-        NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, old_allocation, 0, renderer->transfer_size));
-    }
-
-    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        nc__renderer_retire_transfer_buffer(renderer, old_buffer, old_allocation);
-    } else if (old_buffer) {
-        vmaDestroyBuffer(renderer->allocator, old_buffer, old_allocation);
-    }
-
+    nc__renderer_transfer_page_vec_append(&renderer->transfer_pages, page);
     return true;
+}
 
-error:
-    if (renderer->transfer_buffer) {
-        vmaDestroyBuffer(renderer->allocator, renderer->transfer_buffer, renderer->transfer_allocation);
+static void nc__renderer_reset_and_trim_transfer_pages(nc_renderer_t* renderer) {
+    NC_ASSERT(!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0);
+
+    uint32_t regular_page_count = 0;
+    const uint32_t page_count = nc__renderer_transfer_page_vec_count(&renderer->transfer_pages);
+    for (uint32_t i = 0; i < page_count; i++) {
+        nc__renderer_transfer_page_t* page = &renderer->transfer_pages.array[i];
+        page->size = 0;
+        regular_page_count += page->capacity == NC__RENDERER_TRANSFER_PAGE_CAPACITY;
     }
-    renderer->transfer_buffer = old_buffer;
-    renderer->transfer_allocation = old_allocation;
-    renderer->mapped_transfer_buffer = old_mapping;
-    return false;
+    uint32_t i = 0;
+    while (i < nc__renderer_transfer_page_vec_count(&renderer->transfer_pages)) {
+        const nc__renderer_transfer_page_t page = renderer->transfer_pages.array[i];
+        const bool regular = page.capacity == NC__RENDERER_TRANSFER_PAGE_CAPACITY;
+        const bool expired = renderer->frame_id - page.last_used_frame
+                >= NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES;
+        if (!expired || (regular && regular_page_count <= 1)) {
+            i++;
+            continue;
+        }
+
+        vmaDestroyBuffer(renderer->allocator, page.buffer, page.allocation);
+        if (regular) {
+            regular_page_count--;
+        }
+        const uint32_t last = nc__renderer_transfer_page_vec_count(&renderer->transfer_pages) - 1;
+        if (i != last) {
+            renderer->transfer_pages.array[i] = renderer->transfer_pages.array[last];
+        }
+        renderer->transfer_pages.count--;
+    }
+    NC_ASSERT(regular_page_count >= 1);
 }
 
 static bool nc__renderer_reserve_transfer_bytes(
     nc_renderer_t* renderer,
     const uint32_t size,
     const uint32_t alignment,
+    uint32_t* out_page,
     uint32_t* out_offset
 ) {
     NC_ASSERT(size);
+    NC_ASSERT(alignment);
 
-    const uint32_t offset = nc__renderer_align_u32(renderer->transfer_size, alignment);
-    const uint32_t required = offset + size;
-    NC_ASSERT(required >= offset);
-
-    if (required > renderer->transfer_capacity && !nc__renderer_grow_transfer_buffer(renderer, required)) {
-        return false;
+    uint32_t best_page = UINT32_MAX;
+    uint32_t best_offset = 0;
+    uint32_t best_remaining = UINT32_MAX;
+    const uint32_t page_count = nc__renderer_transfer_page_vec_count(&renderer->transfer_pages);
+    for (uint32_t i = 0; i < page_count; i++) {
+        const nc__renderer_transfer_page_t* page = &renderer->transfer_pages.array[i];
+        const uint32_t remainder = page->size % alignment;
+        const uint32_t padding = remainder ? alignment - remainder : 0;
+        if (padding > page->capacity - page->size) {
+            continue;
+        }
+        const uint32_t offset = page->size + padding;
+        if (size > page->capacity - offset) {
+            continue;
+        }
+        const uint32_t remaining = page->capacity - offset - size;
+        if (remaining < best_remaining) {
+            best_page = i;
+            best_offset = offset;
+            best_remaining = remaining;
+        }
     }
 
-    *out_offset = offset;
-    renderer->transfer_size = required;
+    if (best_page == UINT32_MAX) {
+        uint32_t capacity = NC__RENDERER_TRANSFER_PAGE_CAPACITY;
+        if (size > capacity) {
+            const uint32_t remainder = size % NC__RENDERER_TRANSFER_PAGE_CAPACITY;
+            capacity = remainder && size <= UINT32_MAX - (NC__RENDERER_TRANSFER_PAGE_CAPACITY - remainder)
+                    ? size + NC__RENDERER_TRANSFER_PAGE_CAPACITY - remainder
+                    : size;
+        }
+        nc__renderer_transfer_page_t page;
+        if (!nc__renderer_create_transfer_page(renderer, capacity, &page)) {
+            return false;
+        }
+        best_page = nc__renderer_transfer_page_vec_count(&renderer->transfer_pages);
+        nc__renderer_transfer_page_vec_append(&renderer->transfer_pages, page);
+        best_offset = 0;
+    }
+
+    nc__renderer_transfer_page_t* page = &renderer->transfer_pages.array[best_page];
+    page->size = best_offset + size;
+    page->last_used_frame = renderer->frame_id;
+    *out_page = best_page;
+    *out_offset = best_offset;
     return true;
 }
 
@@ -1945,13 +1961,20 @@ static bool nc__renderer_write_buffer_reference_data(
     const uint32_t size,
     VkDeviceAddress* out_address
 ) {
+    uint32_t page_index = 0;
     uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT, &offset)) {
+    if (!nc__renderer_reserve_transfer_bytes(
+            renderer,
+            size,
+            NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT,
+            &page_index,
+            &offset)) {
         return false;
     }
-    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+    const nc__renderer_transfer_page_t* page = &renderer->transfer_pages.array[page_index];
+    memcpy((uint8_t*)page->mapping + offset, data, size);
 
-    *out_address = renderer->transfer_buffer_address + offset;
+    *out_address = page->address + offset;
     return true;
 }
 
@@ -2139,10 +2162,12 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
     for (uint32_t i = 0; i < upload_count; i++) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        NC_ASSERT(op.source_page < nc__renderer_transfer_page_vec_count(&renderer->transfer_pages));
+        const nc__renderer_transfer_page_t* source_page = &renderer->transfer_pages.array[op.source_page];
         if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
             vkCmdCopyBuffer(
                     renderer->frame_command_buffer,
-                    renderer->transfer_buffer,
+                    source_page->buffer,
                     op.buffer->buffer,
                     1,
                     &(VkBufferCopy){
@@ -2165,7 +2190,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             nc_renderer_texture_t* texture = op.texture.texture;
             vkCmdCopyBufferToImage(
                     renderer->frame_command_buffer,
-                    renderer->transfer_buffer,
+                    source_page->buffer,
                     texture->image,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     1,
@@ -2339,14 +2364,16 @@ static bool nc__renderer_queue_buffer_upload_internal(
 ) {
     NC_ASSERT(size);
 
+    uint32_t page_index = 0;
     uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 4, &offset)) {
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 4, &page_index, &offset)) {
         return false;
     }
 
-    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+    memcpy((uint8_t*)renderer->transfer_pages.array[page_index].mapping + offset, data, size);
     nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_BUFFER,
+        .source_page = page_index,
         .source_offset = offset,
         .size = size,
         .buffer = buffer,
@@ -2364,14 +2391,16 @@ static bool nc__renderer_queue_texture_upload(
 ) {
     NC_ASSERT(size);
 
+    uint32_t page_index = 0;
     uint32_t offset = 0;
-    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 16, &offset)) {
+    if (!nc__renderer_reserve_transfer_bytes(renderer, size, 16, &page_index, &offset)) {
         return false;
     }
 
-    memcpy((uint8_t*)renderer->mapped_transfer_buffer + offset, data, size);
+    memcpy((uint8_t*)renderer->transfer_pages.array[page_index].mapping + offset, data, size);
     nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_TEXTURE,
+        .source_page = page_index,
         .source_offset = offset,
         .size = size,
         .texture = {
@@ -2794,7 +2823,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             || !nc__renderer_create_descriptor_set_layouts(result)
             || !nc__renderer_create_descriptor_pool(result)
             || !nc__renderer_create_frame_resources(result)
-            || !nc__renderer_create_transfer_buffer(result, NC__RENDERER_INITIAL_TRANSFER_CAPACITY)
+            || !nc__renderer_initialize_transfer_pages(result)
             || !nc__renderer_create_sampler(result, &result->chunk_sampler)
             || !nc__renderer_create_sampler(result, &result->gui_sampler)
             || !nc__renderer_create_swapchain(result)
@@ -2856,10 +2885,9 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     renderer->frame_id++;
     NC__CHECK_VK_RESULT(vkWaitForFences(renderer->device, 1, &renderer->frame_fence, VK_TRUE, UINT64_MAX));
     renderer->frame_fence_pending = false;
-    nc__renderer_destroy_retired_transfer_buffers(renderer);
 
     if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
-        renderer->transfer_size = 0;
+        nc__renderer_reset_and_trim_transfer_pages(renderer);
     }
 
     NC__CHECK_VK_RESULT(vkResetDescriptorPool(renderer->device, renderer->frame_descriptor_pool, 0));
@@ -2925,12 +2953,11 @@ error:
 bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     NC_ASSERT(renderer->frame_command_buffer);
 
-    if (renderer->transfer_size > 0) {
-        NC__CHECK_VK_RESULT(vmaFlushAllocation(
-                renderer->allocator,
-                renderer->transfer_allocation,
-                0,
-                renderer->transfer_size));
+    for (uint32_t i = 0; i < nc__renderer_transfer_page_vec_count(&renderer->transfer_pages); i++) {
+        const nc__renderer_transfer_page_t* page = &renderer->transfer_pages.array[i];
+        if (page->size > 0) {
+            NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->allocation, 0, page->size));
+        }
     }
 
     NC__CHECK_VK_RESULT(vkEndCommandBuffer(renderer->frame_command_buffer));
@@ -3383,9 +3410,9 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         vkDestroySampler(renderer->device, renderer->gui_sampler, NULL);
         nc__renderer_destroy_swapchain(renderer);
         vkDestroyRenderPass(renderer->device, renderer->render_pass, NULL);
-        nc__renderer_destroy_retired_transfer_buffers(renderer);
-        if (renderer->transfer_buffer) {
-            vmaDestroyBuffer(renderer->allocator, renderer->transfer_buffer, renderer->transfer_allocation);
+        for (uint32_t i = 0; i < nc__renderer_transfer_page_vec_count(&renderer->transfer_pages); i++) {
+            const nc__renderer_transfer_page_t page = renderer->transfer_pages.array[i];
+            vmaDestroyBuffer(renderer->allocator, page.buffer, page.allocation);
         }
         vkDestroySemaphore(renderer->device, renderer->image_available_semaphore, NULL);
         vkDestroyFence(renderer->device, renderer->frame_fence, NULL);
@@ -3401,7 +3428,7 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         vkDestroyInstance(renderer->instance, NULL);
     }
 
-    nc__renderer_retired_buffer_vec_fini(&renderer->retired_transfer_buffers);
+    nc__renderer_transfer_page_vec_fini(&renderer->transfer_pages);
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
     if (renderer->window) {
         SDL_DestroyWindow(renderer->window);
