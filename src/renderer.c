@@ -1232,7 +1232,7 @@ static bool nc__renderer_create_depth_image(nc_renderer_t* renderer) {
             },
             &(VmaAllocationCreateInfo){
                 .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO,
+                .preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
             },
             &renderer->depth_image,
             &renderer->depth_allocation,
