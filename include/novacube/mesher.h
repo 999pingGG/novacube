@@ -11,6 +11,12 @@
 #define NC_MESHER_BLOCKS_PER_CHUNK (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)
 #define NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z) \
         (((x) & 15) + ((y) * NC_MESHER_CHUNK_SIZE) + ((z) * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE))
+#define NC_MESHER_CHUNK_INDEX_TO_COORDS(index, x, y, z) \
+        do { \
+                (x) = (uint8_t)((index) % NC_MESHER_CHUNK_SIZE); \
+                (y) = (uint8_t)((index) / NC_MESHER_CHUNK_SIZE % NC_MESHER_CHUNK_SIZE); \
+                (z) = (uint8_t)((index) / (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)); \
+        } while (0)
 
 #define NC_MESHER_BLOCK_MODEL_LENGTH 8
 #define NC_MESHER_BLOCK_MODEL

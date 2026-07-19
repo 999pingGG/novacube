@@ -60,21 +60,35 @@ static void nc__app_fini(nc__app_t* app) {
 }
 
 static void nc__app_initialize_test_blocks(nc__app_t* app) {
-    for (int z = -10 * NC_MESHER_CHUNK_SIZE; z < 9 * NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = -10 * NC_MESHER_CHUNK_SIZE; x < 9 * NC_MESHER_CHUNK_SIZE; x++) {
-            const int height = (int)((15.0f + vkm_sin((float)z / 3.0f) * 3.0f + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
+    const int chunk_radius = 10;
 
-            for (int y = 0; y < height; y++) {
-                nc_block_type_t type;
-                if (y == height - 1) {
-                    type = NC_BLOCK_TYPE_GRASS;
-                } else if (y > height - 5) {
-                    type = NC_BLOCK_TYPE_DIRT;
-                } else {
-                    type = NC_BLOCK_TYPE_STONE;
+    for (int chunk_z = -chunk_radius; chunk_z < chunk_radius; chunk_z++) {
+        for (int chunk_x = -chunk_radius; chunk_x < chunk_radius; chunk_x++) {
+            for (int chunk_y = 0; chunk_y <= 1; chunk_y++) {
+                uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK];
+
+                for (int index = 0; index < NC_MESHER_BLOCKS_PER_CHUNK; index++) {
+                    vkm_bvec3 local_coords;
+                    NC_MESHER_CHUNK_INDEX_TO_COORDS(index, local_coords.x, local_coords.y, local_coords.z);
+
+                    const int x = chunk_x * NC_MESHER_CHUNK_SIZE + local_coords.x;
+                    const int y = chunk_y * NC_MESHER_CHUNK_SIZE + local_coords.y;
+                    const int z = chunk_z * NC_MESHER_CHUNK_SIZE + local_coords.z;
+                    const int height = (int)((15.0f + vkm_sin((float)z / 3.0f) * 3.0f
+                            + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
+
+                    if (y >= height) {
+                        blocks[index] = NC_BLOCK_TYPE_AIR;
+                    } else if (y == height - 1) {
+                        blocks[index] = NC_BLOCK_TYPE_GRASS;
+                    } else if (y > height - 5) {
+                        blocks[index] = NC_BLOCK_TYPE_DIRT;
+                    } else {
+                        blocks[index] = NC_BLOCK_TYPE_STONE;
+                    }
                 }
 
-                nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { x, y, z } }, type);
+                nc_terrain_load_or_replace_chunk(app->terrain, &(vkm_ivec3){ { chunk_x, chunk_y, chunk_z } }, blocks);
             }
         }
     }
@@ -288,7 +302,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             vkm_deg2rad(80.0f),
             (float)viewport.x / (float)viewport.y,
             0.2f,
-            500.0f,
+            1000.0f,
             &view_projection);
 
     if (!nc_terrain_prepare_render(app->terrain, app->renderer)) {
@@ -348,7 +362,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .procedural_overlay_draw = &procedural_overlay_draw,
         .block_highlight_draw = &highlight_draw,
     });
-    nc_renderer_chunk_opaque_draw_vec_fini(&app->chunk_opaque_draws);
+    nc_renderer_chunk_opaque_draw_vec_clear(&app->chunk_opaque_draws);
     if (!success) {
         goto error;
     }
