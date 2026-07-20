@@ -15,9 +15,6 @@ android {
         versionCode 1
         versionName "1.0"
 
-        ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
-        }
         resConfigs "en"
     }
 
@@ -41,10 +38,41 @@ android {
     buildFeatures {
         prefab true
     }
+
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'x86_64'
+            universalApk true
+        }
+    }
+
+    bundle {
+        abi {
+            enableSplit true
+        }
+    }
     ndkVersion '29.0.14206865'
     buildToolsVersion '36.1.0'
 }
 
 dependencies {
     implementation files('libs/SDL3-3.5.0.aar')
+}
+
+// Map for the version code that gives each ABI a value.
+ext.abiCodes = ['arm64-v8a': 1, 'x86_64': 2]
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.each { output ->
+            def abi = output.filters.find { it.filterType.name() == 'ABI' }?.identifier
+            def baseAbiCode = project.ext.abiCodes.get(abi)
+            if (baseAbiCode != null) {
+                def currentVersionCode = output.versionCode.get() ?: 0
+                output.versionCode.set(baseAbiCode * 100000 + currentVersionCode)
+            }
+        }
+    }
 }
