@@ -2,6 +2,14 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+def getProjectVersionFromCMake() {
+    def cmakeFile = file('../../CMakeLists.txt')
+    assert cmakeFile.exists()
+    def matcher = cmakeFile.text =~ /project\(.*VERSION\s+([0-9.]+).*\)/
+    assert matcher.find()
+    return matcher.group(1)
+}
+
 android {
     namespace 'net.novacubegame'
     compileSdk {
@@ -13,7 +21,7 @@ android {
         minSdk 24
         targetSdk 37
         versionCode 1
-        versionName "1.0"
+        versionName getProjectVersionFromCMake()
 
         resConfigs "en"
     }
