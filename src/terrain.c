@@ -70,6 +70,14 @@ typedef struct nc__terrain_chunk_t {
     nc__terrain_chunk_flags_t flags;
 } nc__terrain_chunk_t;
 
+typedef struct nc__terrain_frustum_plane_t {
+    float x;
+    float y;
+    float z;
+    float distance;
+    float aabb_radius;
+} nc__terrain_frustum_plane_t;
+
 typedef struct nc__terrain_light_node_t {
     // Keep coordinates rather than a chunk pointer because edits can remain queued after the chunk is unloaded.
     vkm_ivec3 chunk_coords;
@@ -415,22 +423,6 @@ static void nc__terrain_chunk_index_to_local_coords(const uint16_t index, vkm_iv
     NC_ASSERT(index < NC_MESHER_BLOCKS_PER_CHUNK);
 
     NC_MESHER_CHUNK_INDEX_TO_COORDS(index, result->x, result->y, result->z);
-}
-
-static void nc__terrain_chunk_local_to_block_coords(
-    const vkm_ivec3* chunk_coords,
-    const vkm_ivec3* local_coords,
-    vkm_ivec3* result
-) {
-    NC_ASSERT(local_coords->x >= 0 && local_coords->x < NC_MESHER_CHUNK_SIZE);
-    NC_ASSERT(local_coords->y >= 0 && local_coords->y < NC_MESHER_CHUNK_SIZE);
-    NC_ASSERT(local_coords->z >= 0 && local_coords->z < NC_MESHER_CHUNK_SIZE);
-
-    *result = (vkm_ivec3){ {
-        nc__terrain_chunk_local_to_block_coord(chunk_coords->x, local_coords->x),
-        nc__terrain_chunk_local_to_block_coord(chunk_coords->y, local_coords->y),
-        nc__terrain_chunk_local_to_block_coord(chunk_coords->z, local_coords->z),
-    } };
 }
 
 static bool nc__terrain_get_light_neighbor(
@@ -1594,17 +1586,100 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
     return true;
 }
 
-void nc_terrain_get_opaque_draws(const nc_terrain_t* terrain, nc_renderer_chunk_opaque_draw_vec* draws) {
+static nc__terrain_frustum_plane_t nc__terrain_make_frustum_plane(
+    const float x,
+    const float y,
+    const float z,
+    const float distance
+) {
+    const float half_chunk_size = (float)NC_MESHER_CHUNK_SIZE * 0.5f;
+    return (nc__terrain_frustum_plane_t){
+        .x = x,
+        .y = y,
+        .z = z,
+        .distance = distance,
+        .aabb_radius = half_chunk_size * (vkm_abs(x) + vkm_abs(y) + vkm_abs(z)),
+    };
+}
+
+static bool nc__terrain_chunk_is_outside_frustum(const nc__terrain_frustum_plane_t planes[6], const vkm_vec3* center) {
+    for (int i = 0; i < 6; i++) {
+        const nc__terrain_frustum_plane_t* plane = &planes[i];
+        if (plane->x * center->x + plane->y * center->y + plane->z * center->z
+                + plane->distance + plane->aabb_radius < 0.0f) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void nc_terrain_get_opaque_draws(
+    const nc_terrain_t* terrain,
+    const vkm_mat4* view_projection,
+    nc_renderer_chunk_opaque_draw_vec* draws,
+    nc_terrain_frustum_culling_stats_t* stats
+) {
+    const nc__terrain_frustum_plane_t planes[6] = {
+        nc__terrain_make_frustum_plane(
+                view_projection->m03 + view_projection->m00,
+                view_projection->m13 + view_projection->m10,
+                view_projection->m23 + view_projection->m20,
+                view_projection->m33 + view_projection->m30),
+        nc__terrain_make_frustum_plane(
+                view_projection->m03 - view_projection->m00,
+                view_projection->m13 - view_projection->m10,
+                view_projection->m23 - view_projection->m20,
+                view_projection->m33 - view_projection->m30),
+        nc__terrain_make_frustum_plane(
+                view_projection->m03 + view_projection->m01,
+                view_projection->m13 + view_projection->m11,
+                view_projection->m23 + view_projection->m21,
+                view_projection->m33 + view_projection->m31),
+        nc__terrain_make_frustum_plane(
+                view_projection->m03 - view_projection->m01,
+                view_projection->m13 - view_projection->m11,
+                view_projection->m23 - view_projection->m21,
+                view_projection->m33 - view_projection->m31),
+        nc__terrain_make_frustum_plane(
+                view_projection->m02,
+                view_projection->m12,
+                view_projection->m22,
+                view_projection->m32),
+        nc__terrain_make_frustum_plane(
+                view_projection->m03 - view_projection->m02,
+                view_projection->m13 - view_projection->m12,
+                view_projection->m23 - view_projection->m22,
+                view_projection->m33 - view_projection->m32),
+    };
+
+    // Keep this struct in cache by using a local variable.
+    nc_terrain_frustum_culling_stats_t culling_stats = { 0 };
     nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
     while (nc__terrain_chunk_map_next(&it)) {
         const nc__terrain_chunk_t* chunk = *it.value;
+        culling_stats.loaded_chunk_count++;
         if (chunk->quad_count == 0) {
+            culling_stats.empty_chunk_count++;
             continue;
         }
 
-        const vkm_ivec3 local_coords = CVKM_IVEC3_ZERO;
-        vkm_ivec3 block_coords;
-        nc__terrain_chunk_local_to_block_coords(&chunk->coords, &local_coords, &block_coords);
+        const vkm_ivec3 block_coords = { {
+            chunk->coords.x * NC_MESHER_CHUNK_SIZE,
+            chunk->coords.y * NC_MESHER_CHUNK_SIZE,
+            chunk->coords.z * NC_MESHER_CHUNK_SIZE,
+        } };
+
+        const float half_chunk_size = (float)NC_MESHER_CHUNK_SIZE * 0.5f;
+        const vkm_vec3 center = { {
+            (float)block_coords.x + half_chunk_size,
+            (float)block_coords.y + half_chunk_size,
+            (float)block_coords.z + half_chunk_size,
+        } };
+        if (nc__terrain_chunk_is_outside_frustum(planes, &center)) {
+            culling_stats.culled_chunk_count++;
+            continue;
+        }
 
         nc_renderer_chunk_opaque_draw_vec_append(draws, (nc_renderer_chunk_opaque_draw_t){
             .chunk_buffer = chunk->quad_buffer,
@@ -1617,7 +1692,10 @@ void nc_terrain_get_opaque_draws(const nc_terrain_t* terrain, nc_renderer_chunk_
                 .z = (float)block_coords.z,
             } },
         });
+        culling_stats.drawn_chunk_count++;
     }
+
+    *stats = culling_stats;
 }
 
 static bool nc__terrain_floor_float_to_block_coord(const float value, int32_t* result) {

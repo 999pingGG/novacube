@@ -119,6 +119,7 @@ typedef enum nc_block_highlight_effect_t {
             3.0) \
     X(bool, show_fps, NO, , nc__parse_bool, nc__print_bool, , false) \
     X(bool, show_frame_time, NO, , nc__parse_bool, nc__print_bool, , false) \
+    X(bool, show_chunk_frustum_culling_stats, NO, , nc__parse_bool, nc__print_bool, , false) \
     X(double, gui_button_size, NO, , nc__parse_double, nc__print_double, , 50.0) \
     X(double, crosshair_size, NO, , nc__parse_double, nc__print_double, , 28.0) \
     X(double, analog_stick_ring_radius, NO, , nc__parse_double, nc__print_double, , 64.0) \

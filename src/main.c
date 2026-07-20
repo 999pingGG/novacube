@@ -308,16 +308,34 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (!nc_terrain_prepare_render(app->terrain, app->renderer)) {
         goto error;
     }
+
+    nc_terrain_frustum_culling_stats_t frustum_culling_stats;
+    nc_terrain_get_opaque_draws(
+            app->terrain,
+            &view_projection,
+            &app->chunk_opaque_draws,
+            &frustum_culling_stats);
+    if (nc_cvar_get_show_chunk_frustum_culling_stats()) {
+        const int printed = snprintf(
+                debug_buffer,
+                sizeof(debug_buffer),
+                "Chunks: %u loaded, %u empty, %u frustum culled, %u drawn\n",
+                frustum_culling_stats.loaded_chunk_count,
+                frustum_culling_stats.empty_chunk_count,
+                frustum_culling_stats.culled_chunk_count,
+                frustum_culling_stats.drawn_chunk_count);
+        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+    }
+
     if (!nc_gui_prepare_frame(app->gui, app->renderer, (float)delta_time)) {
         goto error;
     }
 
     nc_renderer_overlay_draw_t overlay_draw;
-    nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
-    nc_renderer_block_highlight_draw_t highlight_draw;
-    nc_terrain_get_opaque_draws(app->terrain, &app->chunk_opaque_draws);
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
+    nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
     nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
+    nc_renderer_block_highlight_draw_t highlight_draw;
     nc_terrain_get_block_highlight_draw(app->terrain, (float)time, &app->camera, &highlight_draw);
 
     static const nc_renderer_sky_draw_t day_sky_draw = {

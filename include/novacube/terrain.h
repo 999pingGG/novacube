@@ -21,6 +21,13 @@ typedef struct nc_terrain_raycast_hit_t {
     float distance;
 } nc_terrain_raycast_hit_t;
 
+typedef struct nc_terrain_frustum_culling_stats_t {
+    uint32_t loaded_chunk_count;
+    uint32_t empty_chunk_count;
+    uint32_t culled_chunk_count;
+    uint32_t drawn_chunk_count;
+} nc_terrain_frustum_culling_stats_t;
+
 nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer);
 void nc_terrain_load_or_replace_chunk(
         nc_terrain_t* terrain,
@@ -32,7 +39,9 @@ uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer);
 void nc_terrain_get_opaque_draws(
         const nc_terrain_t* terrain,
-        nc_renderer_chunk_opaque_draw_vec* draws);
+        const vkm_mat4* view_projection,
+        nc_renderer_chunk_opaque_draw_vec* draws,
+        nc_terrain_frustum_culling_stats_t* stats);
 bool nc_terrain_raycast(
         const nc_terrain_t* terrain,
         const nc_camera_t* camera,
