@@ -17,8 +17,10 @@ set(NC_SOURCES
         libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
         src/block.c
-        src/block_model_mesher.c
+        src/block_meshing.c
         src/camera.c
+        src/chunk.c
+        src/chunk_meshing.c
         src/cvar.c
         src/error_handling.c
         src/gui.c
@@ -27,6 +29,7 @@ set(NC_SOURCES
         src/renderer.c
         src/string_builder.c
         src/terrain.c
+        src/terrain_generation.c
         src/vma_implementation.cpp)
 
 if(ANDROID)

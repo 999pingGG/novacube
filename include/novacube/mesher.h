@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include <novacube/chunk.h>
+#include <novacube/renderer.h>
 
 #define NC_MESHER_BLOCK_MODEL_LENGTH 8
 #define NC_MESHER_BLOCK_MODEL
@@ -85,16 +86,20 @@ typedef struct nc_block_model_t {
                                         // optimization purposes... but currently unused.
 } nc_block_model_t;
 
-typedef struct nc_mesher_t nc_mesher_t;
-typedef struct nc_block_registry_t nc_block_registry_t;
+struct nc_block_registry_t;
 
-nc_mesher_t* nc_mesher_init(const nc_block_registry_t* block_registry);
 void nc_mesher_compute_chunk(
-        nc_mesher_t* mesher,
+        const struct nc_block_registry_t* block_registry,
         const uint16_t* chunk_and_neighbors[3][3][3],
         const uint8_t* light_levels_and_neighbors[3][3][3],
         nc_mesh_quad_vec* quads_result,
         nc_mesh_face_data_vec* face_data_result);
+bool nc_mesher_upload_chunk(
+        const struct nc_block_registry_t* block_registry,
+        nc_renderer_t* renderer,
+        nc_chunk_t* chunk,
+        const uint16_t* chunk_and_neighbors[3][3][3],
+        const uint8_t* light_levels_and_neighbors[3][3][3]);
 void nc_mesher_compute_block_model(
         const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
         nc_mesh_quad_vec* quads,
@@ -109,6 +114,5 @@ void nc_mesher_mesh_binary_plane(
         nc_greedy_quad_t result[128],
         int* count);
 bool nc_mesher_export_obj(const char* filename, const nc_mesh_quad_vec* quads);
-void nc_mesher_fini(nc_mesher_t* mesher);
 
 #endif

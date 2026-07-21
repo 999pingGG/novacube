@@ -229,7 +229,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             const int printed = snprintf(
                     debug_buffer,
                     sizeof(debug_buffer),
-                    "Block: (%d, %d, %d), distance: %f, top light blocking: %d",
+                    "Block: (%d, %d, %d), distance: %f, top light blocking: %d\n",
                     hit.block_position.x,
                     hit.block_position.y,
                     hit.block_position.z,
@@ -271,17 +271,17 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     }
 
     if (nc_cvar_get_show_terrain_timings()) {
-        nc_terrain_timing_stats_t terrain_timing;
-        nc_terrain_get_timing_stats(app->terrain, &terrain_timing);
+        nc_terrain_timing_stats_t terrain_timings;
+        nc_terrain_get_timing_stats(app->terrain, &terrain_timings);
         const int printed = snprintf(
                 debug_buffer,
                 sizeof(debug_buffer),
                 "Terrain residency: %.3f ms, load: %.3f, unload: %.3f, lighting: %.3f, meshing: %.3f\n",
-                terrain_timing.residency_ms,
-                terrain_timing.loading_ms,
-                terrain_timing.unloading_ms,
-                terrain_timing.lighting_ms,
-                terrain_timing.meshing_ms);
+                terrain_timings.residency_ms,
+                terrain_timings.loading_ms,
+                terrain_timings.unloading_ms,
+                terrain_timings.lighting_ms,
+                terrain_timings.meshing_ms);
         nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
