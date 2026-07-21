@@ -119,6 +119,11 @@ typedef struct nc__renderer_transfer_page_t {
     uint32_t capacity;
 } nc__renderer_transfer_page_t;
 
+typedef struct nc__renderer_retired_buffer_t {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+} nc__renderer_retired_buffer_t;
+
 typedef struct nc_renderer_texture_t {
     VkImage image;
     VmaAllocation allocation;
@@ -193,6 +198,10 @@ typedef struct nc__renderer_address_push_constants_t {
 #define TDS_VALUE_T nc__renderer_upload_op_t
 #include <tds/vector.h>
 
+#define TDS_TYPE nc__renderer_retired_buffer_vec
+#define TDS_VALUE_T nc__renderer_retired_buffer_t
+#include <tds/vector.h>
+
 typedef struct nc_renderer_t {
     VkInstance instance;
     VkPhysicalDevice physical_device;
@@ -254,6 +263,7 @@ typedef struct nc_renderer_t {
     nc__renderer_transfer_page_vec transfer_pages;
 
     nc__renderer_upload_op_vec upload_ops;
+    nc__renderer_retired_buffer_vec retired_buffers;
     bool uploads_dirty;
 
     uint64_t frame_id;
@@ -2886,6 +2896,14 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     NC__CHECK_VK_RESULT(vkWaitForFences(renderer->device, 1, &renderer->frame_fence, VK_TRUE, UINT64_MAX));
     renderer->frame_fence_pending = false;
 
+    for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_buffers); i++) {
+        const nc__renderer_retired_buffer_t buffer = nc__renderer_retired_buffer_vec_get(
+                &renderer->retired_buffers,
+                i);
+        vmaDestroyBuffer(renderer->allocator, buffer.buffer, buffer.allocation);
+    }
+    nc__renderer_retired_buffer_vec_clear(&renderer->retired_buffers);
+
     if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         nc__renderer_reset_and_trim_transfer_pages(renderer);
     }
@@ -3090,7 +3108,14 @@ void nc_renderer_destroy_buffer(nc_renderer_t* renderer, nc_renderer_buffer_t* b
     }
 
     if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        nc__renderer_wait_idle(renderer);
+        nc__renderer_retired_buffer_vec_append(
+                &renderer->retired_buffers,
+                (nc__renderer_retired_buffer_t){
+                    .buffer = buffer->buffer,
+                    .allocation = buffer->allocation,
+                });
+        free(buffer);
+        return;
     }
 
     vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
@@ -3402,6 +3427,13 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
     if (renderer->device) {
         nc__renderer_wait_idle(renderer);
 
+        for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_buffers); i++) {
+            const nc__renderer_retired_buffer_t buffer = nc__renderer_retired_buffer_vec_get(
+                    &renderer->retired_buffers,
+                    i);
+            vmaDestroyBuffer(renderer->allocator, buffer.buffer, buffer.allocation);
+        }
+
         nc__renderer_destroy_descriptor_state(renderer);
         nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
 
@@ -3430,6 +3462,7 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
 
     nc__renderer_transfer_page_vec_fini(&renderer->transfer_pages);
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
+    nc__renderer_retired_buffer_vec_fini(&renderer->retired_buffers);
     if (renderer->window) {
         SDL_DestroyWindow(renderer->window);
     }

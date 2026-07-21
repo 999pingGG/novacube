@@ -5,18 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// TODO: Some of those constants and macros don't belong to the mesher.
-#define NC_MESHER_CHUNK_SIZE 16
-#define NC_MESHER_PADDED_CHUNK_SIZE (NC_MESHER_CHUNK_SIZE + 2)
-#define NC_MESHER_BLOCKS_PER_CHUNK (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)
-#define NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z) \
-        (((x) & 15) + ((y) * NC_MESHER_CHUNK_SIZE) + ((z) * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE))
-#define NC_MESHER_CHUNK_INDEX_TO_COORDS(index, x, y, z) \
-        do { \
-                (x) = (uint8_t)((index) % NC_MESHER_CHUNK_SIZE); \
-                (y) = (uint8_t)((index) / NC_MESHER_CHUNK_SIZE % NC_MESHER_CHUNK_SIZE); \
-                (z) = (uint8_t)((index) / (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)); \
-        } while (0)
+#include <novacube/chunk.h>
 
 #define NC_MESHER_BLOCK_MODEL_LENGTH 8
 #define NC_MESHER_BLOCK_MODEL
@@ -24,17 +13,17 @@
         (NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH)
 #define NC_MESHER_BLOCK_MODEL_SIZE (NC_MESHER_VOXELS_PER_BLOCK_MODEL / 8)
 #define NC_MESHER_INTS_PER_BLOCK_MODEL \
-        ((NC_MESHER_VOXELS_PER_BLOCK_MODEL + NC_MESHER_CHUNK_SIZE - 1) / NC_MESHER_CHUNK_SIZE)
+        ((NC_MESHER_VOXELS_PER_BLOCK_MODEL + NC_CHUNK_SIZE - 1) / NC_CHUNK_SIZE)
 #define NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) ( \
         (x) \
         + ((y) * NC_MESHER_BLOCK_MODEL_LENGTH) \
         + ((z) * NC_MESHER_BLOCK_MODEL_LENGTH * NC_MESHER_BLOCK_MODEL_LENGTH))
 #define NC_MESHER_BLOCK_MODEL_SET(data, x, y, z) \
-        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_MESHER_CHUNK_SIZE] |= \
-                (uint16_t)(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_MESHER_CHUNK_SIZE)))
+        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_CHUNK_SIZE] |= \
+                (uint16_t)(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_CHUNK_SIZE)))
 #define NC_MESHER_BLOCK_MODEL_UNSET(data, x, y, z) \
-        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_MESHER_CHUNK_SIZE] &= \
-                (uint16_t)~(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_MESHER_CHUNK_SIZE)))
+        ((data)[NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) / NC_CHUNK_SIZE] &= \
+                (uint16_t)~(1 << (NC_MESHER_BLOCK_MODEL_COORDS_TO_INDEX(x, y, z) % NC_CHUNK_SIZE)))
 
 typedef struct nc_greedy_quad_t {
     uint8_t x;
@@ -115,7 +104,7 @@ void nc_mesher_compute_block_model(
 // Result will be null-terminated, the array size is just the max size.
 // Data will be nuked! Better pass a copy if you need it unmodified.
 void nc_mesher_mesh_binary_plane(
-        uint16_t data[NC_MESHER_CHUNK_SIZE],
+        uint16_t data[NC_CHUNK_SIZE],
         int lod_size,
         nc_greedy_quad_t result[128],
         int* count);

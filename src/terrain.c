@@ -5,9 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <SDL3/SDL.h>
 #include <rapidhash.h>
 
 #include <novacube/camera.h>
+#include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 #include <novacube/macros.h>
 #include <novacube/mesher.h>
@@ -22,19 +24,19 @@
 #define NC__TERRAIN_TEXTURE_EXTENSION ".png"
 #endif
 
-#define NC__TERRAIN_MIN_CHUNK_COORD (INT32_MIN / NC_MESHER_CHUNK_SIZE)
-#define NC__TERRAIN_MAX_CHUNK_COORD (INT32_MAX / NC_MESHER_CHUNK_SIZE)
-#define NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z) ((x) + (z) * NC_MESHER_CHUNK_SIZE)
 #define NC__TERRAIN_BLOCK_LIGHT_MASK 0x0f
 #define NC__TERRAIN_SKY_LIGHT_SHIFT 4
 
 #define TDS_TYPE light_node_queue
-#define TDS_BIT_COUNT NC_MESHER_BLOCKS_PER_CHUNK
+#define TDS_BIT_COUNT NC_BLOCKS_PER_CHUNK
 #include <tds/bitset.h>
 
 typedef uint8_t nc__terrain_chunk_flags_t;
 enum {
-    NC__TERRAIN_CHUNK_MESH_DIRTY_BIT = 1 << 0,
+    // The chunk's CPU/GPU mesh no longer matches its blocks, light, or loaded neighbors, and mesh_queue contains one
+    // rebuild ticket for its coordinates. Repeated invalidations do not add tickets. The bit is cleared immediately
+    // before that ticket is rebuilt; a duplicate ticket left by unloading/reloading the same coordinates is ignored.
+    NC__TERRAIN_CHUNK_MESH_PENDING_BIT = 1 << 0,
 };
 
 typedef enum nc__terrain_light_channel_t {
@@ -57,10 +59,11 @@ typedef struct nc__terrain_sky_light_chunk_range_t {
 
 typedef struct nc__terrain_chunk_t {
     vkm_ivec3 coords;
-    uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK];
+    uint16_t blocks[NC_BLOCKS_PER_CHUNK];
     // Low nibble: block light. High nibble: sky light.
-    uint8_t light_levels[NC_MESHER_BLOCKS_PER_CHUNK];
-    // Lazily allocated queue-membership bitsets. Relighting releases them after both propagation passes drain.
+    uint8_t light_levels[NC_BLOCKS_PER_CHUNK];
+    // Lazily allocated queue-membership bitsets. They suppress duplicate BFS nodes and retain their peak allocation
+    // until the chunk unloads, avoiding allocation spikes during later relighting passes.
     light_node_queue* queued_light_nodes[NC__TERRAIN_LIGHT_CHANNEL_COUNT];
     // SSBO containing an array of nc_mesh_quad_t.
     nc_renderer_buffer_t* quad_buffer;
@@ -111,12 +114,12 @@ static uint64_t nc__terrain_hash_chunk_xz_coords(const vkm_ivec2* coords) {
 #include <tds/hashmap.h>
 
 #define TDS_TYPE nc__terrain_chunk_column_dirty_bitset
-#define TDS_BIT_COUNT (NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE)
+#define TDS_BIT_COUNT NC_BLOCK_COLUMNS_PER_CHUNK
 #define TDS_WORD_T uint64_t
 #include <tds/bitset.h>
 
 typedef struct nc__terrain_chunk_column_t {
-    int32_t top_light_blocking_blocks[NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE];
+    int32_t top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK];
     nc__terrain_chunk_column_dirty_bitset dirty_top_light_blocking_blocks;
     int32_t min_loaded_chunk_y;
     int32_t max_loaded_chunk_y;
@@ -138,17 +141,41 @@ typedef struct nc__terrain_chunk_column_t {
 #define TDS_VALUE_T nc__terrain_light_removal_node_t
 #include <tds/queue.h>
 
+#define TDS_TYPE nc__terrain_stream_queue
+#define TDS_VALUE_T vkm_ivec3
+#include <tds/queue.h>
+
+typedef struct nc__terrain_generator_t {
+    uint64_t seed;
+} nc__terrain_generator_t;
+
 typedef struct nc_terrain_t {
     nc__terrain_chunk_map chunks;
     nc__terrain_chunk_column_map chunk_columns;
     nc_renderer_texture_t* texture_array;
     nc_block_registry_t* block_registry;
     nc_mesher_t* mesher;
+    // The built-in generator is part of this terrain's identity and lifetime. A polymorphic generator can replace
+    // this value later without imposing a second allocation today.
+    nc__terrain_generator_t generator;
+    // Coordinate-only queues deliberately tolerate stale entries: consumers recheck current residency and range.
+    // clear() cancels pending work in O(1) while retaining queue storage; it never changes loaded chunks by itself.
+    nc__terrain_stream_queue load_queue;
+    nc__terrain_stream_queue unload_queue;
+    // Chunks set MESH_PENDING before adding their coordinate, preventing duplicate rebuild work while loaded.
+    nc__terrain_stream_queue mesh_queue;
+    vkm_ivec3 streaming_center;
+    uint16_t last_streaming_radius_xz;
+    uint16_t last_streaming_radius_y;
+    uint16_t last_streaming_hysteresis;
+    bool streaming_center_is_valid;
     nc__terrain_light_bfs_queue light_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_COUNT];
     nc__terrain_light_removal_bfs_queue light_removal_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_COUNT];
     bool sky_light_has_propagated;
     bool sky_light_needs_rebuild;
-    bool light_queue_bitsets_allocated;
+    bool sky_light_frontier_queued;
+    uint64_t prepare_budget_ns;
+    nc_terrain_timing_stats_t timing_stats;
 } nc_terrain_t;
 
 static const vkm_bvec3 nc__terrain_light_neighbor_offsets[] = {
@@ -201,28 +228,19 @@ static bool nc__terrain_block_has_direct_sky(
             && world_y > column->top_light_blocking_blocks[column_index];
 }
 
-static vkm_ivec2 nc__terrain_chunk_column_coords(const vkm_ivec3* chunk_coords) {
-    return (vkm_ivec2){ { chunk_coords->x, chunk_coords->z } };
-}
-
-static int32_t nc__terrain_chunk_local_to_block_coord(const int32_t chunk_coord, const int32_t local_coord) {
-    NC_ASSERT(local_coord >= 0 && local_coord < NC_MESHER_CHUNK_SIZE);
-    return chunk_coord * NC_MESHER_CHUNK_SIZE + local_coord;
-}
-
 static void nc__terrain_update_chunk_column_from_chunk(
     const nc_terrain_t* terrain,
     nc__terrain_chunk_column_t* column,
     const nc__terrain_chunk_t* chunk
 ) {
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
-            for (int y = NC_MESHER_CHUNK_SIZE - 1; y >= 0; y--) {
-                const uint16_t block = chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
+            for (int y = NC_CHUNK_SIZE - 1; y >= 0; y--) {
+                const uint16_t block = chunk->blocks[NC_CHUNK_COORDS_TO_INDEX(x, y, z)];
                 if (nc_block_registry_get(terrain->block_registry, (nc_block_type_t)block)->flags
                         & NC_BLOCK_FLAG_BLOCKS_LIGHT) {
-                    const int32_t world_y = nc__terrain_chunk_local_to_block_coord(chunk->coords.y, y);
+                    const int32_t world_y = nc_chunk_local_coord_to_block_coord(chunk->coords.y, y);
                     if (world_y > column->top_light_blocking_blocks[column_index]) {
                         column->top_light_blocking_blocks[column_index] = world_y;
                     }
@@ -239,35 +257,21 @@ static nc__terrain_chunk_t* nc__terrain_get_chunk(const nc_terrain_t* terrain, c
     return chunk ? *chunk : NULL;
 }
 
-static int32_t nc__terrain_floor_divide_by_chunk_size(const int32_t value) {
-    int32_t result = value / NC_MESHER_CHUNK_SIZE;
-    if (value < 0 && value % NC_MESHER_CHUNK_SIZE != 0) {
-        result--;
-    }
-    return result;
-}
-
-static int32_t nc__terrain_block_to_chunk_local_coord(const int32_t block_coord, const int32_t chunk_coord) {
-    const int32_t result = (int32_t)((int64_t)block_coord - (int64_t)chunk_coord * NC_MESHER_CHUNK_SIZE);
-    NC_ASSERT(result >= 0 && result < NC_MESHER_CHUNK_SIZE);
-    return result;
-}
-
 static void nc__terrain_update_dirty_chunk_column(
     const nc_terrain_t* terrain,
     const vkm_ivec2 column_coords,
     nc__terrain_chunk_column_t* column
 ) {
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
             if (!nc__terrain_chunk_column_dirty_bitset_get(
                     &column->dirty_top_light_blocking_blocks,
                     column_index)) {
                 continue;
             }
 
-            const int32_t top_chunk_y = nc__terrain_floor_divide_by_chunk_size(
+            const int32_t top_chunk_y = nc_block_coord_to_chunk_coord(
                     column->top_light_blocking_blocks[column_index]);
             column->top_light_blocking_blocks[column_index] = INT32_MIN;
             for (int32_t chunk_y = top_chunk_y; chunk_y >= column->min_loaded_chunk_y; chunk_y--) {
@@ -277,12 +281,12 @@ static void nc__terrain_update_dirty_chunk_column(
                     continue;
                 }
 
-                for (int y = NC_MESHER_CHUNK_SIZE - 1; y >= 0; y--) {
-                    const uint16_t block = chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
+                for (int y = NC_CHUNK_SIZE - 1; y >= 0; y--) {
+                    const uint16_t block = chunk->blocks[NC_CHUNK_COORDS_TO_INDEX(x, y, z)];
                     if (nc_block_registry_get(terrain->block_registry, (nc_block_type_t)block)->flags
                             & NC_BLOCK_FLAG_BLOCKS_LIGHT) {
                         column->top_light_blocking_blocks[column_index] =
-                                nc__terrain_chunk_local_to_block_coord(chunk_y, y);
+                                nc_chunk_local_coord_to_block_coord(chunk_y, y);
                         goto found_top_light_blocking_block;
                     }
                 }
@@ -305,46 +309,28 @@ static const char* nc__terrain_texture_paths[] = {
     NC__TERRAIN_ASSETS_BASE_PATH "textures/testbox" NC__TERRAIN_TEXTURE_EXTENSION,
 };
 
-// Make sure the chunk doesn't contain blocks whose coords overflow int32_t.
-static bool nc__terrain_chunk_coords_are_valid(const vkm_ivec3* coords) {
-    return coords->x >= NC__TERRAIN_MIN_CHUNK_COORD && coords->x <= NC__TERRAIN_MAX_CHUNK_COORD
-        && coords->y >= NC__TERRAIN_MIN_CHUNK_COORD && coords->y <= NC__TERRAIN_MAX_CHUNK_COORD
-        && coords->z >= NC__TERRAIN_MIN_CHUNK_COORD && coords->z <= NC__TERRAIN_MAX_CHUNK_COORD;
-}
-
-// Offsets the chunk coords and returns false if the new coords would fall outside the valid range.
-static bool nc__terrain_offset_chunk_coords(
-    const vkm_ivec3* coords,
-    const int offset_x,
-    const int offset_y,
-    const int offset_z,
-    vkm_ivec3* result
-) {
-    const int64_t x = (int64_t)coords->x + offset_x;
-    const int64_t y = (int64_t)coords->y + offset_y;
-    const int64_t z = (int64_t)coords->z + offset_z;
-    if (x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX || z < INT32_MIN || z > INT32_MAX) {
-        return false;
+static void nc__terrain_mark_chunk_dirty(nc_terrain_t* terrain, nc__terrain_chunk_t* chunk) {
+    if (chunk->flags & NC__TERRAIN_CHUNK_MESH_PENDING_BIT) {
+        return;
     }
-
-    *result = (vkm_ivec3){ { (int32_t)x, (int32_t)y, (int32_t)z } };
-    return nc__terrain_chunk_coords_are_valid(result);
+    chunk->flags |= NC__TERRAIN_CHUNK_MESH_PENDING_BIT;
+    nc__terrain_stream_queue_push(&terrain->mesh_queue, chunk->coords);
 }
 
-// Marks the chunk and every one of its 26 neighbors as dirty.
-// TODO: For every caller of this function, check if we can instead only mark the chunks that could have changed.
-static void nc__terrain_mark_chunk_and_neighbors_dirty(const nc_terrain_t* terrain, const vkm_ivec3* coords) {
+// Loading, replacing, or unloading a whole chunk can change face visibility, corner lighting, and ambient occlusion
+// samples in any of the 26 adjacent chunks, so the complete 3x3x3 neighborhood must be rebuilt.
+static void nc__terrain_mark_chunk_and_neighbors_dirty(nc_terrain_t* terrain, const vkm_ivec3* coords) {
     for (int z = -1; z <= 1; z++) {
         for (int y = -1; y <= 1; y++) {
             for (int x = -1; x <= 1; x++) {
                 vkm_ivec3 neighbor_coords;
-                if (!nc__terrain_offset_chunk_coords(coords, x, y, z, &neighbor_coords)) {
+                if (!nc_chunk_offset_coords(coords, x, y, z, &neighbor_coords)) {
                     continue;
                 }
 
                 nc__terrain_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
                 if (neighbor) {
-                    neighbor->flags |= NC__TERRAIN_CHUNK_MESH_DIRTY_BIT;
+                    nc__terrain_mark_chunk_dirty(terrain, neighbor);
                 }
             }
         }
@@ -353,76 +339,38 @@ static void nc__terrain_mark_chunk_and_neighbors_dirty(const nc_terrain_t* terra
 
 // A block edit can only affect chunks whose one-block meshing border contains the edited block.
 static void nc__terrain_mark_block_chunks_dirty(
-    const nc_terrain_t* terrain,
+    nc_terrain_t* terrain,
     const vkm_ivec3* chunk_coords,
     const vkm_ivec3* local_coords
 ) {
     const int min_x = local_coords->x == 0 ? -1 : 0;
-    const int max_x = local_coords->x == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+    const int max_x = local_coords->x == NC_CHUNK_SIZE - 1 ? 1 : 0;
     const int min_y = local_coords->y == 0 ? -1 : 0;
-    const int max_y = local_coords->y == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+    const int max_y = local_coords->y == NC_CHUNK_SIZE - 1 ? 1 : 0;
     const int min_z = local_coords->z == 0 ? -1 : 0;
-    const int max_z = local_coords->z == NC_MESHER_CHUNK_SIZE - 1 ? 1 : 0;
+    const int max_z = local_coords->z == NC_CHUNK_SIZE - 1 ? 1 : 0;
 
     for (int z = min_z; z <= max_z; z++) {
         for (int y = min_y; y <= max_y; y++) {
             for (int x = min_x; x <= max_x; x++) {
                 vkm_ivec3 affected_coords;
-                if (!nc__terrain_offset_chunk_coords(chunk_coords, x, y, z, &affected_coords)) {
+                if (!nc_chunk_offset_coords(chunk_coords, x, y, z, &affected_coords)) {
                     continue;
                 }
 
                 nc__terrain_chunk_t* affected = nc__terrain_get_chunk(terrain, &affected_coords);
                 if (affected) {
-                    affected->flags |= NC__TERRAIN_CHUNK_MESH_DIRTY_BIT;
+                    nc__terrain_mark_chunk_dirty(terrain, affected);
                 }
             }
         }
     }
 }
 
-static void nc__terrain_block_to_chunk_coords(const vkm_ivec3* block_coords, vkm_ivec3* result) {
-    *result = (vkm_ivec3){ {
-        nc__terrain_floor_divide_by_chunk_size(block_coords->x),
-        nc__terrain_floor_divide_by_chunk_size(block_coords->y),
-        nc__terrain_floor_divide_by_chunk_size(block_coords->z),
-    } };
-}
-
-static void nc__terrain_block_column_to_chunk_column_coords(const vkm_ivec2* block_coords, vkm_ivec2* result) {
-    *result = (vkm_ivec2){ {
-        nc__terrain_floor_divide_by_chunk_size(block_coords->x),
-        nc__terrain_floor_divide_by_chunk_size(block_coords->y),
-    } };
-}
-
-static void nc__terrain_block_to_chunk_local_coords(
-    const vkm_ivec3* block_coords,
-    const vkm_ivec3* chunk_coords,
-    vkm_ivec3* result
-) {
-    *result = (vkm_ivec3){ {
-        nc__terrain_block_to_chunk_local_coord(block_coords->x, chunk_coords->x),
-        nc__terrain_block_to_chunk_local_coord(block_coords->y, chunk_coords->y),
-        nc__terrain_block_to_chunk_local_coord(block_coords->z, chunk_coords->z),
-    } };
-}
-
-static void nc__terrain_block_column_to_chunk_local_coords(
-    const vkm_ivec2* block_coords,
-    const vkm_ivec2* chunk_coords,
-    vkm_ivec2* result
-) {
-    *result = (vkm_ivec2){ {
-        nc__terrain_block_to_chunk_local_coord(block_coords->x, chunk_coords->x),
-        nc__terrain_block_to_chunk_local_coord(block_coords->y, chunk_coords->y),
-    } };
-}
-
 static void nc__terrain_chunk_index_to_local_coords(const uint16_t index, vkm_ivec3* result) {
-    NC_ASSERT(index < NC_MESHER_BLOCKS_PER_CHUNK);
+    NC_ASSERT(index < NC_BLOCKS_PER_CHUNK);
 
-    NC_MESHER_CHUNK_INDEX_TO_COORDS(index, result->x, result->y, result->z);
+    NC_CHUNK_INDEX_TO_COORDS(index, result->x, result->y, result->z);
 }
 
 static bool nc__terrain_get_light_neighbor(
@@ -440,15 +388,15 @@ static bool nc__terrain_get_light_neighbor(
     } };
 
     // Almost every neighbor remains in the current chunk. Avoid a hashmap lookup in that common case.
-    if (neighbor_local_coords.x >= 0 && neighbor_local_coords.x < NC_MESHER_CHUNK_SIZE
-            && neighbor_local_coords.y >= 0 && neighbor_local_coords.y < NC_MESHER_CHUNK_SIZE
-            && neighbor_local_coords.z >= 0 && neighbor_local_coords.z < NC_MESHER_CHUNK_SIZE) {
+    if (neighbor_local_coords.x >= 0 && neighbor_local_coords.x < NC_CHUNK_SIZE
+            && neighbor_local_coords.y >= 0 && neighbor_local_coords.y < NC_CHUNK_SIZE
+            && neighbor_local_coords.z >= 0 && neighbor_local_coords.z < NC_CHUNK_SIZE) {
         *result = (nc__terrain_block_location_t){
             .chunk = chunk,
             .index = (uint16_t)(index
                     + offset.x
-                    + offset.y * NC_MESHER_CHUNK_SIZE
-                    + offset.z * NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE),
+                    + offset.y * NC_CHUNK_SIZE
+                    + offset.z * NC_BLOCK_COLUMNS_PER_CHUNK),
         };
         return true;
     }
@@ -456,15 +404,15 @@ static bool nc__terrain_get_light_neighbor(
     // Crossing a chunk boundary wraps the local coordinate and offsets the owning chunk by one.
     const int chunk_offset_x = neighbor_local_coords.x < 0
             ? -1
-            : neighbor_local_coords.x >= NC_MESHER_CHUNK_SIZE ? 1 : 0;
+            : neighbor_local_coords.x >= NC_CHUNK_SIZE ? 1 : 0;
     const int chunk_offset_y = neighbor_local_coords.y < 0
             ? -1
-            : neighbor_local_coords.y >= NC_MESHER_CHUNK_SIZE ? 1 : 0;
+            : neighbor_local_coords.y >= NC_CHUNK_SIZE ? 1 : 0;
     const int chunk_offset_z = neighbor_local_coords.z < 0
             ? -1
-            : neighbor_local_coords.z >= NC_MESHER_CHUNK_SIZE ? 1 : 0;
+            : neighbor_local_coords.z >= NC_CHUNK_SIZE ? 1 : 0;
     vkm_ivec3 neighbor_chunk_coords;
-    if (!nc__terrain_offset_chunk_coords(
+    if (!nc_chunk_offset_coords(
             &chunk->coords,
             chunk_offset_x,
             chunk_offset_y,
@@ -479,24 +427,24 @@ static bool nc__terrain_get_light_neighbor(
     }
 
     if (neighbor_local_coords.x < 0) {
-        neighbor_local_coords.x = NC_MESHER_CHUNK_SIZE - 1;
-    } else if (neighbor_local_coords.x >= NC_MESHER_CHUNK_SIZE) {
+        neighbor_local_coords.x = NC_CHUNK_SIZE - 1;
+    } else if (neighbor_local_coords.x >= NC_CHUNK_SIZE) {
         neighbor_local_coords.x = 0;
     }
     if (neighbor_local_coords.y < 0) {
-        neighbor_local_coords.y = NC_MESHER_CHUNK_SIZE - 1;
-    } else if (neighbor_local_coords.y >= NC_MESHER_CHUNK_SIZE) {
+        neighbor_local_coords.y = NC_CHUNK_SIZE - 1;
+    } else if (neighbor_local_coords.y >= NC_CHUNK_SIZE) {
         neighbor_local_coords.y = 0;
     }
     if (neighbor_local_coords.z < 0) {
-        neighbor_local_coords.z = NC_MESHER_CHUNK_SIZE - 1;
-    } else if (neighbor_local_coords.z >= NC_MESHER_CHUNK_SIZE) {
+        neighbor_local_coords.z = NC_CHUNK_SIZE - 1;
+    } else if (neighbor_local_coords.z >= NC_CHUNK_SIZE) {
         neighbor_local_coords.z = 0;
     }
 
     *result = (nc__terrain_block_location_t){
         .chunk = neighbor_chunk,
-        .index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(
+        .index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(
                 neighbor_local_coords.x,
                 neighbor_local_coords.y,
                 neighbor_local_coords.z),
@@ -512,7 +460,6 @@ static void nc__terrain_queue_light_node(
     light_node_queue** queued_nodes = &location->chunk->queued_light_nodes[channel];
     if (!*queued_nodes) {
         *queued_nodes = calloc(1, sizeof(**queued_nodes));
-        terrain->light_queue_bitsets_allocated = true;
     }
 
     if (light_node_queue_get(*queued_nodes, location->index)) {
@@ -549,16 +496,16 @@ static void nc__terrain_queue_light_neighbors(
 }
 
 static void nc__terrain_queue_chunk_boundary_light_removal(nc_terrain_t* terrain, const nc__terrain_chunk_t* chunk) {
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_MESHER_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-                if (x != 0 && x != NC_MESHER_CHUNK_SIZE - 1
-                        && y != 0 && y != NC_MESHER_CHUNK_SIZE - 1
-                        && z != 0 && z != NC_MESHER_CHUNK_SIZE - 1) {
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int y = 0; y < NC_CHUNK_SIZE; y++) {
+            for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+                if (x != 0 && x != NC_CHUNK_SIZE - 1
+                        && y != 0 && y != NC_CHUNK_SIZE - 1
+                        && z != 0 && z != NC_CHUNK_SIZE - 1) {
                     continue;
                 }
 
-                const uint16_t index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z);
+                const uint16_t index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(x, y, z);
                 const uint8_t block_light = nc__terrain_get_block_light(chunk->light_levels[index]);
                 if (block_light) {
                     nc__terrain_light_removal_bfs_queue_push(
@@ -585,7 +532,7 @@ static void nc__terrain_queue_chunk_boundary_light_removal(nc_terrain_t* terrain
 }
 
 static void nc__terrain_seed_chunk_light(nc_terrain_t* terrain, nc__terrain_chunk_t* chunk) {
-    for (uint16_t index = 0; index < NC_MESHER_BLOCKS_PER_CHUNK; index++) {
+    for (uint16_t index = 0; index < NC_BLOCKS_PER_CHUNK; index++) {
         const nc_block_t* block = nc_block_registry_get(
                 terrain->block_registry,
                 (nc_block_type_t)chunk->blocks[index]);
@@ -601,7 +548,7 @@ static void nc__terrain_seed_chunk_light(nc_terrain_t* terrain, nc__terrain_chun
     for (int i = 0; i < (int)NC_COUNTOF(nc__terrain_light_neighbor_offsets); i++) {
         const vkm_bvec3 offset = nc__terrain_light_neighbor_offsets[i];
         vkm_ivec3 neighbor_coords;
-        if (!nc__terrain_offset_chunk_coords(
+        if (!nc_chunk_offset_coords(
                 &chunk->coords, offset.x, offset.y, offset.z, &neighbor_coords)) {
             continue;
         }
@@ -610,12 +557,12 @@ static void nc__terrain_seed_chunk_light(nc_terrain_t* terrain, nc__terrain_chun
             continue;
         }
 
-        for (int b = 0; b < NC_MESHER_CHUNK_SIZE; b++) {
-            for (int a = 0; a < NC_MESHER_CHUNK_SIZE; a++) {
-                const int x = offset.x < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.x > 0 ? 0 : a;
-                const int y = offset.y < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.y > 0 ? 0 : offset.x ? a : b;
-                const int z = offset.z < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.z > 0 ? 0 : b;
-                const uint16_t index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z);
+        for (int b = 0; b < NC_CHUNK_SIZE; b++) {
+            for (int a = 0; a < NC_CHUNK_SIZE; a++) {
+                const int x = offset.x < 0 ? NC_CHUNK_SIZE - 1 : offset.x > 0 ? 0 : a;
+                const int y = offset.y < 0 ? NC_CHUNK_SIZE - 1 : offset.y > 0 ? 0 : offset.x ? a : b;
+                const int z = offset.z < 0 ? NC_CHUNK_SIZE - 1 : offset.z > 0 ? 0 : b;
+                const uint16_t index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(x, y, z);
                 if (nc__terrain_get_block_light(neighbor->light_levels[index]) > 1) {
                     const nc__terrain_block_location_t location = { .chunk = neighbor, .index = index };
                     nc__terrain_queue_light_node(terrain, NC__TERRAIN_LIGHT_CHANNEL_BLOCK, &location);
@@ -660,25 +607,25 @@ static void nc__terrain_queue_sky_light_edge_both_ways(
 }
 
 static void nc__terrain_queue_chunk_sky_light_frontier(nc_terrain_t* terrain, nc__terrain_chunk_t* chunk) {
-    const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(&chunk->coords);
+    const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(&chunk->coords);
     nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
     NC_ASSERT(column);
-    const int64_t chunk_min_y = (int64_t)chunk->coords.y * NC_MESHER_CHUNK_SIZE;
-    const int64_t chunk_max_y = chunk_min_y + NC_MESHER_CHUNK_SIZE - 1;
+    const int64_t chunk_min_y = (int64_t)chunk->coords.y * NC_CHUNK_SIZE;
+    const int64_t chunk_max_y = chunk_min_y + NC_CHUNK_SIZE - 1;
 
     // Within a chunk, direct sky can enter indirect space only across a horizontal heightmap discontinuity. Check only
     // the vertical interval between the two top blockers instead of inspecting all six neighbors of every voxel.
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
             const int32_t top = (*column)->top_light_blocking_blocks[column_index];
             for (int direction = 0; direction < 2; direction++) {
                 const int neighbor_x = x + (direction == 0);
                 const int neighbor_z = z + (direction == 1);
-                if (neighbor_x >= NC_MESHER_CHUNK_SIZE || neighbor_z >= NC_MESHER_CHUNK_SIZE) {
+                if (neighbor_x >= NC_CHUNK_SIZE || neighbor_z >= NC_CHUNK_SIZE) {
                     continue;
                 }
-                const int neighbor_column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(neighbor_x, neighbor_z);
+                const int neighbor_column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(neighbor_x, neighbor_z);
                 const int32_t neighbor_top = (*column)->top_light_blocking_blocks[neighbor_column_index];
                 if (top == neighbor_top) {
                     continue;
@@ -694,11 +641,11 @@ static void nc__terrain_queue_chunk_sky_light_frontier(nc_terrain_t* terrain, nc
                     const int y = (int)(world_y - chunk_min_y);
                     const nc__terrain_block_location_t location = {
                         .chunk = chunk,
-                        .index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z),
+                        .index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(x, y, z),
                     };
                     const nc__terrain_block_location_t neighbor = {
                         .chunk = chunk,
-                        .index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(neighbor_x, y, neighbor_z),
+                        .index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(neighbor_x, y, neighbor_z),
                     };
                     nc__terrain_queue_sky_light_edge_both_ways(terrain, &location, &neighbor, 0);
                 }
@@ -711,7 +658,7 @@ static void nc__terrain_queue_chunk_sky_light_frontier(nc_terrain_t* terrain, nc
     for (int i = 0; i < (int)NC_COUNTOF(nc__terrain_light_neighbor_offsets); i++) {
         const vkm_bvec3 offset = nc__terrain_light_neighbor_offsets[i];
         vkm_ivec3 neighbor_coords;
-        if (!nc__terrain_offset_chunk_coords(
+        if (!nc_chunk_offset_coords(
                 &chunk->coords, offset.x, offset.y, offset.z, &neighbor_coords)) {
             continue;
         }
@@ -720,21 +667,21 @@ static void nc__terrain_queue_chunk_sky_light_frontier(nc_terrain_t* terrain, nc
             continue;
         }
 
-        for (int b = 0; b < NC_MESHER_CHUNK_SIZE; b++) {
-            for (int a = 0; a < NC_MESHER_CHUNK_SIZE; a++) {
-                const int x = offset.x < 0 ? 0 : offset.x > 0 ? NC_MESHER_CHUNK_SIZE - 1 : a;
-                const int y = offset.y < 0 ? 0 : offset.y > 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.x ? a : b;
-                const int z = offset.z < 0 ? 0 : offset.z > 0 ? NC_MESHER_CHUNK_SIZE - 1 : b;
-                const int neighbor_x = offset.x < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.x > 0 ? 0 : x;
-                const int neighbor_y = offset.y < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.y > 0 ? 0 : y;
-                const int neighbor_z = offset.z < 0 ? NC_MESHER_CHUNK_SIZE - 1 : offset.z > 0 ? 0 : z;
+        for (int b = 0; b < NC_CHUNK_SIZE; b++) {
+            for (int a = 0; a < NC_CHUNK_SIZE; a++) {
+                const int x = offset.x < 0 ? 0 : offset.x > 0 ? NC_CHUNK_SIZE - 1 : a;
+                const int y = offset.y < 0 ? 0 : offset.y > 0 ? NC_CHUNK_SIZE - 1 : offset.x ? a : b;
+                const int z = offset.z < 0 ? 0 : offset.z > 0 ? NC_CHUNK_SIZE - 1 : b;
+                const int neighbor_x = offset.x < 0 ? NC_CHUNK_SIZE - 1 : offset.x > 0 ? 0 : x;
+                const int neighbor_y = offset.y < 0 ? NC_CHUNK_SIZE - 1 : offset.y > 0 ? 0 : y;
+                const int neighbor_z = offset.z < 0 ? NC_CHUNK_SIZE - 1 : offset.z > 0 ? 0 : z;
                 const nc__terrain_block_location_t location = {
                     .chunk = chunk,
-                    .index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z),
+                    .index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(x, y, z),
                 };
                 const nc__terrain_block_location_t neighbor = {
                     .chunk = neighbor_chunk,
-                    .index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(neighbor_x, neighbor_y, neighbor_z),
+                    .index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(neighbor_x, neighbor_y, neighbor_z),
                 };
                 nc__terrain_queue_sky_light_edge_both_ways(terrain, &location, &neighbor, offset.y);
             }
@@ -743,27 +690,27 @@ static void nc__terrain_queue_chunk_sky_light_frontier(nc_terrain_t* terrain, nc
 }
 
 static void nc__terrain_seed_chunk_sky_light(nc_terrain_t* terrain, nc__terrain_chunk_t* chunk) {
-    const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(&chunk->coords);
+    const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(&chunk->coords);
     nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
     NC_ASSERT(column);
 
     // The heightmap already guarantees that every block above its top blocker is transparent. Assign only that
     // direct-sky interval without repeating a block-registry lookup for every voxel or queueing every voxel. A later
     // frontier scan queues only sources that can actually improve a darker neighbor.
-    const int64_t chunk_min_y = (int64_t)chunk->coords.y * NC_MESHER_CHUNK_SIZE;
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
+    const int64_t chunk_min_y = (int64_t)chunk->coords.y * NC_CHUNK_SIZE;
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
             int64_t first_y = (int64_t)(*column)->top_light_blocking_blocks[column_index] + 1 - chunk_min_y;
             if (first_y < 0) {
                 first_y = 0;
             }
-            if (first_y >= NC_MESHER_CHUNK_SIZE) {
+            if (first_y >= NC_CHUNK_SIZE) {
                 continue;
             }
 
-            for (int y = (int)first_y; y < NC_MESHER_CHUNK_SIZE; y++) {
-                const uint16_t index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z);
+            for (int y = (int)first_y; y < NC_CHUNK_SIZE; y++) {
+                const uint16_t index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(x, y, z);
                 nc__terrain_set_sky_light(&chunk->light_levels[index], 15);
             }
         }
@@ -777,13 +724,13 @@ static void nc__terrain_reconcile_sky_light_cell(
     const vkm_ivec3 local_coords,
     const nc__terrain_sky_light_reconcile_mode_t mode
 ) {
-    const uint16_t index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(
+    const uint16_t index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(
             local_coords.x, local_coords.y, local_coords.z);
     const nc_block_t* block = nc_block_registry_get(
             terrain->block_registry,
             (nc_block_type_t)chunk->blocks[index]);
-    const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(local_coords.x, local_coords.z);
-    const int32_t world_y = nc__terrain_chunk_local_to_block_coord(chunk->coords.y, local_coords.y);
+    const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(local_coords.x, local_coords.z);
+    const int32_t world_y = nc_chunk_local_coord_to_block_coord(chunk->coords.y, local_coords.y);
     const uint8_t old_light = nc__terrain_get_sky_light(chunk->light_levels[index]);
     const bool direct_sky = nc__terrain_block_has_direct_sky(column, column_index, world_y, block);
 
@@ -818,15 +765,15 @@ static void nc__terrain_reconcile_chunk_column_sky_light(
     nc_terrain_t* terrain,
     const vkm_ivec2 column_coords,
     const nc__terrain_chunk_column_t* column,
-    const int32_t old_top_light_blocking_blocks[NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE]
+    const int32_t old_top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK]
 ) {
-    nc__terrain_sky_light_chunk_range_t ranges[NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE];
+    nc__terrain_sky_light_chunk_range_t ranges[NC_BLOCK_COLUMNS_PER_CHUNK];
     int32_t first_affected_chunk_y = INT32_MAX;
     int32_t last_affected_chunk_y = INT32_MIN;
 
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
             nc__terrain_sky_light_chunk_range_t* range = &ranges[column_index];
             const int32_t old_top = old_top_light_blocking_blocks[column_index];
             const int32_t new_top = column->top_light_blocking_blocks[column_index];
@@ -839,8 +786,8 @@ static void nc__terrain_reconcile_chunk_column_sky_light(
             // Only blocks above the lower height and at or below the higher height changed direct-sky status.
             range->lower_top = old_top < new_top ? old_top : new_top;
             range->upper_top = old_top > new_top ? old_top : new_top;
-            range->first_chunk_y = nc__terrain_floor_divide_by_chunk_size(range->lower_top + 1);
-            range->last_chunk_y = nc__terrain_floor_divide_by_chunk_size(range->upper_top);
+            range->first_chunk_y = nc_block_coord_to_chunk_coord(range->lower_top + 1);
+            range->last_chunk_y = nc_block_coord_to_chunk_coord(range->upper_top);
             if (range->first_chunk_y < column->min_loaded_chunk_y) {
                 range->first_chunk_y = column->min_loaded_chunk_y;
             }
@@ -866,11 +813,11 @@ static void nc__terrain_reconcile_chunk_column_sky_light(
             continue;
         }
 
-        const int64_t chunk_min_y = (int64_t)chunk_y * NC_MESHER_CHUNK_SIZE;
-        const int64_t chunk_max_y = chunk_min_y + NC_MESHER_CHUNK_SIZE - 1;
-        for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-            for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
-                const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(x, z);
+        const int64_t chunk_min_y = (int64_t)chunk_y * NC_CHUNK_SIZE;
+        const int64_t chunk_max_y = chunk_min_y + NC_CHUNK_SIZE - 1;
+        for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+            for (int x = 0; x < NC_CHUNK_SIZE; x++) {
+                const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z);
                 const nc__terrain_sky_light_chunk_range_t* range = &ranges[column_index];
                 if (chunk_y < range->first_chunk_y || chunk_y > range->last_chunk_y) {
                     continue;
@@ -908,7 +855,7 @@ static void nc__terrain_reconcile_block_column_sky_light(
         if (!chunk) {
             continue;
         }
-        for (int y = 0; y < NC_MESHER_CHUNK_SIZE; y++) {
+        for (int y = 0; y < NC_CHUNK_SIZE; y++) {
             nc__terrain_reconcile_sky_light_cell(
                     terrain,
                     column,
@@ -937,33 +884,33 @@ static bool nc__terrain_normal_is_zero(const vkm_bvec3 normal) {
 
 bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_coords, uint16_t* block) {
     vkm_ivec3 chunk_coords;
-    nc__terrain_block_to_chunk_coords(block_coords, &chunk_coords);
+    nc_block_to_chunk_coords(block_coords, &chunk_coords);
     const nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
     if (!chunk) {
         return false;
     }
 
     vkm_ivec3 local_coords;
-    nc__terrain_block_to_chunk_local_coords(block_coords, &chunk_coords, &local_coords);
+    nc_block_to_chunk_local_coords(block_coords, &chunk_coords, &local_coords);
 
     if (block) {
-        *block = chunk->blocks[NC_MESHER_CHUNK_COORDS_TO_INDEX(local_coords.x, local_coords.y, local_coords.z)];
+        *block = chunk->blocks[NC_CHUNK_COORDS_TO_INDEX(local_coords.x, local_coords.y, local_coords.z)];
     }
     return true;
 }
 
 static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* block_coords, const uint16_t block) {
     vkm_ivec3 chunk_coords;
-    nc__terrain_block_to_chunk_coords(block_coords, &chunk_coords);
+    nc_block_to_chunk_coords(block_coords, &chunk_coords);
     nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
     if (!chunk) {
         return false;
     }
 
     vkm_ivec3 local_coords;
-    nc__terrain_block_to_chunk_local_coords(block_coords, &chunk_coords, &local_coords);
+    nc_block_to_chunk_local_coords(block_coords, &chunk_coords, &local_coords);
 
-    const uint16_t index = (uint16_t)NC_MESHER_CHUNK_COORDS_TO_INDEX(local_coords.x, local_coords.y, local_coords.z);
+    const uint16_t index = (uint16_t)NC_CHUNK_COORDS_TO_INDEX(local_coords.x, local_coords.y, local_coords.z);
     uint16_t* slot = &chunk->blocks[index];
     if (*slot != block) {
         const nc_block_t* old_block = nc_block_registry_get(terrain->block_registry, (nc_block_type_t)*slot);
@@ -1004,10 +951,10 @@ static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* 
 
         nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                 &terrain->chunk_columns,
-                nc__terrain_chunk_column_coords(&chunk_coords));
+                nc_chunk_to_chunk_column_coords(&chunk_coords));
         NC_ASSERT(column);
 
-        const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(local_coords.x, local_coords.z);
+        const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(local_coords.x, local_coords.z);
         if (new_block->flags & NC_BLOCK_FLAG_BLOCKS_LIGHT) {
             if (old_sky_light_level
                     && terrain->sky_light_has_propagated
@@ -1031,7 +978,7 @@ static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* 
                     column_index);
             nc__terrain_update_dirty_chunk_column(
                     terrain,
-                    nc__terrain_chunk_column_coords(&chunk_coords),
+                    nc_chunk_to_chunk_column_coords(&chunk_coords),
                     *column);
         }
 
@@ -1048,7 +995,7 @@ static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* 
             }
             nc__terrain_reconcile_block_column_sky_light(
                     terrain,
-                    nc__terrain_chunk_column_coords(&chunk_coords),
+                    nc_chunk_to_chunk_column_coords(&chunk_coords),
                     *column,
                     local_coords.x,
                     local_coords.z);
@@ -1074,16 +1021,16 @@ static void nc__terrain_chunk_fini(nc_renderer_t* renderer, nc__terrain_chunk_t*
 }
 
 // The blocks pointer is optional. If NULL, then the chunk will be filled with air.
-void nc_terrain_load_or_replace_chunk(
+static void nc__terrain_load_or_replace_chunk(
     nc_terrain_t* terrain,
     const vkm_ivec3* coords,
-    const uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK]
+    const uint16_t blocks[NC_BLOCKS_PER_CHUNK]
 ) {
-    NC_ASSERT(nc__terrain_chunk_coords_are_valid(coords));
+    NC_ASSERT(nc_chunk_coords_are_valid(coords));
 
     nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
     if (chunk) {
-        int32_t old_top_light_blocking_blocks[NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE];
+        int32_t old_top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK];
         nc__terrain_queue_chunk_boundary_light_removal(terrain, chunk);
         memset(chunk->light_levels, 0, sizeof(chunk->light_levels));
         if (blocks) {
@@ -1093,16 +1040,16 @@ void nc_terrain_load_or_replace_chunk(
         }
         nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                 &terrain->chunk_columns,
-                nc__terrain_chunk_column_coords(coords));
+                nc_chunk_to_chunk_column_coords(coords));
         NC_ASSERT(column);
         memcpy(old_top_light_blocking_blocks,
                 (*column)->top_light_blocking_blocks,
                 sizeof(old_top_light_blocking_blocks));
         nc__terrain_chunk_column_dirty_bitset_set_all(&(*column)->dirty_top_light_blocking_blocks);
-        nc__terrain_update_dirty_chunk_column(terrain, nc__terrain_chunk_column_coords(coords), *column);
+        nc__terrain_update_dirty_chunk_column(terrain, nc_chunk_to_chunk_column_coords(coords), *column);
         nc__terrain_reconcile_chunk_column_sky_light(
                 terrain,
-                nc__terrain_chunk_column_coords(coords),
+                nc_chunk_to_chunk_column_coords(coords),
                 *column,
                 old_top_light_blocking_blocks);
         nc__terrain_seed_chunk_light(terrain, chunk);
@@ -1129,11 +1076,11 @@ void nc_terrain_load_or_replace_chunk(
     NC_ASSERT(chunk_was_added);
     (void)chunk_was_added;
 
-    const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(coords);
+    const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(coords);
     nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
             &terrain->chunk_columns,
             column_coords);
-    int32_t old_top_light_blocking_blocks[NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE];
+    int32_t old_top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK];
     if (column) {
         memcpy(old_top_light_blocking_blocks,
                 (*column)->top_light_blocking_blocks,
@@ -1152,7 +1099,7 @@ void nc_terrain_load_or_replace_chunk(
         new_column->ref_count = 1;
         new_column->min_loaded_chunk_y = coords->y;
         new_column->max_loaded_chunk_y = coords->y;
-        for (int i = 0; i < NC_MESHER_CHUNK_SIZE * NC_MESHER_CHUNK_SIZE; i++) {
+        for (int i = 0; i < NC_BLOCK_COLUMNS_PER_CHUNK; i++) {
             new_column->top_light_blocking_blocks[i] = INT32_MIN;
         }
         nc__terrain_update_chunk_column_from_chunk(terrain, new_column, chunk);
@@ -1182,15 +1129,15 @@ void nc_terrain_load_or_replace_chunk(
     nc__terrain_mark_chunk_and_neighbors_dirty(terrain, coords);
 }
 
-void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_ivec3* coords) {
-    NC_ASSERT(nc__terrain_chunk_coords_are_valid(coords));
+static void nc__terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_ivec3* coords) {
+    NC_ASSERT(nc_chunk_coords_are_valid(coords));
 
     nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
     if (!chunk) {
         return;
     }
 
-    const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(coords);
+    const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(coords);
     nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
     NC_ASSERT(column && (*column)->ref_count > 0);
     if (nc__terrain_chunk_column_dirty_bitset_any(&(*column)->dirty_top_light_blocking_blocks)) {
@@ -1210,22 +1157,31 @@ void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, con
         NC_ASSERT(column_was_removed);
         (void)column_was_removed;
     } else if (coords->y == (*column)->min_loaded_chunk_y || coords->y == (*column)->max_loaded_chunk_y) {
-        int32_t min_loaded_chunk_y = INT32_MAX;
-        int32_t max_loaded_chunk_y = INT32_MIN;
-        nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
-        while (nc__terrain_chunk_map_next(&it)) {
-            if (it.key.x == coords->x && it.key.z == coords->z) {
-                if (it.key.y < min_loaded_chunk_y) {
-                    min_loaded_chunk_y = it.key.y;
-                }
-                if (it.key.y > max_loaded_chunk_y) {
-                    max_loaded_chunk_y = it.key.y;
+        // Only an extreme can change. Find the new min/max chunk.
+        if (coords->y == (*column)->min_loaded_chunk_y) {
+            int32_t new_min_loaded_chunk_y = INT32_MAX;
+            for (int64_t y = (int64_t)coords->y + 1; y <= (*column)->max_loaded_chunk_y; y++) {
+                const vkm_ivec3 candidate_coords = { { coords->x, (int32_t)y, coords->z } };
+                if (nc__terrain_get_chunk(terrain, &candidate_coords)) {
+                    new_min_loaded_chunk_y = (int32_t)y;
+                    break;
                 }
             }
+            NC_ASSERT(new_min_loaded_chunk_y != INT32_MAX);
+            (*column)->min_loaded_chunk_y = new_min_loaded_chunk_y;
         }
-        NC_ASSERT(min_loaded_chunk_y != INT32_MAX && max_loaded_chunk_y != INT32_MIN);
-        (*column)->min_loaded_chunk_y = min_loaded_chunk_y;
-        (*column)->max_loaded_chunk_y = max_loaded_chunk_y;
+        if (coords->y == (*column)->max_loaded_chunk_y) {
+            int32_t new_max_loaded_chunk_y = INT32_MIN;
+            for (int64_t y = (int64_t)coords->y - 1; y >= (*column)->min_loaded_chunk_y; y--) {
+                const vkm_ivec3 candidate_coords = { { coords->x, (int32_t)y, coords->z } };
+                if (nc__terrain_get_chunk(terrain, &candidate_coords)) {
+                    new_max_loaded_chunk_y = (int32_t)y;
+                    break;
+                }
+            }
+            NC_ASSERT(new_max_loaded_chunk_y != INT32_MIN);
+            (*column)->max_loaded_chunk_y = new_max_loaded_chunk_y;
+        }
     }
 
     nc__terrain_mark_chunk_and_neighbors_dirty(terrain, coords);
@@ -1234,6 +1190,256 @@ void nc_terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, con
 
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain) {
     return nc__terrain_chunk_map_count(&terrain->chunks);
+}
+
+static void nc__terrain_generator_generate_chunk(
+    const nc__terrain_generator_t* generator,
+    const vkm_ivec3* chunk_coords,
+    uint16_t blocks[NC_BLOCKS_PER_CHUNK]
+) {
+    (void)generator->seed;
+    for (int index = 0; index < NC_BLOCKS_PER_CHUNK; index++) {
+        vkm_bvec3 local_coords;
+        NC_CHUNK_INDEX_TO_COORDS(index, local_coords.x, local_coords.y, local_coords.z);
+
+        const int32_t x = nc_chunk_local_coord_to_block_coord(chunk_coords->x, local_coords.x);
+        const int32_t y = nc_chunk_local_coord_to_block_coord(chunk_coords->y, local_coords.y);
+        const int32_t z = nc_chunk_local_coord_to_block_coord(chunk_coords->z, local_coords.z);
+        const int32_t height = (int32_t)((15.0f + vkm_sin((float)z / 3.0f) * 3.0f
+                + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
+
+        if (y >= height) {
+            blocks[index] = NC_BLOCK_TYPE_AIR;
+        } else if (y == height - 1) {
+            blocks[index] = NC_BLOCK_TYPE_GRASS;
+        } else if (y > height - 5) {
+            blocks[index] = NC_BLOCK_TYPE_DIRT;
+        } else {
+            blocks[index] = NC_BLOCK_TYPE_STONE;
+        }
+    }
+}
+
+static bool nc__terrain_chunk_is_in_ellipsoid(
+    const vkm_ivec3* coords,
+    const vkm_ivec3* center,
+    const uint32_t radius_xz,
+    const uint32_t radius_y
+) {
+    const int64_t dx = (int64_t)coords->x - center->x;
+    const int64_t dy = (int64_t)coords->y - center->y;
+    const int64_t dz = (int64_t)coords->z - center->z;
+    if ((radius_xz == 0 && (dx != 0 || dz != 0)) || (radius_y == 0 && dy != 0)) {
+        return false;
+    }
+
+    double distance = 0.0;
+    if (radius_xz) {
+        distance += ((double)dx * (double)dx + (double)dz * (double)dz)
+                / ((double)radius_xz * (double)radius_xz);
+    }
+    if (radius_y) {
+        distance += (double)dy * (double)dy / ((double)radius_y * (double)radius_y);
+    }
+    return distance <= 1.0;
+}
+
+static uint32_t nc__terrain_abs_chunk_delta(const int32_t a, const int32_t b) {
+    const int64_t delta = (int64_t)a - b;
+    return (uint32_t)(delta < 0 ? -delta : delta);
+}
+
+// Appends every currently missing chunk in the load ellipsoid, nearest shells first. "Shell" is the integer
+// Chebyshev distance max(|dx|, |dy|, |dz|) from center. Iterating shell before y/z/x makes the FIFO load the center,
+// then its surrounding cube surface, and so on instead of drawing a snake from one corner of the bounding box.
+//
+// The four loops are therefore one priority loop plus three coordinate loops. The coordinate loops visit the
+// ellipsoid's bounding box; the shell-distance and ellipsoid tests reject points that do not belong to this shell or
+// to the ellipsoid. This repeats the bounding-box walk per shell, but queue construction is infrequent and the simple
+// ordering avoids another sortable work array.
+static void nc__terrain_enqueue_load_region(
+    nc_terrain_t* terrain,
+    const vkm_ivec3* center,
+    const uint32_t radius_xz,
+    const uint32_t radius_y
+) {
+    const uint32_t max_radius = radius_xz > radius_y ? radius_xz : radius_y;
+    for (uint32_t shell = 0; shell <= max_radius; shell++) {
+        for (int64_t y = (int64_t)center->y - radius_y; y <= (int64_t)center->y + radius_y; y++) {
+            for (int64_t z = (int64_t)center->z - radius_xz; z <= (int64_t)center->z + radius_xz; z++) {
+                for (int64_t x = (int64_t)center->x - radius_xz; x <= (int64_t)center->x + radius_xz; x++) {
+                    if (x < NC_MIN_CHUNK_COORD || x > NC_MAX_CHUNK_COORD
+                            || y < NC_MIN_CHUNK_COORD || y > NC_MAX_CHUNK_COORD
+                            || z < NC_MIN_CHUNK_COORD || z > NC_MAX_CHUNK_COORD) {
+                        continue;
+                    }
+                    const vkm_ivec3 coords = { { (int32_t)x, (int32_t)y, (int32_t)z } };
+                    const uint32_t dx = nc__terrain_abs_chunk_delta(coords.x, center->x);
+                    const uint32_t dy = nc__terrain_abs_chunk_delta(coords.y, center->y);
+                    const uint32_t dz = nc__terrain_abs_chunk_delta(coords.z, center->z);
+                    const uint32_t shell_distance = dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
+                    if (shell_distance != shell
+                            || !nc__terrain_chunk_is_in_ellipsoid(&coords, center, radius_xz, radius_y)
+                            || nc__terrain_get_chunk(terrain, &coords)) {
+                        continue;
+                    }
+                    nc__terrain_stream_queue_push(&terrain->load_queue, coords);
+                }
+            }
+        }
+    }
+}
+
+// Enqueues only the retention-ellipsoid slice abandoned by an ordinary one-chunk move. Iterating the old bounding
+// box is bounded by the configured radii and avoids distance-testing the entire loaded hashmap. Queue entries store
+// coordinates, so a later move or unload cannot leave dangling chunk pointers; pop-time validation rejects stale
+// entries if the player moves back into their retention range.
+static void nc__terrain_enqueue_incremental_unloads(
+    nc_terrain_t* terrain,
+    const vkm_ivec3* old_center,
+    const vkm_ivec3* new_center,
+    const uint32_t radius_xz,
+    const uint32_t radius_y
+) {
+    for (int64_t y = (int64_t)old_center->y - radius_y; y <= (int64_t)old_center->y + radius_y; y++) {
+        for (int64_t z = (int64_t)old_center->z - radius_xz; z <= (int64_t)old_center->z + radius_xz; z++) {
+            for (int64_t x = (int64_t)old_center->x - radius_xz; x <= (int64_t)old_center->x + radius_xz; x++) {
+                if (x < NC_MIN_CHUNK_COORD || x > NC_MAX_CHUNK_COORD
+                        || y < NC_MIN_CHUNK_COORD || y > NC_MAX_CHUNK_COORD
+                        || z < NC_MIN_CHUNK_COORD || z > NC_MAX_CHUNK_COORD) {
+                    continue;
+                }
+                const vkm_ivec3 coords = { { (int32_t)x, (int32_t)y, (int32_t)z } };
+                if (nc__terrain_chunk_is_in_ellipsoid(&coords, old_center, radius_xz, radius_y)
+                        && !nc__terrain_chunk_is_in_ellipsoid(&coords, new_center, radius_xz, radius_y)) {
+                    nc__terrain_stream_queue_push(&terrain->unload_queue, coords);
+                }
+            }
+        }
+    }
+}
+
+static void nc__terrain_rebuild_streaming_queues(
+    nc_terrain_t* terrain,
+    const vkm_ivec3* center,
+    const uint32_t retain_radius_xz,
+    const uint32_t retain_radius_y
+) {
+    // Clearing a TDS queue drops pending entries but retains its allocation. It does not load/unload any chunk.
+    // Teleports invalidate both old priorities: rebuild unloads from actual residency and loads around the new center.
+    nc__terrain_stream_queue_clear(&terrain->load_queue);
+    nc__terrain_stream_queue_clear(&terrain->unload_queue);
+
+    nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
+    while (nc__terrain_chunk_map_next(&it)) {
+        if (!nc__terrain_chunk_is_in_ellipsoid(&it.key, center, retain_radius_xz, retain_radius_y)) {
+            nc__terrain_stream_queue_push(&terrain->unload_queue, it.key);
+        }
+    }
+    nc__terrain_enqueue_load_region(
+            terrain,
+            center,
+            terrain->last_streaming_radius_xz,
+            terrain->last_streaming_radius_y);
+}
+
+void nc_terrain_update(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_vec3* player_position) {
+    const uint64_t start = SDL_GetTicksNS();
+    terrain->timing_stats = (nc_terrain_timing_stats_t){ 0 };
+    terrain->prepare_budget_ns = 0;
+    vkm_ivec3 center;
+    if (!nc_world_position_to_chunk_coords(player_position, &center)) {
+        return;
+    }
+
+    const uint16_t radius_xz = nc_cvar_get_terrain_load_radius_xz();
+    const uint16_t radius_y = nc_cvar_get_terrain_load_radius_y();
+    const uint16_t hysteresis = nc_cvar_get_terrain_hysteresis();
+    const uint32_t retain_radius_xz = (uint32_t)radius_xz + hysteresis;
+    const uint32_t retain_radius_y = (uint32_t)radius_y + hysteresis;
+    const bool configuration_changed = radius_xz != terrain->last_streaming_radius_xz
+            || radius_y != terrain->last_streaming_radius_y
+            || hysteresis != terrain->last_streaming_hysteresis;
+    const bool center_changed = !terrain->streaming_center_is_valid
+            || center.x != terrain->streaming_center.x
+            || center.y != terrain->streaming_center.y
+            || center.z != terrain->streaming_center.z;
+
+    if (center_changed || configuration_changed) {
+        const bool teleport = !terrain->streaming_center_is_valid || configuration_changed
+                || nc__terrain_abs_chunk_delta(center.x, terrain->streaming_center.x) > 1
+                || nc__terrain_abs_chunk_delta(center.y, terrain->streaming_center.y) > 1
+                || nc__terrain_abs_chunk_delta(center.z, terrain->streaming_center.z) > 1;
+        const vkm_ivec3 old_center = terrain->streaming_center;
+        terrain->streaming_center = center;
+        terrain->last_streaming_radius_xz = radius_xz;
+        terrain->last_streaming_radius_y = radius_y;
+        terrain->last_streaming_hysteresis = hysteresis;
+        terrain->streaming_center_is_valid = true;
+
+        if (teleport) {
+            nc__terrain_rebuild_streaming_queues(terrain, &center, retain_radius_xz, retain_radius_y);
+        } else {
+            nc__terrain_enqueue_incremental_unloads(
+                    terrain, &old_center, &center, retain_radius_xz, retain_radius_y);
+            // A FIFO assembled over several positions makes terrain crawl along the old path. Refresh only the
+            // missing-load backlog so the current center is first. Queue clear cancels work only; resident chunks
+            // remain in the hashmap, and enqueue_load_region filters them with coordinate lookups.
+            nc__terrain_stream_queue_clear(&terrain->load_queue);
+            nc__terrain_enqueue_load_region(terrain, &center, radius_xz, radius_y);
+        }
+    }
+
+    // TODO: Make the streaming budget adaptable with FPS.
+    // In the future, when we have a proper server-client, it will be adaptable to tickrate instead of FPS.
+    const double budget_ms = nc_cvar_get_terrain_streaming_budget_ms();
+    if (!(budget_ms > 0.0)) {
+        return;
+    }
+    const uint64_t budget_ns = budget_ms >= (double)UINT64_MAX / 1000000.0
+            ? UINT64_MAX
+            : (uint64_t)(budget_ms * 1000000.0);
+    // Residency owns the first half of the configured terrain budget; the other half is carried into lighting and
+    // meshing by prepare_budget_ns. Within residency, reserve half (one quarter of the total) for unloads so an
+    // expensive generation cannot starve memory reclamation. Unloads run first and donate unused time to loads.
+    // Each chunk operation is atomic, so one operation may overrun its boundary; the next operation never starts
+    // after the relevant deadline.
+    const uint64_t residency_budget_ns = budget_ns / 2;
+    const uint64_t residency_start = SDL_GetTicksNS();
+    const uint64_t unload_budget_ns = residency_budget_ns / 2;
+    while (nc__terrain_stream_queue_count(&terrain->unload_queue)
+            && SDL_GetTicksNS() - residency_start < unload_budget_ns) {
+        const vkm_ivec3 coords = nc__terrain_stream_queue_pop(&terrain->unload_queue);
+        if (nc__terrain_get_chunk(terrain, &coords)
+                && !nc__terrain_chunk_is_in_ellipsoid(
+                        &coords, &terrain->streaming_center, retain_radius_xz, retain_radius_y)) {
+            nc__terrain_unload_chunk(terrain, renderer, &coords);
+        }
+    }
+    const uint64_t unloading_end = SDL_GetTicksNS();
+    terrain->timing_stats.unloading_ms = (double)(unloading_end - residency_start) / 1000000.0;
+
+    // Unused unload time is donated to loading, but loading can never consume the unload reservation.
+    // This ensures the memory usage never keeps increasing until the time comes to unload chunks.
+    while (nc__terrain_stream_queue_count(&terrain->load_queue)
+            && SDL_GetTicksNS() - residency_start < residency_budget_ns) {
+        const vkm_ivec3 coords = nc__terrain_stream_queue_pop(&terrain->load_queue);
+        if (!nc__terrain_get_chunk(terrain, &coords)
+                && nc__terrain_chunk_is_in_ellipsoid(
+                        &coords, &terrain->streaming_center, radius_xz, radius_y)) {
+            uint16_t blocks[NC_BLOCKS_PER_CHUNK];
+            nc__terrain_generator_generate_chunk(&terrain->generator, &coords, blocks);
+            nc__terrain_load_or_replace_chunk(terrain, &coords, blocks);
+        }
+    }
+    terrain->timing_stats.loading_ms = (double)(SDL_GetTicksNS() - unloading_end) / 1000000.0;
+    const uint64_t elapsed = SDL_GetTicksNS() - start;
+    terrain->timing_stats.residency_ms = (double)elapsed / 1000000.0;
+    terrain->prepare_budget_ns = elapsed < budget_ns ? budget_ns - elapsed : 0;
+}
+
+void nc_terrain_get_timing_stats(const nc_terrain_t* terrain, nc_terrain_timing_stats_t* stats) {
+    *stats = terrain->timing_stats;
 }
 
 nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
@@ -1275,7 +1481,7 @@ static void nc__terrain_get_chunk_data_and_neighbors(
         for (int y = -1; y <= 1; y++) {
             for (int x = -1; x <= 1; x++) {
                 vkm_ivec3 neighbor_coords;
-                if (!nc__terrain_offset_chunk_coords(coords, x, y, z, &neighbor_coords)) {
+                if (!nc_chunk_offset_coords(coords, x, y, z, &neighbor_coords)) {
                     continue;
                 }
 
@@ -1316,19 +1522,18 @@ static bool nc__terrain_remesh(const nc_terrain_t* terrain, nc_renderer_t* rende
             sizeof(*face_data.array) * nc_mesh_face_data_vec_count(&face_data));
 
 done:
-    if (result) {
-        chunk->flags &= ~NC__TERRAIN_CHUNK_MESH_DIRTY_BIT;
-    }
-
     nc_mesh_face_data_vec_fini(&face_data);
     nc_mesh_quad_vec_fini(&quads);
     return result;
 }
 
-static void nc__terrain_remove_light(nc_terrain_t* terrain) {
+static bool nc__terrain_remove_light(nc_terrain_t* terrain, const uint64_t deadline) {
     nc__terrain_light_removal_bfs_queue* queue =
             &terrain->light_removal_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_BLOCK];
     while (nc__terrain_light_removal_bfs_queue_count(queue)) {
+        if (SDL_GetTicksNS() >= deadline) {
+            return false;
+        }
         const nc__terrain_light_removal_node_t node = nc__terrain_light_removal_bfs_queue_pop(
                 queue);
         nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &node.chunk_coords);
@@ -1388,11 +1593,19 @@ static void nc__terrain_remove_light(nc_terrain_t* terrain) {
             }
         }
     }
+    return true;
 }
 
-static void nc__terrain_propagate_light(nc_terrain_t* terrain, const nc__terrain_light_channel_t channel) {
+static bool nc__terrain_propagate_light(
+    nc_terrain_t* terrain,
+    const nc__terrain_light_channel_t channel,
+    const uint64_t deadline
+) {
     nc__terrain_light_bfs_queue* queue = &terrain->light_bfs_queues[channel];
     while (nc__terrain_light_bfs_queue_count(queue)) {
+        if (SDL_GetTicksNS() >= deadline) {
+            return false;
+        }
         const nc__terrain_light_node_t node = nc__terrain_light_bfs_queue_pop(queue);
         nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &node.chunk_coords);
         if (!chunk) {
@@ -1443,15 +1656,19 @@ static void nc__terrain_propagate_light(nc_terrain_t* terrain, const nc__terrain
             nc__terrain_queue_light_node(terrain, channel, &neighbor);
         }
     }
+    return true;
 }
 
-static void nc__terrain_remove_sky_light(nc_terrain_t* terrain) {
+static bool nc__terrain_remove_sky_light(nc_terrain_t* terrain, const uint64_t deadline) {
     // Do not use the block-light level comparison here. Sky light can contain equal-level plateaus fed by several
     // entrances; after the last entrance closes, treating an equal neighbor as an independent source leaves stale
     // light behind. Flood all non-direct sky light, stop at authoritative direct-sky cells, then propagate them again.
     nc__terrain_light_removal_bfs_queue* queue =
             &terrain->light_removal_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_SKY];
     while (nc__terrain_light_removal_bfs_queue_count(queue)) {
+        if (SDL_GetTicksNS() >= deadline) {
+            return false;
+        }
         const nc__terrain_light_removal_node_t node = nc__terrain_light_removal_bfs_queue_pop(queue);
         nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &node.chunk_coords);
         if (!chunk) {
@@ -1463,7 +1680,12 @@ static void nc__terrain_remove_sky_light(nc_terrain_t* terrain) {
             const vkm_bvec3 offset = nc__terrain_light_neighbor_offsets[i];
             nc__terrain_block_location_t neighbor;
             if (!nc__terrain_get_light_neighbor(
-                    terrain, chunk, node.index, &local_coords, offset, &neighbor)) {
+                    terrain,
+                    chunk,
+                    node.index,
+                    &local_coords,
+                    offset,
+                    &neighbor)) {
                 continue;
             }
             const uint8_t neighbor_light = nc__terrain_get_sky_light(
@@ -1473,26 +1695,31 @@ static void nc__terrain_remove_sky_light(nc_terrain_t* terrain) {
             }
             vkm_ivec3 neighbor_local_coords;
             nc__terrain_chunk_index_to_local_coords(neighbor.index, &neighbor_local_coords);
-            const vkm_ivec2 column_coords = nc__terrain_chunk_column_coords(&neighbor.chunk->coords);
+            const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(&neighbor.chunk->coords);
             nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                     &terrain->chunk_columns,
                     column_coords);
             NC_ASSERT(column);
-            const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(
+            const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(
                     neighbor_local_coords.x,
                     neighbor_local_coords.z);
-            const int32_t world_y = nc__terrain_chunk_local_to_block_coord(
+            const int32_t world_y = nc_chunk_local_coord_to_block_coord(
                     neighbor.chunk->coords.y,
                     neighbor_local_coords.y);
             const nc_block_t* neighbor_block = nc_block_registry_get(
                     terrain->block_registry,
                     (nc_block_type_t)neighbor.chunk->blocks[neighbor.index]);
             const bool direct_sky = nc__terrain_block_has_direct_sky(
-                    *column, column_index, world_y, neighbor_block);
+                    *column,
+                    column_index,
+                    world_y,
+                    neighbor_block);
             if (!direct_sky) {
                 nc__terrain_set_sky_light(&neighbor.chunk->light_levels[neighbor.index], 0);
                 nc__terrain_mark_block_chunks_dirty(
-                        terrain, &neighbor.chunk->coords, &neighbor_local_coords);
+                        terrain,
+                        &neighbor.chunk->coords,
+                        &neighbor_local_coords);
                 nc__terrain_light_removal_bfs_queue_push(
                         queue,
                         (nc__terrain_light_removal_node_t){
@@ -1505,43 +1732,19 @@ static void nc__terrain_remove_sky_light(nc_terrain_t* terrain) {
             }
         }
     }
-}
-
-static bool nc__terrain_prepare_chunk_render(
-    const nc_terrain_t* terrain,
-    nc_renderer_t* renderer,
-    nc__terrain_chunk_t* chunk
-) {
-    if (chunk->flags & NC__TERRAIN_CHUNK_MESH_DIRTY_BIT) {
-        return nc__terrain_remesh(terrain, renderer, chunk);
-    }
-
     return true;
 }
 
-static void nc__terrain_release_light_queue_memory(nc_terrain_t* terrain) {
-    // Relighting is bursty. Do not retain a queue's peak allocation or per-chunk membership bitsets between passes.
-    for (int i = 0; i < NC__TERRAIN_LIGHT_CHANNEL_COUNT; i++) {
-        nc__terrain_light_bfs_queue_reclaim(&terrain->light_bfs_queues[i]);
-        nc__terrain_light_removal_bfs_queue_reclaim(&terrain->light_removal_bfs_queues[i]);
-    }
-    if (!terrain->light_queue_bitsets_allocated) {
-        return;
-    }
-
-    nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
-    while (nc__terrain_chunk_map_next(&it)) {
-        for (int i = 0; i < NC__TERRAIN_LIGHT_CHANNEL_COUNT; i++) {
-            free((*it.value)->queued_light_nodes[i]);
-            (*it.value)->queued_light_nodes[i] = NULL;
-        }
-    }
-    terrain->light_queue_bitsets_allocated = false;
-}
-
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
+    const uint64_t prepare_start = SDL_GetTicksNS();
+    const uint64_t deadline = UINT64_MAX - prepare_start < terrain->prepare_budget_ns
+            ? UINT64_MAX
+            : prepare_start + terrain->prepare_budget_ns;
     const bool rebuild_sky_light = terrain->sky_light_needs_rebuild;
-    nc__terrain_remove_light(terrain);
+    if (!nc__terrain_remove_light(terrain, deadline)) {
+        terrain->timing_stats.lighting_ms = (double)(SDL_GetTicksNS() - prepare_start) / 1000000.0;
+        return true;
+    }
     if (rebuild_sky_light) {
         // Bulk edits before the first propagation pass are cheaper to resolve once than as a removal wave per block.
         nc__terrain_light_bfs_queue_clear(&terrain->light_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_SKY]);
@@ -1549,7 +1752,7 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
         nc__terrain_chunk_map_iter_t clear_it = nc__terrain_chunk_map_iter(&terrain->chunks);
         while (nc__terrain_chunk_map_next(&clear_it)) {
             nc__terrain_chunk_t* chunk = *clear_it.value;
-            for (int i = 0; i < NC_MESHER_BLOCKS_PER_CHUNK; i++) {
+            for (int i = 0; i < NC_BLOCKS_PER_CHUNK; i++) {
                 nc__terrain_set_sky_light(&chunk->light_levels[i], 0);
             }
             free(chunk->queued_light_nodes[NC__TERRAIN_LIGHT_CHANNEL_SKY]);
@@ -1561,27 +1764,45 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
             nc__terrain_seed_chunk_sky_light(terrain, *seed_it.value);
         }
         terrain->sky_light_needs_rebuild = false;
+        terrain->sky_light_frontier_queued = false;
     } else {
-        nc__terrain_remove_sky_light(terrain);
+        if (!nc__terrain_remove_sky_light(terrain, deadline)) {
+            terrain->timing_stats.lighting_ms = (double)(SDL_GetTicksNS() - prepare_start) / 1000000.0;
+            return true;
+        }
     }
-    if (rebuild_sky_light || !terrain->sky_light_has_propagated) {
+    if ((rebuild_sky_light || !terrain->sky_light_has_propagated) && !terrain->sky_light_frontier_queued) {
         nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
         while (nc__terrain_chunk_map_next(&it)) {
             nc__terrain_queue_chunk_sky_light_frontier(terrain, *it.value);
         }
+        terrain->sky_light_frontier_queued = true;
     }
-    nc__terrain_propagate_light(terrain, NC__TERRAIN_LIGHT_CHANNEL_BLOCK);
-    nc__terrain_propagate_light(terrain, NC__TERRAIN_LIGHT_CHANNEL_SKY);
+    if (!nc__terrain_propagate_light(terrain, NC__TERRAIN_LIGHT_CHANNEL_BLOCK, deadline)
+            || !nc__terrain_propagate_light(terrain, NC__TERRAIN_LIGHT_CHANNEL_SKY, deadline)) {
+        terrain->timing_stats.lighting_ms = (double)(SDL_GetTicksNS() - prepare_start) / 1000000.0;
+        return true;
+    }
     terrain->sky_light_has_propagated = true;
 
-    nc__terrain_release_light_queue_memory(terrain);
+    const uint64_t lighting_end = SDL_GetTicksNS();
+    terrain->timing_stats.lighting_ms = (double)(lighting_end - prepare_start) / 1000000.0;
 
-    nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
-    while (nc__terrain_chunk_map_next(&it)) {
-        if (!nc__terrain_prepare_chunk_render(terrain, renderer, *it.value)) {
+    while (nc__terrain_stream_queue_count(&terrain->mesh_queue) && SDL_GetTicksNS() < deadline) {
+        const vkm_ivec3 coords = nc__terrain_stream_queue_pop(&terrain->mesh_queue);
+        nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &coords);
+        if (!chunk) {
+            continue;
+        }
+        if (!(chunk->flags & NC__TERRAIN_CHUNK_MESH_PENDING_BIT)) {
+            continue;
+        }
+        chunk->flags &= ~NC__TERRAIN_CHUNK_MESH_PENDING_BIT;
+        if (!nc__terrain_remesh(terrain, renderer, chunk)) {
             return false;
         }
     }
+    terrain->timing_stats.meshing_ms = (double)(SDL_GetTicksNS() - lighting_end) / 1000000.0;
 
     return true;
 }
@@ -1592,7 +1813,7 @@ static nc__terrain_frustum_plane_t nc__terrain_make_frustum_plane(
     const float z,
     const float distance
 ) {
-    const float half_chunk_size = (float)NC_MESHER_CHUNK_SIZE * 0.5f;
+    const float half_chunk_size = (float)NC_CHUNK_SIZE * 0.5f;
     return (nc__terrain_frustum_plane_t){
         .x = x,
         .y = y,
@@ -1665,12 +1886,12 @@ void nc_terrain_get_opaque_draws(
         }
 
         const vkm_ivec3 block_coords = { {
-            chunk->coords.x * NC_MESHER_CHUNK_SIZE,
-            chunk->coords.y * NC_MESHER_CHUNK_SIZE,
-            chunk->coords.z * NC_MESHER_CHUNK_SIZE,
+            chunk->coords.x * NC_CHUNK_SIZE,
+            chunk->coords.y * NC_CHUNK_SIZE,
+            chunk->coords.z * NC_CHUNK_SIZE,
         } };
 
-        const float half_chunk_size = (float)NC_MESHER_CHUNK_SIZE * 0.5f;
+        const float half_chunk_size = (float)NC_CHUNK_SIZE * 0.5f;
         const vkm_vec3 center = { {
             (float)block_coords.x + half_chunk_size,
             (float)block_coords.y + half_chunk_size,
@@ -1696,17 +1917,6 @@ void nc_terrain_get_opaque_draws(
     }
 
     *stats = culling_stats;
-}
-
-static bool nc__terrain_floor_float_to_block_coord(const float value, int32_t* result) {
-    // TODO: Add floor function to cvkm
-    const double floored = floor((double)value);
-    if (floored < (double)INT32_MIN || floored > (double)INT32_MAX) {
-        return false;
-    }
-
-    *result = (int32_t)floored;
-    return true;
 }
 
 static float nc__terrain_initial_t_max(
@@ -1747,9 +1957,9 @@ bool nc_terrain_raycast(
     nc_camera_get_basis(camera, &direction, &right, &up);
 
     vkm_ivec3 block_position;
-    if (!nc__terrain_floor_float_to_block_coord(camera->position.x, &block_position.x)
-            || !nc__terrain_floor_float_to_block_coord(camera->position.y, &block_position.y)
-            || !nc__terrain_floor_float_to_block_coord(camera->position.z, &block_position.z)) {
+    if (!nc_world_position_coord_to_block_coord(camera->position.x, &block_position.x)
+            || !nc_world_position_coord_to_block_coord(camera->position.y, &block_position.y)
+            || !nc_world_position_coord_to_block_coord(camera->position.z, &block_position.z)) {
         return false;
     }
 
@@ -1866,7 +2076,7 @@ void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camer
 
 int32_t nc_terrain_get_top_light_blocking_block(const nc_terrain_t* terrain, const vkm_ivec2 block_column_coords) {
     vkm_ivec2 chunk_column_coords;
-    nc__terrain_block_column_to_chunk_column_coords(&block_column_coords, &chunk_column_coords);
+    nc_block_column_to_chunk_column_coords(&block_column_coords, &chunk_column_coords);
     nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
             &terrain->chunk_columns,
             chunk_column_coords);
@@ -1875,8 +2085,8 @@ int32_t nc_terrain_get_top_light_blocking_block(const nc_terrain_t* terrain, con
     }
 
     vkm_ivec2 local_coords;
-    nc__terrain_block_column_to_chunk_local_coords(&block_column_coords, &chunk_column_coords, &local_coords);
-    const int column_index = NC__TERRAIN_CHUNK_COLUMN_BLOCK_INDEX(local_coords.x, local_coords.y);
+    nc_block_column_to_chunk_local_coords(&block_column_coords, &chunk_column_coords, &local_coords);
+    const int column_index = NC_CHUNK_COLUMN_COORDS_TO_INDEX(local_coords.x, local_coords.y);
 
     return (*column)->top_light_blocking_blocks[column_index];
 }
@@ -1905,6 +2115,9 @@ void nc_terrain_fini(nc_terrain_t* terrain, nc_renderer_t* renderer) {
     nc_mesher_fini(terrain->mesher);
     nc_block_registry_fini(terrain->block_registry);
     nc_renderer_destroy_texture(renderer, terrain->texture_array);
+    nc__terrain_stream_queue_fini(&terrain->load_queue);
+    nc__terrain_stream_queue_fini(&terrain->unload_queue);
+    nc__terrain_stream_queue_fini(&terrain->mesh_queue);
 
     free(terrain);
 }

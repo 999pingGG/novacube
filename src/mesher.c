@@ -50,7 +50,7 @@ static void nc__chunk_add_voxel_to_axis_columns(
     const int x,
     const int y,
     const int z,
-    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE]
+    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE]
 ) {
     axis_columns[0][z][x] |= 1 << y;
     axis_columns[1][y][z] |= 1 << x;
@@ -58,24 +58,24 @@ static void nc__chunk_add_voxel_to_axis_columns(
 }
 
 static uint16_t nc__chunk_get_block(const uint16_t* chunk_and_neighbors[3][3][3], int x, int y, int z) {
-    x += NC_MESHER_CHUNK_SIZE;
-    y += NC_MESHER_CHUNK_SIZE;
-    z += NC_MESHER_CHUNK_SIZE;
+    x += NC_CHUNK_SIZE;
+    y += NC_CHUNK_SIZE;
+    z += NC_CHUNK_SIZE;
 
-    const int x_chunk = x / NC_MESHER_CHUNK_SIZE;
-    const int y_chunk = y / NC_MESHER_CHUNK_SIZE;
-    const int z_chunk = z / NC_MESHER_CHUNK_SIZE;
+    const int x_chunk = x / NC_CHUNK_SIZE;
+    const int y_chunk = y / NC_CHUNK_SIZE;
+    const int z_chunk = z / NC_CHUNK_SIZE;
 
-    x %= NC_MESHER_CHUNK_SIZE;
-    y %= NC_MESHER_CHUNK_SIZE;
-    z %= NC_MESHER_CHUNK_SIZE;
+    x %= NC_CHUNK_SIZE;
+    y %= NC_CHUNK_SIZE;
+    z %= NC_CHUNK_SIZE;
 
     const uint16_t* chunk_data = chunk_and_neighbors[x_chunk][y_chunk][z_chunk];
     if (!chunk_data) {
         return 0;
     }
 
-    return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)];
+    return chunk_data[NC_CHUNK_COORDS_TO_INDEX(x, y, z)];
 }
 
 static uint8_t nc__chunk_get_light(
@@ -86,23 +86,23 @@ static uint8_t nc__chunk_get_light(
     const uint8_t fallback,
     const int shift
 ) {
-    x += NC_MESHER_CHUNK_SIZE;
-    y += NC_MESHER_CHUNK_SIZE;
-    z += NC_MESHER_CHUNK_SIZE;
+    x += NC_CHUNK_SIZE;
+    y += NC_CHUNK_SIZE;
+    z += NC_CHUNK_SIZE;
 
-    const int x_chunk = x / NC_MESHER_CHUNK_SIZE;
-    const int y_chunk = y / NC_MESHER_CHUNK_SIZE;
-    const int z_chunk = z / NC_MESHER_CHUNK_SIZE;
-    x %= NC_MESHER_CHUNK_SIZE;
-    y %= NC_MESHER_CHUNK_SIZE;
-    z %= NC_MESHER_CHUNK_SIZE;
+    const int x_chunk = x / NC_CHUNK_SIZE;
+    const int y_chunk = y / NC_CHUNK_SIZE;
+    const int z_chunk = z / NC_CHUNK_SIZE;
+    x %= NC_CHUNK_SIZE;
+    y %= NC_CHUNK_SIZE;
+    z %= NC_CHUNK_SIZE;
 
     const uint8_t* chunk_data = light_levels_and_neighbors[x_chunk][y_chunk][z_chunk];
     if (!chunk_data) {
         return fallback;
     }
 
-    return chunk_data[NC_MESHER_CHUNK_COORDS_TO_INDEX(x, y, z)] >> shift & 0xf;
+    return chunk_data[NC_CHUNK_COORDS_TO_INDEX(x, y, z)] >> shift & 0xf;
 }
 
 static uint8_t nc__chunk_get_face_light(
@@ -187,7 +187,7 @@ static uint8_t nc__chunk_get_face_plane_light(
 }
 
 static bool nc__chunk_is_solid_from_axis_columns(
-    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
     const int x,
     const int y,
     const int z
@@ -202,7 +202,7 @@ static const int8_t nc__chunk_face_sample_offsets[9][2] = {
 };
 
 static uint16_t nc__chunk_build_face_ao_mask(
-    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE],
+    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
     const int direction,
     int x,
     int y,
@@ -414,10 +414,10 @@ void nc_mesher_compute_chunk(
     nc_mesh_face_data_vec* face_data_result
 ) {
     // solid binary for each x,y,z axis (3)
-    uint32_t axis_columns[3][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE] = { 0 };
+    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = { 0 };
 
     // the cull mask to perform greedy slicing, based on solids on previous axis_cols
-    uint32_t face_masks[6][NC_MESHER_PADDED_CHUNK_SIZE][NC_MESHER_PADDED_CHUNK_SIZE] = { 0 };
+    uint32_t face_masks[6][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = { 0 };
 
     *quads_result = (nc_mesh_quad_vec){ 0 };
     // Something that can help reduce the allocations done without wasting too much memory.
@@ -432,9 +432,9 @@ void nc_mesher_compute_chunk(
     }
 
     int block_index = 0;
-    for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_MESHER_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
+    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int y = 0; y < NC_CHUNK_SIZE; y++) {
+            for (int x = 0; x < NC_CHUNK_SIZE; x++) {
                 const nc_block_model_t* model = nc__get_block_model(mesher, chunk[block_index]);
 
                 if (model->solid) {
@@ -499,9 +499,9 @@ void nc_mesher_compute_chunk(
     // note(leddoo): couldn't be bothered to optimize these.
     //  might be worth it though. together, they take
     //  almost as long as the entire "inner chunk" loop.
-    for (int z = 0; z < NC_MESHER_PADDED_CHUNK_SIZE; z += NC_MESHER_CHUNK_SIZE + 1) {
-        for (int y = 0; y < NC_MESHER_PADDED_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_MESHER_PADDED_CHUNK_SIZE; x++) {
+    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z += NC_CHUNK_SIZE + 1) {
+        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y++) {
+            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
                 if (nc__is_solid(mesher, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
                     nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
                 }
@@ -509,9 +509,9 @@ void nc_mesher_compute_chunk(
         }
     }
 
-    for (int z = 0; z < NC_MESHER_PADDED_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_MESHER_PADDED_CHUNK_SIZE; y += NC_MESHER_CHUNK_SIZE + 1) {
-            for (int x = 0; x < NC_MESHER_PADDED_CHUNK_SIZE; x++) {
+    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
+        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y += NC_CHUNK_SIZE + 1) {
+            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
                 if (nc__is_solid(mesher, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
                     nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
                 }
@@ -519,9 +519,9 @@ void nc_mesher_compute_chunk(
         }
     }
 
-    for (int z = 0; z < NC_MESHER_PADDED_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_MESHER_PADDED_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_MESHER_PADDED_CHUNK_SIZE; x += NC_MESHER_CHUNK_SIZE + 1) {
+    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
+        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y++) {
+            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x += NC_CHUNK_SIZE + 1) {
                 if (nc__is_solid(mesher, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
                     nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
                 }
@@ -534,9 +534,9 @@ void nc_mesher_compute_chunk(
         uint32_t face_data_index = 0;
 
         block_index = 0;
-        for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-            for (int y = 0; y < NC_MESHER_CHUNK_SIZE; y++) {
-                for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
+        for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+            for (int y = 0; y < NC_CHUNK_SIZE; y++) {
+                for (int x = 0; x < NC_CHUNK_SIZE; x++) {
                     const nc_block_model_t* model = nc__get_block_model(mesher, chunk[block_index]);
                     if (!model->solid && model->quads.count) {
                         const uint8_t light_emission = nc_block_registry_get(
@@ -586,8 +586,8 @@ void nc_mesher_compute_chunk(
 
     // face culling
     for (int axis = 0; axis < 3; axis++) {
-        for (int z = 0; z < NC_MESHER_PADDED_CHUNK_SIZE; z++) {
-            for (int x = 0; x < NC_MESHER_PADDED_CHUNK_SIZE; x++) {
+        for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
+            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
                 const uint32_t column = axis_columns[axis][z][x];
 
                 face_masks[2 * axis + 0][z][x] = column & ~(column << 1);
@@ -596,19 +596,19 @@ void nc_mesher_compute_chunk(
         }
     }
 
-    uint16_t planes[6][NC_MESHER_CHUNK_SIZE][NC_MESHER_CHUNK_SIZE] = { 0 };
+    uint16_t planes[6][NC_CHUNK_SIZE][NC_CHUNK_SIZE] = { 0 };
 
     // find faces and build binary planes based on the voxel block+ao etc...
     for (int direction = 0; direction < 6; direction++) {
-        for (int z = 0; z < NC_MESHER_CHUNK_SIZE; z++) {
-            for (int x = 0; x < NC_MESHER_CHUNK_SIZE; x++) {
+        for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+            for (int x = 0; x < NC_CHUNK_SIZE; x++) {
                 // skip padded by adding 1(for x padding) and (z+1) for (z padding)
                 uint32_t column = face_masks[direction][z + 1][x + 1];
 
                 // removes the right most padding value, because it's invalid
                 column >>= 1;
                 // removes the left most padding value, because it's invalid
-                column &= ~(1 << NC_MESHER_CHUNK_SIZE);
+                column &= ~(1 << NC_CHUNK_SIZE);
 
                 while (column != 0) {
                     const unsigned y = nc__u32_trailing_zeroes(column);
@@ -622,10 +622,10 @@ void nc_mesher_compute_chunk(
     }
 
     for (int direction = 0; direction < 6; direction++) {
-        for (int plane = 0; plane < NC_MESHER_CHUNK_SIZE; plane++) {
+        for (int plane = 0; plane < NC_CHUNK_SIZE; plane++) {
             nc_greedy_quad_t quads[128] = { 0 };
             int count;
-            nc_mesher_mesh_binary_plane(planes[direction][plane], NC_MESHER_CHUNK_SIZE, quads, &count);
+            nc_mesher_mesh_binary_plane(planes[direction][plane], NC_CHUNK_SIZE, quads, &count);
             NC_ASSERT(count <= (int)NC_COUNTOF(quads));
 
             for (int i = 0; i < count; i++) {
@@ -650,7 +650,7 @@ void nc_mesher_compute_chunk(
                     for (int x = 0; x < quad.width; x++) {
                         const vkm_ubvec3 block_coords =
                             nc__quad_position_to_block_coords(direction, plane, quad.x + x, quad.y + y);
-                        block_index = NC_MESHER_CHUNK_COORDS_TO_INDEX(block_coords.x, block_coords.y, block_coords.z);
+                        block_index = NC_CHUNK_COORDS_TO_INDEX(block_coords.x, block_coords.y, block_coords.z);
                         const nc_block_t* block = nc_block_registry_get(
                                 mesher->block_registry,
                                 (nc_block_type_t)chunk[block_index]);
@@ -694,14 +694,14 @@ void nc_mesher_compute_chunk(
 }
 
 void nc_mesher_mesh_binary_plane(
-    uint16_t data[NC_MESHER_CHUNK_SIZE],
+    uint16_t data[NC_CHUNK_SIZE],
     const int lod_size,
     nc_greedy_quad_t result[128],
     int* count
 ) {
     int quad_count = 0;
 
-    for (int row = 0; row < NC_MESHER_CHUNK_SIZE; row++) {
+    for (int row = 0; row < NC_CHUNK_SIZE; row++) {
         int column = 0;
         while (column < lod_size) {
             // find first solid, "air/zero's" could be first so skip

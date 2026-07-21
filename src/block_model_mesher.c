@@ -24,7 +24,7 @@ static bool nc__block_model_get_voxel(
     const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
     const int index
 ) {
-    return (voxel_data[index / NC_MESHER_CHUNK_SIZE] >> index % NC_MESHER_CHUNK_SIZE & 1) != 0;
+    return (voxel_data[index / NC_CHUNK_SIZE] >> index % NC_CHUNK_SIZE & 1) != 0;
 }
 
 // Perform greedy meshing on a binary plane.

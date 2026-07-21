@@ -59,44 +59,6 @@ static void nc__app_fini(nc__app_t* app) {
     free(app);
 }
 
-static void nc__app_initialize_test_blocks(nc__app_t* app) {
-    const int chunk_radius = 10;
-
-    for (int chunk_z = -chunk_radius; chunk_z < chunk_radius; chunk_z++) {
-        for (int chunk_x = -chunk_radius; chunk_x < chunk_radius; chunk_x++) {
-            for (int chunk_y = 0; chunk_y <= 1; chunk_y++) {
-                uint16_t blocks[NC_MESHER_BLOCKS_PER_CHUNK];
-
-                for (int index = 0; index < NC_MESHER_BLOCKS_PER_CHUNK; index++) {
-                    vkm_bvec3 local_coords;
-                    NC_MESHER_CHUNK_INDEX_TO_COORDS(index, local_coords.x, local_coords.y, local_coords.z);
-
-                    const int x = chunk_x * NC_MESHER_CHUNK_SIZE + local_coords.x;
-                    const int y = chunk_y * NC_MESHER_CHUNK_SIZE + local_coords.y;
-                    const int z = chunk_z * NC_MESHER_CHUNK_SIZE + local_coords.z;
-                    const int height = (int)((15.0f + vkm_sin((float)z / 3.0f) * 3.0f
-                            + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
-
-                    if (y >= height) {
-                        blocks[index] = NC_BLOCK_TYPE_AIR;
-                    } else if (y == height - 1) {
-                        blocks[index] = NC_BLOCK_TYPE_GRASS;
-                    } else if (y > height - 5) {
-                        blocks[index] = NC_BLOCK_TYPE_DIRT;
-                    } else {
-                        blocks[index] = NC_BLOCK_TYPE_STONE;
-                    }
-                }
-
-                nc_terrain_load_or_replace_chunk(app->terrain, &(vkm_ivec3){ { chunk_x, chunk_y, chunk_z } }, blocks);
-            }
-        }
-    }
-
-    nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { 9, 15, -14 } }, NC_BLOCK_TYPE_TORCH);
-    nc_terrain_set_block(app->terrain, &(vkm_ivec3){ { 10, 15, -14 } }, NC_BLOCK_TYPE_TORCH);
-}
-
 //static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
 //    const double radius = vkm_sin(time) * 5.0 + 10.0;
 //
@@ -165,8 +127,6 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     if (!app->terrain) {
         goto error;
     }
-
-    nc__app_initialize_test_blocks(app);
 
     keyboard_state = SDL_GetKeyboardState(NULL);
     if (!nc_renderer_set_relative_mouse_mode(app->renderer, true)) {
@@ -247,8 +207,9 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_mul(&right, input.x, &velocity);
     vkm_muladd(&CVKM_VEC3_UP, input.y, &velocity);
     vkm_muladd(&forward, input.z, &velocity);
-    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 3.0f : 1.0f), &velocity);
+    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 90.0f : 1.0f), &velocity);
     vkm_muladd(&velocity, (float)delta_time, &app->camera.position);
+    nc_terrain_update(app->terrain, app->renderer, &app->camera.position);
 
     char debug_buffer[100];
 
@@ -307,6 +268,21 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     if (!nc_terrain_prepare_render(app->terrain, app->renderer)) {
         goto error;
+    }
+
+    if (nc_cvar_get_show_terrain_timings()) {
+        nc_terrain_timing_stats_t terrain_timing;
+        nc_terrain_get_timing_stats(app->terrain, &terrain_timing);
+        const int printed = snprintf(
+                debug_buffer,
+                sizeof(debug_buffer),
+                "Terrain residency: %.3f ms, load: %.3f, unload: %.3f, lighting: %.3f, meshing: %.3f\n",
+                terrain_timing.residency_ms,
+                terrain_timing.loading_ms,
+                terrain_timing.unloading_ms,
+                terrain_timing.lighting_ms,
+                terrain_timing.meshing_ms);
+        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
     nc_terrain_frustum_culling_stats_t frustum_culling_stats;
