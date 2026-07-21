@@ -15,6 +15,9 @@ A guide for [coding agents](https://agents.md/).
 - Use a 120 column limit.
 - For the love of God don't use the "u" suffix for integer literals, unless getting an unsigned type is necessary.
 - This project is W*ndows, Linux and Android, exclusively. Don't care about other platforms whenever relevant.
+- Assume every memory allocation succeeds. Don't check for `NULL`. If you exhaust memory, Linux will just kill you.
+  And if W*ndows returns NULL, then you got bigger problems than your game crashing. Persistent data is resilient
+  against sudden shutdowns, crashes, and almost any other failure at any time thanks to SQLite.
 
 ## Talking style
 
