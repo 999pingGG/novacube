@@ -214,6 +214,7 @@ static const char* nc__terrain_texture_paths[] = {
     NC__TERRAIN_ASSETS_BASE_PATH "textures/torch-top" NC__TERRAIN_TEXTURE_EXTENSION,
     NC__TERRAIN_ASSETS_BASE_PATH "textures/testbox" NC__TERRAIN_TEXTURE_EXTENSION,
     NC__TERRAIN_ASSETS_BASE_PATH "textures/water" NC__TERRAIN_TEXTURE_EXTENSION,
+    NC__TERRAIN_ASSETS_BASE_PATH "textures/sand" NC__TERRAIN_TEXTURE_EXTENSION,
 };
 
 static void nc__terrain_mark_chunk_dirty(nc_terrain_t* terrain, nc_chunk_t* chunk) {

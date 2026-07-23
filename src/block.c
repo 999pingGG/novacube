@@ -132,6 +132,12 @@ static void nc__block_registry_register_blocks(nc_block_registry_t* registry) {
         .light_emission = 0,
         .flags = NC_BLOCK_FLAG_TRANSPARENT,
     };
+    registry->blocks[NC_BLOCK_TYPE_SAND] = (nc_block_t){
+        .texture_array_layers = { 7, 7, 7, 7, 7, 7 },
+        .voxel_model_id = full_cube_id,
+        .light_emission = 0,
+        .flags = NC_BLOCK_FLAG_BLOCKS_LIGHT,
+    };
 }
 
 nc_block_registry_t* nc_block_registry_init(void) {

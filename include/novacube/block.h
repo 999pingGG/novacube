@@ -16,8 +16,9 @@ enum {
     NC_BLOCK_TYPE_TORCH,
     NC_BLOCK_TYPE_TEST,
     NC_BLOCK_TYPE_WATER,
+    NC_BLOCK_TYPE_SAND,
 
-    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_WATER,
+    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_SAND,
 };
 
 typedef uint8_t nc_block_flags_t;
