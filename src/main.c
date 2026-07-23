@@ -225,6 +225,17 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
+    if (nc_cvar_get_show_player_coords()) {
+        const int printed = snprintf(
+                debug_buffer,
+                sizeof(debug_buffer),
+                "Player: (%.3f, %.3f, %.3f)\n",
+                app->camera.position.x,
+                app->camera.position.y,
+                app->camera.position.z);
+        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+    }
+
     if (nc_cvar_get_show_target_block_debug_details()) {
         nc_terrain_raycast_hit_t hit;
         if (nc_terrain_raycast(app->terrain, &app->camera, NC_TERRAIN_MAX_BLOCK_MODIFICATION_DISTANCE, &hit)) {
