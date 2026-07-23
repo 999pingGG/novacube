@@ -10,9 +10,11 @@
 #include <novacube/camera.h>
 #include <novacube/cvar.h>
 #include <novacube/cvkm.h>
+#include <novacube/entity_command.h>
 #include <novacube/error_handling.h>
 #include <novacube/gui.h>
 #include <novacube/macros.h>
+#include <novacube/player_input.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
 #include <novacube/terrain.h>
@@ -27,25 +29,54 @@ typedef struct nc__app_t {
     nc_renderer_t* renderer;
     nc_terrain_t* terrain;
     nc_gui_context_t* gui;
+    nc_player_input_t* player_input;
     nc_camera_t camera;
     nc_block_type_t selected_type;
     nc_renderer_chunk_draw_vec opaque_chunk_draws;
     nc_renderer_chunk_draw_vec transparent_chunk_draws;
 } nc__app_t;
 
-static const bool* keyboard_state;
-
 static void nc__app_modify_block(const nc__app_t* app, const nc_block_type_t block_type) {
     nc_terrain_entity_set_block(app->terrain, &app->camera, block_type);
 }
 
-static void nc__app_handle_gui_actions(const nc__app_t* app, const nc_gui_actions_t actions) {
-    if (actions & NC_GUI_ACTION_PLACE_BLOCK) {
+static void nc__app_handle_entity_actions(const nc__app_t* app, const nc_entity_actions_t actions) {
+    if (actions & NC_ENTITY_ACTION_PLACE_BLOCK) {
         nc__app_modify_block(app, app->selected_type);
     }
-    if (actions & NC_GUI_ACTION_REMOVE_BLOCK) {
+    if (actions & NC_ENTITY_ACTION_REMOVE_BLOCK) {
         nc__app_modify_block(app, NC_BLOCK_TYPE_AIR);
     }
+}
+
+static void nc__app_apply_entity_command(
+    nc__app_t* app,
+    const nc_entity_command_t* command,
+    const float delta_time
+) {
+    nc__app_handle_entity_actions(app, command->actions);
+    nc_camera_rotate(&app->camera, command->look_delta.x, command->look_delta.y);
+
+    vkm_vec3 forward;
+    vkm_vec3 right;
+    vkm_vec3 up;
+    nc_camera_get_basis(&app->camera, &forward, &right, &up);
+    forward.y = 0.0f;
+    const float forward_length = vkm_length(&forward);
+    if (forward_length > 0.0f) {
+        vkm_div(&forward, forward_length, &forward);
+    }
+
+    vkm_vec3 velocity;
+    vkm_mul(&right, command->movement.x, &velocity);
+    vkm_muladd(&CVKM_VEC3_UP, command->movement.y, &velocity);
+    vkm_muladd(&forward, command->movement.z, &velocity);
+    vkm_mul(
+            &velocity,
+            NC__MOVEMENT_SPEED * (command->sprint ? 9.0f : 3.0f),
+            &velocity);
+    vkm_muladd(&velocity, delta_time, &app->camera.position);
+    nc_terrain_update(app->terrain, app->renderer, &app->camera.position);
 }
 
 static void nc__app_fini(nc__app_t* app) {
@@ -54,6 +85,7 @@ static void nc__app_fini(nc__app_t* app) {
     }
 
     nc_terrain_fini(app->terrain, app->renderer);
+    nc_player_input_fini(app->player_input);
     nc_gui_fini(app->gui, app->renderer);
     nc_renderer_fini(app->renderer);
     nc_renderer_chunk_draw_vec_fini(&app->opaque_chunk_draws);
@@ -125,12 +157,13 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         goto error;
     }
 
+    app->player_input = nc_player_input_init(app->renderer, nc_gui_get_scale(app->gui));
+
     app->terrain = nc_terrain_init(app->renderer);
     if (!app->terrain) {
         goto error;
     }
 
-    keyboard_state = SDL_GetKeyboardState(NULL);
     if (!nc_renderer_set_relative_mouse_mode(app->renderer, true)) {
         goto error;
     }
@@ -147,6 +180,10 @@ error:
 SDL_AppResult SDL_AppIterate(void* app_state) {
     nc__app_t* app = app_state;
 
+    if (!nc_gui_update_window_metrics(app->gui, app->renderer)) {
+        goto error;
+    }
+
     const Uint64 ticks = SDL_GetTicksNS();
     static Uint64 last_ticks = 0;
     static double time = 0.0;
@@ -156,62 +193,16 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
 
     //nc__app_animated_test_thingy(app, time);
 
-    vkm_vec2 touch_camera_delta;
-    nc_gui_get_camera_delta(app->gui, &touch_camera_delta);
-    if (touch_camera_delta.x != 0.0f || touch_camera_delta.y != 0.0f) {
-        const float sensitivity = (float)nc_cvar_get_touch_camera_stick_sensitivity();
-        nc_camera_rotate(
-                &app->camera,
-                touch_camera_delta.x * sensitivity * (float)delta_time,
-                touch_camera_delta.y * sensitivity * (float)delta_time);
-    }
+    nc_player_input_update_view(app->player_input, app->renderer, nc_gui_get_scale(app->gui));
+    nc_player_input_update(app->player_input, (float)delta_time);
 
-    vkm_vec2 touch_look_delta;
-    if (nc_gui_consume_look_delta(app->gui, &touch_look_delta)) {
-        const float sensitivity = (float)nc_cvar_get_touch_camera_drag_sensitivity();
-        nc_camera_rotate(
-                &app->camera,
-                touch_look_delta.x * sensitivity,
-                -touch_look_delta.y * sensitivity);
-    }
-
-    vkm_vec3 forward;
-    vkm_vec3 right;
-    vkm_vec3 up;
-    nc_camera_get_basis(&app->camera, &forward, &right, &up);
-    forward.y = 0.0f;
-    float length = vkm_length(&forward);
-    if (length > 0.0f) {
-        vkm_div(&forward, length, &forward);
-    }
-
-    const nc_gui_controls_t gui_controls = nc_gui_get_controls(app->gui);
-    vkm_vec3 input = { {
-        (float)keyboard_state[SDL_SCANCODE_D] - (float)keyboard_state[SDL_SCANCODE_A],
-        (float)keyboard_state[SDL_SCANCODE_SPACE] - (float)keyboard_state[SDL_SCANCODE_LSHIFT],
-        (float)keyboard_state[SDL_SCANCODE_W] - (float)keyboard_state[SDL_SCANCODE_S],
-    } };
-    input.x += (float)((gui_controls & NC_GUI_CONTROL_MOVE_RIGHT) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_LEFT) != 0);
-    input.y += (float)((gui_controls & NC_GUI_CONTROL_MOVE_UP) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_DOWN) != 0);
-    input.z += (float)((gui_controls & NC_GUI_CONTROL_MOVE_FORWARD) != 0) - (float)((gui_controls & NC_GUI_CONTROL_MOVE_BACKWARD) != 0);
-
-    vkm_vec2 gui_movement_delta;
-    nc_gui_get_movement_delta(app->gui, &gui_movement_delta);
-    input.x += gui_movement_delta.x;
-    input.z += gui_movement_delta.y;
-
-    length = vkm_length(&input);
-    if (length > 1.0f) {
-        vkm_div(&input, length, &input);
-    }
-
-    vkm_vec3 velocity;
-    vkm_mul(&right, input.x, &velocity);
-    vkm_muladd(&CVKM_VEC3_UP, input.y, &velocity);
-    vkm_muladd(&forward, input.z, &velocity);
-    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 9.0f : 3.0f), &velocity);
-    vkm_muladd(&velocity, (float)delta_time, &app->camera.position);
-    nc_terrain_update(app->terrain, app->renderer, &app->camera.position);
+    nc_entity_command_t entity_command;
+    nc_player_input_get_entity_command(
+            app->player_input,
+            nc_gui_is_keyboard_captured(app->gui),
+            (float)delta_time,
+            &entity_command);
+    nc__app_apply_entity_command(app, &entity_command, (float)delta_time);
 
     char debug_buffer[100];
 
@@ -268,7 +259,6 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     }
 
     const vkm_usvec2 viewport = nc_renderer_get_viewport(app->renderer);
-    nc_gui_set_pixel_viewport(app->gui, viewport.x, viewport.y);
 
     vkm_mat4 view_projection;
     nc_camera_get_view_projection(
@@ -318,14 +308,23 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
-    if (!nc_gui_prepare_frame(app->gui, app->renderer, (float)delta_time)) {
+    nc_player_input_overlay_t player_input_overlay;
+    nc_player_input_get_overlay(app->player_input, &player_input_overlay);
+    if (!nc_gui_prepare_frame(
+            app->gui,
+            app->renderer,
+            &player_input_overlay,
+            (float)delta_time)) {
         goto error;
     }
 
     nc_renderer_overlay_draw_t overlay_draw;
     nc_gui_get_overlay_draw(app->gui, &overlay_draw);
     nc_renderer_procedural_overlay_draw_t procedural_overlay_draw;
-    nc_gui_get_procedural_overlay_draw(app->gui, &procedural_overlay_draw);
+    nc_gui_get_procedural_overlay_draw(
+            app->gui,
+            &player_input_overlay,
+            &procedural_overlay_draw);
     nc_renderer_block_highlight_draw_t highlight_draw;
     nc_terrain_get_block_highlight_draw(app->terrain, (float)time, &app->camera, &highlight_draw);
 
@@ -400,22 +399,25 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
         goto error;
     }
 
-    if (event->type == SDL_EVENT_WINDOW_RESIZED) {
-        const vkm_usvec2 window_size = nc_renderer_get_window_size(app->renderer);
-        nc_gui_set_window_size(app->gui, window_size.x, window_size.y);
+    if (       event->type == SDL_EVENT_WINDOW_RESIZED
+            || event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+            || event->type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
+        if (!nc_gui_update_window_metrics(app->gui, app->renderer)) {
+            goto error;
+        }
+        nc_player_input_update_view(
+                app->player_input,
+                app->renderer,
+                nc_gui_get_scale(app->gui));
     }
 
-    if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
-        const vkm_usvec2 viewport = nc_renderer_get_viewport(app->renderer);
-        nc_gui_set_pixel_viewport(app->gui, viewport.x, viewport.y);
+    const bool gui_captured = nc_gui_handle_event(
+            app->gui,
+            event,
+            !nc_renderer_is_relative_mouse_mode(app->renderer));
+    if (!nc_player_input_handle_event(app->player_input, app->renderer, event, gui_captured)) {
+        goto error;
     }
-
-    if (event->type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
-        nc_gui_set_window_display_scale(app->gui, nc_renderer_get_window_display_scale(app->renderer));
-    }
-
-    const bool gui_captured = nc_gui_handle_event(app->gui, event);
-    nc__app_handle_gui_actions(app, nc_gui_consume_actions(app->gui));
 
     switch (event->type) {
         case SDL_EVENT_QUIT:
@@ -424,36 +426,16 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
         case SDL_EVENT_TERMINATING:
             SDL_Log("Received a terminating event.");
             return SDL_APP_SUCCESS;
-        case SDL_EVENT_MOUSE_MOTION:
-            if (!gui_captured) {
-                nc_camera_rotate(
-                        &app->camera,
-                        event->motion.xrel * vkm_deg2rad((float)nc_cvar_get_mouse_sensitivity()),
-                        -event->motion.yrel * vkm_deg2rad((float)nc_cvar_get_mouse_sensitivity()));
-            }
-            break;
         case SDL_EVENT_KEY_DOWN:
+            if (gui_captured) {
+                break;
+            }
             if (event->key.scancode == SDL_SCANCODE_ESCAPE) {
                 if (!nc_renderer_set_relative_mouse_mode(app->renderer, false)) {
                     goto error;
                 }
             } else if (event->key.scancode >= SDL_SCANCODE_1 && event->key.scancode <= SDL_SCANCODE_0) {
                 app->selected_type = (event->key.scancode - SDL_SCANCODE_1) % NC_BLOCK_TYPE_COUNT + 1;
-            }
-            break;
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            if (gui_captured) {
-                break;
-            }
-
-            if (!nc_renderer_set_relative_mouse_mode(app->renderer, true)) {
-                goto error;
-            }
-
-            if (event->button.button == SDL_BUTTON_RIGHT) {
-                nc__app_modify_block(app, app->selected_type);
-            } else if (event->button.button == SDL_BUTTON_LEFT) {
-                nc__app_modify_block(app, NC_BLOCK_TYPE_AIR);
             }
             break;
         default:

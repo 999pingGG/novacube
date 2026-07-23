@@ -2020,13 +2020,6 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
     };
-    const VkPipelineRasterizationStateCreateInfo raster_front_cull = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_FRONT_BIT,
-        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .lineWidth = 1.0f,
-    };
     const VkPipelineDepthStencilStateCreateInfo depth_enabled_write = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -2240,7 +2233,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
                     },
                 },
             },
-            &raster_front_cull,
+            &raster_no_cull,
             &depth_disabled,
             1,
             &alpha_blending,
@@ -3181,7 +3174,12 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
     const vkm_usvec2 display_viewport = nc__renderer_get_display_viewport(renderer);
     const nc__renderer_gui_uniforms_t uniforms = {
         .transform = pre_rotation,
-        .scale = { { 2.0f / (float)display_viewport.x, 2.0f / (float)display_viewport.y } },
+        .scale = {
+            {
+                2.0f * draw->scale / (float)display_viewport.x,
+                2.0f * draw->scale / (float)display_viewport.y,
+            },
+        },
         .translate = { { -1.0f, -1.0f } },
     };
     nc__renderer_address_push_constants_t push_constants;
@@ -3200,7 +3198,7 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
 
     const VkDeviceSize vertex_offset = 0;
     vkCmdBindVertexBuffers(renderer->frame_command_buffer, 0, 1, &draw->vertex_buffer->buffer, &vertex_offset);
-    vkCmdBindIndexBuffer(renderer->frame_command_buffer, draw->index_buffer->buffer, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdBindIndexBuffer(renderer->frame_command_buffer, draw->index_buffer->buffer, 0, VK_INDEX_TYPE_UINT32);
 
     for (uint32_t i = 0; i < draw->draw_command_count; i++) {
         const nc_renderer_overlay_draw_command_t* draw_command = &draw->draw_commands[i];
@@ -3523,6 +3521,21 @@ error:
 
 bool nc_renderer_set_relative_mouse_mode(nc_renderer_t* renderer, const bool enabled) {
     const bool sdl_result = SDL_SetWindowRelativeMouseMode(renderer->window, enabled);
+    NC_CHECK_SDL_RESULT(sdl_result);
+    return true;
+
+error:
+    return false;
+}
+
+bool nc_renderer_is_relative_mouse_mode(const nc_renderer_t* renderer) {
+    return SDL_GetWindowRelativeMouseMode(renderer->window);
+}
+
+bool nc_renderer_set_text_input_enabled(nc_renderer_t* renderer, const bool enabled) {
+    const bool sdl_result = enabled
+            ? SDL_StartTextInput(renderer->window)
+            : SDL_StopTextInput(renderer->window);
     NC_CHECK_SDL_RESULT(sdl_result);
     return true;
 
@@ -3952,16 +3965,13 @@ float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer) {
 }
 
 void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect) {
-    int count;
-    SDL_Window** windows = SDL_GetWindows(&count);
-    if (count == 0 || !windows[0] || !SDL_GetWindowSafeArea(windows[0], rect)) {
+    if (!SDL_GetWindowSafeArea(renderer->window, rect)) {
         SDL_LogWarn(
                 SDL_LOG_CATEGORY_APPLICATION,
                 "Failed to get the window's safe area. Falling back to the entire window.");
         const vkm_usvec2 window_size = nc_renderer_get_window_size(renderer);
         *rect = (SDL_Rect){ .x = 0, .y = 0, .w = window_size.x, .h = window_size.y };
     }
-    SDL_free((void*)windows);
 }
 
 void nc_renderer_fini(nc_renderer_t* renderer) {

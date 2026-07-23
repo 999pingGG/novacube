@@ -404,6 +404,10 @@ static bool nc__parse_double(nc__string_slice_t* slice, double* result) {
     return has_digit;
 }
 
+static bool nc__parse_gui_scale(nc__string_slice_t* slice, double* result) {
+    return nc__parse_double(slice, result) && *result >= 0.5 && *result <= 3.0;
+}
+
 static bool nc__parse_enum(nc__string_slice_t* slice, const nc__enum_entry_t* entries, int* result) {
     nc__right_trim_slice(slice);
 

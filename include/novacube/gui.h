@@ -3,45 +3,28 @@
 #define NOVACUBE_GUI_H_
 
 #include <stdbool.h>
-#include <stdint.h>
-
 #include <SDL3/SDL.h>
 
-#include <novacube/cvkm.h>
+#include <novacube/player_input.h>
 #include <novacube/renderer.h>
-
-typedef uint8_t nc_gui_controls_t;
-enum {
-    NC_GUI_CONTROL_MOVE_LEFT =      1u << 0,
-    NC_GUI_CONTROL_MOVE_RIGHT =     1u << 1,
-    NC_GUI_CONTROL_MOVE_FORWARD =   1u << 2,
-    NC_GUI_CONTROL_MOVE_BACKWARD =  1u << 3,
-    NC_GUI_CONTROL_MOVE_UP =        1u << 4,
-    NC_GUI_CONTROL_MOVE_DOWN =      1u << 5,
-};
-
-typedef uint8_t nc_gui_actions_t;
-enum {
-    NC_GUI_ACTION_PLACE_BLOCK =     1u << 0,
-    NC_GUI_ACTION_REMOVE_BLOCK =    1u << 1,
-};
 
 typedef struct nc_gui_context_t nc_gui_context_t;
 
 nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer);
-void nc_gui_set_window_size(nc_gui_context_t* context, uint16_t width, uint16_t height);
-void nc_gui_set_pixel_viewport(nc_gui_context_t* context, uint16_t width, uint16_t height);
-void nc_gui_set_window_display_scale(nc_gui_context_t* context, float window_display_scale);
-bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event);
-nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context);
-void nc_gui_get_movement_delta(const nc_gui_context_t* context, vkm_vec2* delta);
-void nc_gui_get_camera_delta(const nc_gui_context_t* context, vkm_vec2* delta);
-nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context);
-bool nc_gui_consume_look_delta(nc_gui_context_t* context, vkm_vec2* delta);
-bool nc_gui_is_touch_captured(const nc_gui_context_t* context, SDL_FingerID finger_id);
-bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, float delta_time);
+bool nc_gui_update_window_metrics(nc_gui_context_t* context, nc_renderer_t* renderer);
+float nc_gui_get_scale(const nc_gui_context_t* context);
+bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event, bool mouse_input_enabled);
+bool nc_gui_is_keyboard_captured(const nc_gui_context_t* context);
+bool nc_gui_prepare_frame(
+        nc_gui_context_t* context,
+        nc_renderer_t* renderer,
+        const nc_player_input_overlay_t* player_input,
+        float delta_time);
 void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overlay_draw_t* draw);
-void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw);
+void nc_gui_get_procedural_overlay_draw(
+        const nc_gui_context_t* context,
+        const nc_player_input_overlay_t* player_input,
+        nc_renderer_procedural_overlay_draw_t* draw);
 void nc_gui_append_debug_text(nc_gui_context_t* context, const char* text, size_t length);
 void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer);
 #endif

@@ -66,6 +66,7 @@ typedef struct nc_renderer_overlay_draw_t {
     const nc_renderer_buffer_t* index_buffer;
     const nc_renderer_overlay_draw_command_t* draw_commands;
     uint32_t draw_command_count;
+    float scale;
 } nc_renderer_overlay_draw_t;
 
 typedef struct nc_renderer_procedural_overlay_draw_t {
@@ -113,6 +114,8 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event);
 bool nc_renderer_begin_frame(nc_renderer_t* renderer);
 bool nc_renderer_end_frame(nc_renderer_t* renderer);
 bool nc_renderer_set_relative_mouse_mode(nc_renderer_t* renderer, bool enabled);
+bool nc_renderer_is_relative_mouse_mode(const nc_renderer_t* renderer);
+bool nc_renderer_set_text_input_enabled(nc_renderer_t* renderer, bool enabled);
 bool nc_renderer_is_foreground(const nc_renderer_t* renderer);
 vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer);
 vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer);

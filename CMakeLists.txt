@@ -27,6 +27,8 @@ set(NC_SOURCES
         src/gui.c
         src/main.c
         src/mesher.c
+        src/nuklear_backend.c
+        src/player_input.c
         src/renderer.c
         src/string_builder.c
         src/terrain.c
