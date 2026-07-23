@@ -46,19 +46,19 @@ typedef struct nc_renderer_overlay_draw_command_t {
     uint32_t first_index;
 } nc_renderer_overlay_draw_command_t;
 
-typedef struct nc_renderer_chunk_opaque_draw_t {
+typedef struct nc_renderer_chunk_draw_t {
     // SSBO containing an array of nc_mesh_quad_t.
     nc_renderer_buffer_t* chunk_buffer;
-    uint32_t quad_count;
     // SSBO containing an array of nc_mesh_face_data_t.
     nc_renderer_buffer_t* face_data_buffer;
     const nc_renderer_texture_t* texture;
     vkm_vec3 position;
-} nc_renderer_chunk_opaque_draw_t;
+    uint32_t quad_count;
+} nc_renderer_chunk_draw_t;
 
 #define TDS_DECLARE
-#define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
-#define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
+#define TDS_VALUE_T nc_renderer_chunk_draw_t
+#define TDS_TYPE nc_renderer_chunk_draw_vec
 #include <tds/vector.h>
 
 typedef struct nc_renderer_overlay_draw_t {
@@ -100,7 +100,8 @@ typedef struct nc_renderer_frame_t {
     // Multiplier for sky light, in the [0, 1] range.
     float sunlight_intensity;
     const nc_renderer_sky_draw_t* sky_draw;
-    const nc_renderer_chunk_opaque_draw_vec* opaque_draws;
+    const nc_renderer_chunk_draw_vec* opaque_chunk_draws;
+    const nc_renderer_chunk_draw_vec* transparent_chunk_draws;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;
     const nc_renderer_procedural_overlay_draw_t* procedural_overlay_draw;

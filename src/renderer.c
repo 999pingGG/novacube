@@ -43,7 +43,7 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
 #define NC__RENDERER_TRANSFER_PAGE_CAPACITY (1024 * 1024)
 #define NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES 60
-#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 4096
+#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 32
 #define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
 #define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
 #define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
@@ -202,6 +202,12 @@ typedef struct nc__renderer_address_push_constants_t {
 #define TDS_VALUE_T nc__renderer_retired_buffer_t
 #include <tds/vector.h>
 
+typedef struct nc__renderer_image_t {
+    VkImage image;
+    VmaAllocation allocation;
+    VkImageView view;
+} nc__renderer_image_t;
+
 typedef struct nc_renderer_t {
     VkInstance instance;
     VkPhysicalDevice physical_device;
@@ -219,6 +225,7 @@ typedef struct nc_renderer_t {
     VkFormat swapchain_format;
     VkImage* swapchain_images;
     VkImageView* swapchain_image_views;
+    bool* swapchain_image_initialized;
     VkFramebuffer* framebuffers;
     uint32_t swapchain_image_count;
     vkm_usvec2 window_size;
@@ -228,17 +235,22 @@ typedef struct nc_renderer_t {
     bool swapchain_dirty;
     bool surface_dirty;
 
-    VkImage depth_image;
-    VmaAllocation depth_allocation;
-    VkImageView depth_image_view;
+    nc__renderer_image_t depth;
+    nc__renderer_image_t accumulation;
+    nc__renderer_image_t reveal;
+    bool render_pass_attachments_initialized;
 
     VkRenderPass render_pass;
     VkDescriptorSetLayout texture_descriptor_set_layout;
+    VkDescriptorSetLayout composite_descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
+    VkPipelineLayout composite_pipeline_layout;
     VkDescriptorPool frame_descriptor_pool;
     uint32_t frame_descriptor_set_count;
 
-    VkPipeline chunk_pipeline;
+    VkPipeline opaque_chunk_pipeline;
+    VkPipeline transparent_chunk_pipeline;
+    VkPipeline composite_chunk_pipeline;
     VkPipeline gui_pipeline;
     VkPipeline procedural_overlay_invert_pipeline;
     VkPipeline procedural_overlay_stick_pipeline;
@@ -270,8 +282,8 @@ typedef struct nc_renderer_t {
 } nc_renderer_t;
 
 #define TDS_IMPLEMENT
-#define TDS_VALUE_T nc_renderer_chunk_opaque_draw_t
-#define TDS_TYPE nc_renderer_chunk_opaque_draw_vec
+#define TDS_VALUE_T nc_renderer_chunk_draw_t
+#define TDS_TYPE nc_renderer_chunk_draw_vec
 #include <tds/vector.h>
 
 typedef struct nc__renderer_required_extension {
@@ -921,6 +933,9 @@ static bool nc__renderer_create_device(
 ) {
     VkPhysicalDeviceFeatures2 enabled_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .features = {
+            .independentBlend = VK_TRUE,
+        },
     };
     VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_layout_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
@@ -1151,11 +1166,14 @@ error:
 }
 
 static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
+    // Opaque geometry writes depth, but the later OIT and composition subpasses only need to retain the same depth
+    // attachment. Making it read-only after the opaque pass helps Arm GPUs keep early ZS testing enabled and allows
+    // the driver to fuse all subpasses into one physical tile pass.
     NC__CHECK_VK_RESULT(vkCreateRenderPass(
             renderer->device,
             &(VkRenderPassCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                .attachmentCount = 2,
+                .attachmentCount = 4,
                 .pAttachments = (VkAttachmentDescription[]){
                     {
                         .format = renderer->swapchain_format,
@@ -1164,7 +1182,9 @@ static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        // PRESENT and COLOR_ATTACHMENT are both transaction-elimination-safe layouts on Arm. Keeping
+                        // the swapchain image in safe layouts preserves its tile-signature metadata between frames.
+                        .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                         .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     },
                     {
@@ -1174,33 +1194,145 @@ static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
                         .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        // These steady-state layouts match the preceding frame. A one-time barrier establishes them
+                        // after image creation, so subsequent render passes need no external attachment barriers.
+                        .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     },
-                },
-                .subpassCount = 1,
-                .pSubpasses = &(VkSubpassDescription){
-                    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    .colorAttachmentCount = 1,
-                    .pColorAttachments = &(VkAttachmentReference){
-                        .attachment = 0,
-                        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    {
+                        .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                        .samples = VK_SAMPLE_COUNT_1_BIT,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        // The OIT intermediates remain in safe layouts for their entire lifetime. DONT_CARE stores and
+                        // transient lazy memory allow a tile renderer to discard their contents without RAM traffic.
+                        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     },
-                    .pDepthStencilAttachment = &(VkAttachmentReference){
-                        .attachment = 1,
-                        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    {
+                        .format = VK_FORMAT_R16_SFLOAT,
+                        .samples = VK_SAMPLE_COUNT_1_BIT,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        // See the accumulation attachment above. Both intermediates are consumed as input attachments
+                        // inside this render pass instead of being stored and sampled through external memory.
+                        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     },
                 },
-                .dependencyCount = 1,
-                .pDependencies = &(VkSubpassDependency){
-                    .srcSubpass = VK_SUBPASS_EXTERNAL,
-                    .dstSubpass = 0,
-                    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .subpassCount = 3,
+                .pSubpasses = (VkSubpassDescription[]){
+                    // opaque pass
+                    {
+                        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        .colorAttachmentCount = 1,
+                        .pColorAttachments = &(VkAttachmentReference){
+                            .attachment = 0,
+                            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        },
+                        .pDepthStencilAttachment = &(VkAttachmentReference){
+                            .attachment = 1,
+                            .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        },
+                    },
+                    // OIT accumulation + reveal pass
+                    {
+                        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        .colorAttachmentCount = 2,
+                        .pColorAttachments = (VkAttachmentReference[]){
+                            {
+                                .attachment = 2,
+                                .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            },
+                            {
+                                .attachment = 3,
+                                .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            },
+                        },
+                        .pDepthStencilAttachment = &(VkAttachmentReference){
+                            .attachment = 1,
+                            .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        },
+                        .preserveAttachmentCount = 1,
+                        .pPreserveAttachments = &(uint32_t){ 0 },
+                    },
+                    // composition pass
+                    {
+                        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        .inputAttachmentCount = 2,
+                        .pInputAttachments = (VkAttachmentReference[]){
+                            {
+                                .attachment = 2,
+                                // SHADER_READ_ONLY is an Arm transaction-elimination-safe layout and enables a
+                                // tile-local input-attachment read when the subpasses are fused.
+                                .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            },
+                            {
+                                .attachment = 3,
+                                // Keep reveal tile-local for the same reason as accumulation above.
+                                .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            },
+                        },
+                        .colorAttachmentCount = 1,
+                        .pColorAttachments = &(VkAttachmentReference){
+                            .attachment = 0,
+                            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        },
+                        .pDepthStencilAttachment = &(VkAttachmentReference){
+                            .attachment = 1,
+                            .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        },
+                    },
+                },
+                // All dependencies are framebuffer-local. This is the key signal that lets a tile renderer keep the
+                // intermediate values on-chip while progressing through the subpasses tile by tile.
+                .dependencyCount = 3,
+                .pDependencies = (VkSubpassDependency[]){
+                    {
+                        .srcSubpass = VK_SUBPASS_EXTERNAL,
+                        .dstSubpass = 0,
+                        .srcStageMask =
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                        .dstStageMask =
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                        .dstAccessMask =
+                                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        // BY_REGION expresses a per-pixel dependency, allowing tile-based GPUs to advance one tile
+                        // through the subpasses without waiting for the entire framebuffer.
+                        .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+                    },
+                    {
+                        .srcSubpass = 0,
+                        .dstSubpass = 1,
+                        .srcStageMask =
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                        .dstStageMask =
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                                | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        .dstAccessMask =
+                                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+                    },
+                    {
+                        .srcSubpass = 1,
+                        .dstSubpass = 2,
+                        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+                        .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+                    },
                 },
             },
             NULL,
@@ -1211,63 +1343,169 @@ error:
     return false;
 }
 
-static void nc__renderer_destroy_depth_image(nc_renderer_t* renderer) {
-    vkDestroyImageView(renderer->device, renderer->depth_image_view, NULL);
-    renderer->depth_image_view = VK_NULL_HANDLE;
+static void nc__renderer_destroy_image(nc_renderer_t* renderer, nc__renderer_image_t* image) {
+    vkDestroyImageView(renderer->device, image->view, NULL);
 
-    if (renderer->depth_image) {
-        vmaDestroyImage(renderer->allocator, renderer->depth_image, renderer->depth_allocation);
-        renderer->depth_image = VK_NULL_HANDLE;
-        renderer->depth_allocation = VK_NULL_HANDLE;
+    if (image->image) {
+        vmaDestroyImage(renderer->allocator, image->image, image->allocation);
     }
+
+    *image = (nc__renderer_image_t){ 0 };
 }
 
-static bool nc__renderer_create_depth_image(nc_renderer_t* renderer) {
-    nc__renderer_destroy_depth_image(renderer);
+static bool nc__renderer_create_render_pass_attachment(
+    nc_renderer_t* renderer,
+    nc__renderer_image_t* image,
+    const VkFormat format,
+    const bool color_and_input
+) {
+    nc__renderer_destroy_image(renderer, image);
 
     NC__CHECK_VK_RESULT(vmaCreateImage(
             renderer->allocator,
             &(VkImageCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                 .imageType = VK_IMAGE_TYPE_2D,
-                .format = NC__RENDERER_DEPTH_FORMAT,
+                .format = format,
                 .extent = { renderer->viewport.x, renderer->viewport.y, 1, },
                 .mipLevels = 1,
                 .arrayLayers = 1,
                 .samples = VK_SAMPLE_COUNT_1_BIT,
                 .tiling = VK_IMAGE_TILING_OPTIMAL,
-                .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                .usage = (
+                    color_and_input
+                        ? (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)
+                        : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+                    | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                // must be UNDEFINED or PREINITIALIZED or ZERO_INITIALIZED
                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             },
             &(VmaAllocationCreateInfo){
-                .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
                 .preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
             },
-            &renderer->depth_image,
-            &renderer->depth_allocation,
+            &image->image,
+            &image->allocation,
             NULL));
 
     NC__CHECK_VK_RESULT(vkCreateImageView(
             renderer->device,
             &(VkImageViewCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                .image = renderer->depth_image,
+                .image = image->image,
                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                .format = NC__RENDERER_DEPTH_FORMAT,
+                .format = format,
+                .subresourceRange = {
+                    .aspectMask = color_and_input ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                },
+            },
+            NULL,
+            &image->view));
+    return true;
+
+error:
+    nc__renderer_destroy_image(renderer, image);
+    return false;
+}
+
+static void nc__renderer_initialize_render_pass_attachments(nc_renderer_t* renderer) {
+    // These newly created optimal-tiled images start as UNDEFINED, while the steady-state render pass deliberately
+    // starts from safe layouts. Establish those layouts once after each swapchain recreation; the render pass then
+    // performs all recurring subpass and final transitions implicitly.
+    // This exists for the transaction elimination ARM optimization.
+    if (!renderer->render_pass_attachments_initialized) {
+        const VkImageMemoryBarrier barriers[] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                        | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = renderer->depth.image,
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
                     .levelCount = 1,
                     .layerCount = 1,
                 },
             },
-            NULL,
-            &renderer->depth_image_view));
-    return true;
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = renderer->accumulation.image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                },
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = renderer->reveal.image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                },
+            },
+        };
+        vkCmdPipelineBarrier(
+                renderer->frame_command_buffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                NULL,
+                0,
+                NULL,
+                NC_COUNTOF(barriers),
+                barriers);
+        renderer->render_pass_attachments_initialized = true;
+    }
 
-error:
-    nc__renderer_destroy_depth_image(renderer);
-    return false;
+    const uint32_t image_index = renderer->frame_swapchain_image_index;
+    if (!renderer->swapchain_image_initialized[image_index]) {
+        // Each swapchain image is UNDEFINED until its first acquisition. Move it to PRESENT once so every later frame
+        // can follow the transaction-elimination-safe PRESENT -> COLOR_ATTACHMENT -> PRESENT render-pass path. The
+        // acquired-image semaphore wait includes COLOR_ATTACHMENT_OUTPUT, so this transition cannot race presentation.
+        const VkImageMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = renderer->swapchain_images[image_index],
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = 1,
+            },
+        };
+        vkCmdPipelineBarrier(
+                renderer->frame_command_buffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                NULL,
+                0,
+                NULL,
+                1,
+                &barrier);
+        renderer->swapchain_image_initialized[image_index] = true;
+    }
 }
 
 static void nc__renderer_destroy_framebuffers(nc_renderer_t* renderer) {
@@ -1285,7 +1523,9 @@ static bool nc__renderer_create_framebuffers(nc_renderer_t* renderer) {
     for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
         const VkImageView attachments[] = {
             renderer->swapchain_image_views[i],
-            renderer->depth_image_view,
+            renderer->depth.view,
+            renderer->accumulation.view,
+            renderer->reveal.view,
         };
         NC__CHECK_VK_RESULT(vkCreateFramebuffer(
                 renderer->device,
@@ -1313,7 +1553,7 @@ static void nc__renderer_destroy_present_semaphores(nc_renderer_t* renderer) {
         for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
             vkDestroySemaphore(renderer->device, renderer->render_finished_semaphores[i], NULL);
         }
-        free(renderer->render_finished_semaphores);
+        free((void*)renderer->render_finished_semaphores);
         renderer->render_finished_semaphores = NULL;
     }
 }
@@ -1339,7 +1579,11 @@ error:
 
 static void nc__renderer_destroy_swapchain_images(nc_renderer_t* renderer) {
     nc__renderer_destroy_framebuffers(renderer);
-    nc__renderer_destroy_depth_image(renderer);
+    nc__renderer_destroy_image(renderer, &renderer->depth);
+    nc__renderer_destroy_image(renderer, &renderer->accumulation);
+    nc__renderer_destroy_image(renderer, &renderer->reveal);
+    // Newly created replacement images return to UNDEFINED and need their one-time initialization barriers again.
+    renderer->render_pass_attachments_initialized = false;
     nc__renderer_destroy_present_semaphores(renderer);
 
     if (renderer->swapchain_image_views) {
@@ -1350,8 +1594,10 @@ static void nc__renderer_destroy_swapchain_images(nc_renderer_t* renderer) {
         renderer->swapchain_image_views = NULL;
     }
 
-    free(renderer->swapchain_images);
+    free((void*)renderer->swapchain_images);
     renderer->swapchain_images = NULL;
+    free(renderer->swapchain_image_initialized);
+    renderer->swapchain_image_initialized = NULL;
     renderer->swapchain_image_count = 0;
 }
 
@@ -1455,8 +1701,13 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
             renderer->swapchain,
             &renderer->swapchain_image_count,
             renderer->swapchain_images));
+    renderer->swapchain_image_initialized = calloc(
+            renderer->swapchain_image_count,
+            sizeof(*renderer->swapchain_image_initialized));
 
-    renderer->swapchain_image_views = calloc(renderer->swapchain_image_count, sizeof(*renderer->swapchain_image_views));
+    renderer->swapchain_image_views = (VkImageView*)calloc(
+            renderer->swapchain_image_count,
+            sizeof(*renderer->swapchain_image_views));
     for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
         NC__CHECK_VK_RESULT(vkCreateImageView(
                 renderer->device,
@@ -1478,9 +1729,23 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     if (!renderer->render_pass && !nc__renderer_create_render_pass(renderer)) {
         goto error;
     }
-    if (!nc__renderer_create_present_semaphores(renderer) ||
-            !nc__renderer_create_depth_image(renderer) ||
-            !nc__renderer_create_framebuffers(renderer)) {
+    if (       !nc__renderer_create_present_semaphores(renderer)
+            || !nc__renderer_create_render_pass_attachment(
+                    renderer,
+                    &renderer->depth,
+                    NC__RENDERER_DEPTH_FORMAT,
+                    false)
+            || !nc__renderer_create_render_pass_attachment(
+                    renderer,
+                    &renderer->accumulation,
+                    VK_FORMAT_R16G16B16A16_SFLOAT,
+                    true)
+            || !nc__renderer_create_render_pass_attachment(
+                    renderer,
+                    &renderer->reveal,
+                    VK_FORMAT_R16_SFLOAT,
+                    true)
+            || !nc__renderer_create_framebuffers(renderer)) {
         goto error;
     }
 
@@ -1517,10 +1782,16 @@ static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
                 .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                 .flags = 0,
                 .maxSets = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-                .poolSizeCount = 1,
-                .pPoolSizes = &(VkDescriptorPoolSize){
-                    .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                .poolSizeCount = 2,
+                .pPoolSizes = (VkDescriptorPoolSize[]){
+                    {
+                        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                    },
+                    {
+                        .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                        .descriptorCount = 2 * NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                    },
                 },
             },
             NULL,
@@ -1546,6 +1817,28 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
             },
             NULL,
             &renderer->texture_descriptor_set_layout));
+    NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
+            renderer->device,
+            &(VkDescriptorSetLayoutCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .bindingCount = 2,
+                .pBindings = (VkDescriptorSetLayoutBinding[]){
+                    {
+                        .binding = 0,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                        .descriptorCount = 1,
+                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    },
+                    {
+                        .binding = 1,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                        .descriptorCount = 1,
+                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    },
+                },
+            },
+            NULL,
+            &renderer->composite_descriptor_set_layout));
     NC__CHECK_VK_RESULT(vkCreatePipelineLayout(
             renderer->device,
             &(VkPipelineLayoutCreateInfo){
@@ -1568,6 +1861,15 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
             },
             NULL,
             &renderer->pipeline_layout));
+    NC__CHECK_VK_RESULT(vkCreatePipelineLayout(
+            renderer->device,
+            &(VkPipelineLayoutCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                .setLayoutCount = 1,
+                .pSetLayouts = &renderer->composite_descriptor_set_layout,
+            },
+            NULL,
+            &renderer->composite_pipeline_layout));
     return true;
 
 error:
@@ -1581,8 +1883,14 @@ static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
     vkDestroyPipelineLayout(renderer->device, renderer->pipeline_layout, NULL);
     renderer->pipeline_layout = VK_NULL_HANDLE;
 
+    vkDestroyPipelineLayout(renderer->device, renderer->composite_pipeline_layout, NULL);
+    renderer->composite_pipeline_layout = VK_NULL_HANDLE;
+
     vkDestroyDescriptorSetLayout(renderer->device, renderer->texture_descriptor_set_layout, NULL);
     renderer->texture_descriptor_set_layout = VK_NULL_HANDLE;
+
+    vkDestroyDescriptorSetLayout(renderer->device, renderer->composite_descriptor_set_layout, NULL);
+    renderer->composite_descriptor_set_layout = VK_NULL_HANDLE;
 }
 
 static VkShaderModule nc__renderer_load_shader(const nc_renderer_t* renderer, const char* path) {
@@ -1612,13 +1920,16 @@ error:
 
 static bool nc__renderer_create_graphics_pipeline(
     const nc_renderer_t* renderer,
+    const VkPipelineLayout pipeline_layout,
     const char* vertex_shader_path,
     const char* fragment_shader_path,
     const VkPrimitiveTopology topology,
     const VkPipelineVertexInputStateCreateInfo* vertex_input_state,
     const VkPipelineRasterizationStateCreateInfo* rasterization_state,
     const VkPipelineDepthStencilStateCreateInfo* depth_stencil_state,
-    const VkPipelineColorBlendAttachmentState* color_blend_attachment,
+    const uint32_t color_blend_attachment_count,
+    const VkPipelineColorBlendAttachmentState* color_blend_attachments,
+    const uint32_t subpass,
     VkPipeline* out_pipeline
 ) {
     VkShaderModule vertex_shader = nc__renderer_load_shader(renderer, vertex_shader_path);
@@ -1664,8 +1975,8 @@ static bool nc__renderer_create_graphics_pipeline(
                 .pDepthStencilState = depth_stencil_state,
                 .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                    .attachmentCount = 1,
-                    .pAttachments = color_blend_attachment,
+                    .attachmentCount = color_blend_attachment_count,
+                    .pAttachments = color_blend_attachments,
                 },
                 .pDynamicState = &(VkPipelineDynamicStateCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -1675,9 +1986,9 @@ static bool nc__renderer_create_graphics_pipeline(
                         VK_DYNAMIC_STATE_SCISSOR,
                     },
                 },
-                .layout = renderer->pipeline_layout,
+                .layout = pipeline_layout,
                 .renderPass = renderer->render_pass,
-                .subpass = 0,
+                .subpass = subpass,
             },
             NULL,
             out_pipeline));
@@ -1695,6 +2006,12 @@ error:
 static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
     const VkPipelineVertexInputStateCreateInfo no_vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineRasterizationStateCreateInfo raster_no_cull = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .lineWidth = 1.0f,
     };
     const VkPipelineRasterizationStateCreateInfo raster_back_cull = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -1733,11 +2050,14 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
 
     };
-    const VkPipelineColorBlendAttachmentState no_blend = {
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    const VkPipelineColorBlendAttachmentState no_blending = {
+        .colorWriteMask =
+                  VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
     };
-    const VkPipelineColorBlendAttachmentState alpha_blend = {
+    const VkPipelineColorBlendAttachmentState alpha_blending = {
         .blendEnable = VK_TRUE,
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
         .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -1745,10 +2065,13 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask =
+                  VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
     };
-    const VkPipelineColorBlendAttachmentState subtract_blend = {
+    const VkPipelineColorBlendAttachmentState subtract_blending = {
         .blendEnable = VK_TRUE,
         .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
@@ -1756,58 +2079,134 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask =
+                  VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState additive_blending = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask =
+                  VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState multiplicative_blending = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask =
+                  VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
     };
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            renderer->pipeline_layout,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-frag.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-opaque-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_back_cull,
             &depth_enabled_write,
-            &no_blend,
-            &renderer->chunk_pipeline)) {
+            1,
+            &no_blending,
+            0,
+            &renderer->opaque_chunk_pipeline)) {
         return false;
     }
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            renderer->pipeline_layout,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-transparent-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
-            &raster_back_cull,
+            &raster_no_cull,
             &depth_enabled_no_write,
-            &alpha_blend,
-            &renderer->outline_block_highlight_pipeline) ||
-            !nc__renderer_create_graphics_pipeline(
-            renderer,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            &no_vertex_input,
-            &raster_back_cull,
-            &depth_enabled_no_write,
-            &alpha_blend,
-            &renderer->vignette_block_highlight_pipeline) ||
-            !nc__renderer_create_graphics_pipeline(
-            renderer,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            &no_vertex_input,
-            &raster_back_cull,
-            &depth_enabled_no_write,
-            &alpha_blend,
-            &renderer->plasma_block_highlight_pipeline)) {
+            2,
+            (VkPipelineColorBlendAttachmentState[]){ additive_blending, multiplicative_blending },
+            1,
+            &renderer->transparent_chunk_pipeline)) {
         return false;
     }
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            renderer->composite_pipeline_layout,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/fullscreen-triangle-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-composite-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+            &no_vertex_input,
+            &raster_back_cull,
+            &depth_disabled,
+            1,
+            &alpha_blending,
+            2,
+            &renderer->composite_chunk_pipeline)) {
+        return false;
+    }
+
+    if (!   nc__renderer_create_graphics_pipeline(
+                renderer,
+                renderer->pipeline_layout,
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
+                VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                &no_vertex_input,
+                &raster_back_cull,
+                &depth_enabled_no_write,
+                1,
+                &alpha_blending,
+                2,
+                &renderer->outline_block_highlight_pipeline)
+         || !nc__renderer_create_graphics_pipeline(
+                renderer,
+                renderer->pipeline_layout,
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
+                VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                &no_vertex_input,
+                &raster_back_cull,
+                &depth_enabled_no_write,
+                1,
+                &alpha_blending,
+                2,
+                &renderer->vignette_block_highlight_pipeline)
+         || !nc__renderer_create_graphics_pipeline(
+                renderer,
+                renderer->pipeline_layout,
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
+                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
+                VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                &no_vertex_input,
+                &raster_back_cull,
+                &depth_enabled_no_write,
+                1,
+                &alpha_blending,
+                2,
+                &renderer->plasma_block_highlight_pipeline)) {
+        return false;
+    }
+
+    if (!nc__renderer_create_graphics_pipeline(
+            renderer,
+            renderer->pipeline_layout,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
@@ -1843,46 +2242,57 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             },
             &raster_front_cull,
             &depth_disabled,
-            &alpha_blend,
+            1,
+            &alpha_blending,
+            2,
             &renderer->gui_pipeline)) {
         return false;
     }
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
+            renderer->pipeline_layout,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/fullscreen-triangle-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_disabled,
-            &subtract_blend,
+            1,
+            &subtract_blending,
+            2,
             &renderer->procedural_overlay_invert_pipeline)) {
         return false;
     }
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            renderer->pipeline_layout,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_disabled,
-            &no_blend,
+            1,
+            &no_blending,
+            2,
             &renderer->procedural_overlay_stick_pipeline)) {
         return false;
     }
 
     return nc__renderer_create_graphics_pipeline(
             renderer,
+            renderer->pipeline_layout,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-frag.spv",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
             &depth_sky,
-            &no_blend,
+            1,
+            &no_blending,
+            0,
             &renderer->sky_pipeline);
 }
 
@@ -1891,7 +2301,9 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     vkDestroyPipeline(renderer->device, renderer->procedural_overlay_invert_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->sky_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->gui_pipeline, NULL);
-    vkDestroyPipeline(renderer->device, renderer->chunk_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->composite_chunk_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->transparent_chunk_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->opaque_chunk_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->plasma_block_highlight_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->vignette_block_highlight_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->outline_block_highlight_pipeline, NULL);
@@ -1900,7 +2312,9 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     renderer->procedural_overlay_invert_pipeline = VK_NULL_HANDLE;
     renderer->sky_pipeline = VK_NULL_HANDLE;
     renderer->gui_pipeline = VK_NULL_HANDLE;
-    renderer->chunk_pipeline = VK_NULL_HANDLE;
+    renderer->composite_chunk_pipeline = VK_NULL_HANDLE;
+    renderer->transparent_chunk_pipeline = VK_NULL_HANDLE;
+    renderer->opaque_chunk_pipeline = VK_NULL_HANDLE;
     renderer->plasma_block_highlight_pipeline = VK_NULL_HANDLE;
     renderer->vignette_block_highlight_pipeline = VK_NULL_HANDLE;
     renderer->outline_block_highlight_pipeline = VK_NULL_HANDLE;
@@ -2050,6 +2464,79 @@ error:
     return false;
 }
 
+static bool nc__renderer_bind_composite_descriptor_set(nc_renderer_t* renderer) {
+    if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
+        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
+        return false;
+    }
+
+    VkDescriptorSet descriptor_set;
+    const VkResult result = vkAllocateDescriptorSets(
+            renderer->device,
+            &(VkDescriptorSetAllocateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                .descriptorPool = renderer->frame_descriptor_pool,
+                .descriptorSetCount = 1,
+                .pSetLayouts = &renderer->composite_descriptor_set_layout,
+            },
+            &descriptor_set);
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
+        return false;
+    }
+    NC__CHECK_VK_RESULT(result);
+
+    renderer->frame_descriptor_set_count++;
+
+    const VkDescriptorImageInfo image_infos[] = {
+        {
+            .imageView = renderer->accumulation.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        {
+            .imageView = renderer->reveal.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+    };
+    vkUpdateDescriptorSets(
+            renderer->device,
+            2,
+            (VkWriteDescriptorSet[]){
+                {
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = descriptor_set,
+                    .dstBinding = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                    .pImageInfo = &image_infos[0],
+                },
+                {
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = descriptor_set,
+                    .dstBinding = 1,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                    .pImageInfo = &image_infos[1],
+                },
+            },
+            0,
+            NULL);
+
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->composite_pipeline_layout,
+            0,
+            1,
+            &descriptor_set,
+            0,
+            NULL);
+    return true;
+
+error:
+    return false;
+}
+
 static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer, const SDL_Rect* scissor_rect) {
     vkCmdSetViewport(
             renderer->frame_command_buffer,
@@ -2122,6 +2609,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
         VkAccessFlags src_access = 0;
         switch (texture->layout) {
+            // TODO: Does this affect transaction elimination in ARM?
             case VK_IMAGE_LAYOUT_UNDEFINED:
                 texture_src_stages |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
                 break;
@@ -2248,7 +2736,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
     nc__renderer_upload_op_vec_clear(&renderer->upload_ops);
     renderer->uploads_dirty = false;
-    free(uploaded_textures);
+    free((void*)uploaded_textures);
     free(image_barriers);
     return true;
 }
@@ -2439,6 +2927,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
     result->height = height;
     result->layer_count = layer_count;
     result->is_array = is_array;
+    // TODO: Does this affect transaction elimination in ARM?
     result->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     NC__CHECK_VK_RESULT(vmaCreateImage(
@@ -2454,6 +2943,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
                 .tiling = VK_IMAGE_TILING_OPTIMAL,
                 .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                // TODO: Does this affect transaction elimination in ARM?
                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             },
             &(VmaAllocationCreateInfo){
@@ -2507,9 +2997,9 @@ static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_rend
     free(texture);
 }
 
-static bool nc__renderer_draw_chunk_opaque(
+static bool nc__renderer_draw_chunk(
         nc_renderer_t* renderer,
-        const nc_renderer_chunk_opaque_draw_t* draw,
+        const nc_renderer_chunk_draw_t* draw,
         const vkm_mat4* view_projection,
         const vkm_vec4* quad_expansion,
         const float sunlight_intensity
@@ -3307,11 +3797,16 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     nc__renderer_pre_rotate_view_projection(renderer, frame->view_projection, &view_projection);
     vkm_invert(&view_projection, &inverse_view_projection);
 
+    nc__renderer_initialize_render_pass_attachments(renderer);
     const VkClearValue clear_values[] = {
+        // swapchain image (unused, the load operation is "don't care")
         { 0 },
-        {
-            .depthStencil = { .depth = 1.0f },
-        },
+        // depth
+        { .depthStencil = { .depth = 1.0f } },
+        // accumulation
+        { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } },
+        // reveal
+        { .color = { .float32 = { 1.0f } } },
     };
     vkCmdBeginRenderPass(
             renderer->frame_command_buffer,
@@ -3328,16 +3823,23 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             VK_SUBPASS_CONTENTS_INLINE);
 
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
-    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->chunk_pipeline);
+
     const vkm_vec4 quad_expansion = { {
         2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.x,
         2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.y,
         (float)renderer->viewport.x / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
         (float)renderer->viewport.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
     } };
+
     const nc_renderer_texture_t* bound_chunk_texture = NULL;
-    for (uint32_t i = 0; i < nc_renderer_chunk_opaque_draw_vec_count(frame->opaque_draws); i++) {
-        const nc_renderer_chunk_opaque_draw_t draw = nc_renderer_chunk_opaque_draw_vec_get(frame->opaque_draws, i);
+
+#pragma region Opaque pass
+    vkCmdBindPipeline(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->opaque_chunk_pipeline);
+    for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->opaque_chunk_draws); i++) {
+        const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->opaque_chunk_draws, i);
         if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
             NC_ASSERT(draw.texture->is_array);
             if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
@@ -3346,7 +3848,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             bound_chunk_texture = draw.texture;
         }
 
-        if (!nc__renderer_draw_chunk_opaque(
+        if (!nc__renderer_draw_chunk(
                 renderer,
                 &draw,
                 &view_projection,
@@ -3355,6 +3857,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             return false;
         }
     }
+
     if (!nc__renderer_draw_sky(
             renderer,
             frame->sky_draw,
@@ -3362,9 +3865,51 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             &frame->camera_position)) {
         return false;
     }
+#pragma endregion
+
+#pragma region Transparent pass
+    vkCmdNextSubpass(renderer->frame_command_buffer, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->transparent_chunk_pipeline);
+    for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->transparent_chunk_draws); i++) {
+        const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->transparent_chunk_draws, i);
+        if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
+            NC_ASSERT(draw.texture->is_array);
+            if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
+                return false;
+            }
+            bound_chunk_texture = draw.texture;
+        }
+
+        if (!nc__renderer_draw_chunk(
+                renderer,
+                &draw,
+                &view_projection,
+                &quad_expansion,
+                frame->sunlight_intensity)) {
+            return false;
+        }
+    }
+#pragma endregion
+
+#pragma region Composite pass
+    vkCmdNextSubpass(renderer->frame_command_buffer, VK_SUBPASS_CONTENTS_INLINE);
+    if (!nc__renderer_bind_composite_descriptor_set(renderer)) {
+        return false;
+    }
+    vkCmdBindPipeline(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->composite_chunk_pipeline);
+    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+#pragma endregion
+
     if (!nc__renderer_draw_block_highlight(renderer, frame->block_highlight_draw, &view_projection)) {
         return false;
     }
+
     for (uint32_t i = 0; i < frame->overlay_draw_count; i++) {
         if (!nc__renderer_draw_overlay(renderer, &frame->overlay_draws[i])) {
             return false;

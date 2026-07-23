@@ -29,7 +29,8 @@ typedef struct nc__app_t {
     nc_gui_context_t* gui;
     nc_camera_t camera;
     nc_block_type_t selected_type;
-    nc_renderer_chunk_opaque_draw_vec chunk_opaque_draws;
+    nc_renderer_chunk_draw_vec opaque_chunk_draws;
+    nc_renderer_chunk_draw_vec transparent_chunk_draws;
 } nc__app_t;
 
 static const bool* keyboard_state;
@@ -55,7 +56,8 @@ static void nc__app_fini(nc__app_t* app) {
     nc_terrain_fini(app->terrain, app->renderer);
     nc_gui_fini(app->gui, app->renderer);
     nc_renderer_fini(app->renderer);
-    nc_renderer_chunk_opaque_draw_vec_fini(&app->chunk_opaque_draws);
+    nc_renderer_chunk_draw_vec_fini(&app->opaque_chunk_draws);
+    nc_renderer_chunk_draw_vec_fini(&app->transparent_chunk_draws);
     free(app);
 }
 
@@ -102,7 +104,7 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     *app_state = app;
 
     app->camera = (nc_camera_t){
-        .position = { { 10.0f, 20.0f, -20.0f } },
+        .position = { { 0.0f, 30.0f, 0.0f } },
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
@@ -207,7 +209,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     vkm_mul(&right, input.x, &velocity);
     vkm_muladd(&CVKM_VEC3_UP, input.y, &velocity);
     vkm_muladd(&forward, input.z, &velocity);
-    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 90.0f : 1.0f), &velocity);
+    vkm_mul(&velocity, NC__MOVEMENT_SPEED * (keyboard_state[SDL_SCANCODE_LCTRL] ? 9.0f : 3.0f), &velocity);
     vkm_muladd(&velocity, (float)delta_time, &app->camera.position);
     nc_terrain_update(app->terrain, app->renderer, &app->camera.position);
 
@@ -286,20 +288,22 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     }
 
     nc_terrain_frustum_culling_stats_t frustum_culling_stats;
-    nc_terrain_get_opaque_draws(
+    nc_terrain_get_chunk_draws(
             app->terrain,
             &view_projection,
-            &app->chunk_opaque_draws,
+            &app->opaque_chunk_draws,
+            &app->transparent_chunk_draws,
             &frustum_culling_stats);
     if (nc_cvar_get_show_chunk_frustum_culling_stats()) {
         const int printed = snprintf(
                 debug_buffer,
                 sizeof(debug_buffer),
-                "Chunks: %u loaded, %u empty, %u frustum culled, %u drawn\n",
+                "Chunks: %u loaded, %u empty, %u culled, %u opaque, %u transparent\n",
                 frustum_culling_stats.loaded_chunk_count,
                 frustum_culling_stats.empty_chunk_count,
                 frustum_culling_stats.culled_chunk_count,
-                frustum_culling_stats.drawn_chunk_count);
+                frustum_culling_stats.opaque_drawn_chunk_count,
+                frustum_culling_stats.transparent_drawn_chunk_count);
         nc_gui_append_debug_text(app->gui, debug_buffer, printed);
     }
 
@@ -336,7 +340,11 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .gradient_stops = { { -0.18f, 0.03f, 0.42f, 1.0f } },
     };
 
+#ifdef NC_DO_DAY_NIGHT_CYLE
     const float time_of_day = vkm_clamp(vkm_sin((float)time * 0.2f) * 0.96f + 0.6f, 0.0f, 1.0f);
+#else
+    const float time_of_day = 1.0f;
+#endif
 
     nc_renderer_sky_draw_t sky_draw;
     vkm_lerp(&night_sky_draw.gradient_colors[0], &day_sky_draw.gradient_colors[0], time_of_day, &sky_draw.gradient_colors[0]);
@@ -350,13 +358,15 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .camera_position = app->camera.position,
         .sunlight_intensity = time_of_day * 0.98f + 0.02f,
         .sky_draw = &sky_draw,
-        .opaque_draws = &app->chunk_opaque_draws,
+        .opaque_chunk_draws = &app->opaque_chunk_draws,
+        .transparent_chunk_draws = &app->transparent_chunk_draws,
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,
         .procedural_overlay_draw = &procedural_overlay_draw,
         .block_highlight_draw = &highlight_draw,
     });
-    nc_renderer_chunk_opaque_draw_vec_clear(&app->chunk_opaque_draws);
+    nc_renderer_chunk_draw_vec_clear(&app->opaque_chunk_draws);
+    nc_renderer_chunk_draw_vec_clear(&app->transparent_chunk_draws);
     if (!success) {
         goto error;
     }
@@ -423,6 +433,10 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             if (gui_captured) {
                 break;
+            }
+
+            if (!nc_renderer_set_relative_mouse_mode(app->renderer, true)) {
+                goto error;
             }
 
             if (event->button.button == SDL_BUTTON_RIGHT) {

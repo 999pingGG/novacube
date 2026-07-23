@@ -24,7 +24,8 @@ typedef struct nc_terrain_frustum_culling_stats_t {
     uint32_t loaded_chunk_count;
     uint32_t empty_chunk_count;
     uint32_t culled_chunk_count;
-    uint32_t drawn_chunk_count;
+    uint32_t opaque_drawn_chunk_count;
+    uint32_t transparent_drawn_chunk_count;
 } nc_terrain_frustum_culling_stats_t;
 
 typedef struct nc_terrain_timing_stats_t {
@@ -41,10 +42,11 @@ bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_co
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 void nc_terrain_get_timing_stats(const nc_terrain_t* terrain, nc_terrain_timing_stats_t* stats);
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer);
-void nc_terrain_get_opaque_draws(
+void nc_terrain_get_chunk_draws(
         const nc_terrain_t* terrain,
         const vkm_mat4* view_projection,
-        nc_renderer_chunk_opaque_draw_vec* draws,
+        nc_renderer_chunk_draw_vec* opaque,
+        nc_renderer_chunk_draw_vec* transparent,
         nc_terrain_frustum_culling_stats_t* stats);
 bool nc_terrain_raycast(
         const nc_terrain_t* terrain,

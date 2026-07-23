@@ -23,6 +23,7 @@ set(NC_SOURCES
         src/chunk_meshing.c
         src/cvar.c
         src/error_handling.c
+        src/fast_noise_lite_implementation.c
         src/gui.c
         src/main.c
         src/mesher.c
@@ -89,6 +90,7 @@ endif()
 target_include_directories(novacube PRIVATE
         include
         libs/cvkm
+        libs/FastNoiseLite
         libs/nuklear
         libs/rapidhash
         libs/tds/include

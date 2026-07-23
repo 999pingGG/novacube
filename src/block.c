@@ -41,7 +41,7 @@ typedef struct nc_block_registry_t {
     nc__block_model_vec block_models;
 } nc_block_registry_t;
 
-static bool nc__block_voxel_model_is_solid(const nc__voxel_model_t* model) {
+static bool nc__block_voxel_model_is_full(const nc__voxel_model_t* model) {
     for (int i = 0; i < NC_MESHER_INTS_PER_BLOCK_MODEL; i++) {
         if (model->data[i] != UINT16_MAX) {
             return false;
@@ -66,8 +66,8 @@ uint16_t nc_block_registry_register_voxel_model(
     NC_ASSERT(registry->voxel_models.count == registry->block_models.count);
     const uint16_t id = registry->block_models.count;
     nc_block_model_t greedy_model = { .voxel_model_id = id };
-    if (nc__block_voxel_model_is_solid(&model)) {
-        greedy_model.solid = true;
+    if (nc__block_voxel_model_is_full(&model)) {
+        greedy_model.flags |= NC_BLOCK_MODEL_FLAGS_FULL_BIT;
         memset(greedy_model.full_faces, true, sizeof(greedy_model.full_faces));
     } else {
         nc_mesher_compute_block_model(
@@ -103,17 +103,17 @@ static void nc__block_registry_register_blocks(nc_block_registry_t* registry) {
     registry->blocks[NC_BLOCK_TYPE_STONE] = (nc_block_t){
         .texture_array_layers = { 0, 0, 0, 0, 0, 0 },
         .voxel_model_id = full_cube_id,
-        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
+        .flags = NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_DIRT] = (nc_block_t){
         .texture_array_layers = { 1, 1, 1, 1, 1, 1 },
         .voxel_model_id = full_cube_id,
-        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
+        .flags = NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_GRASS] = (nc_block_t){
         .texture_array_layers = { 1, 2, 1, 1, 1, 1 },
         .voxel_model_id = full_cube_id,
-        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
+        .flags = NC_BLOCK_FLAG_BLOCKS_LIGHT,
     };
     registry->blocks[NC_BLOCK_TYPE_TORCH] = (nc_block_t){
         .texture_array_layers = { 3, 4, 3, 3, 3, 3 },
@@ -124,7 +124,13 @@ static void nc__block_registry_register_blocks(nc_block_registry_t* registry) {
         .texture_array_layers = { 5, 5, 5, 5, 5, 5 },
         .voxel_model_id = full_cube_id,
         .light_emission = 0,
-        .flags = NC_BLOCK_FLAG_FULLY_SOLID | NC_BLOCK_FLAG_BLOCKS_LIGHT,
+        .flags = NC_BLOCK_FLAG_BLOCKS_LIGHT,
+    };
+    registry->blocks[NC_BLOCK_TYPE_WATER] = (nc_block_t){
+        .texture_array_layers = { 6, 6, 6, 6, 6, 6 },
+        .voxel_model_id = full_cube_id,
+        .light_emission = 0,
+        .flags = NC_BLOCK_FLAG_TRANSPARENT,
     };
 }
 

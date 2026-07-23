@@ -15,14 +15,16 @@ enum {
     NC_BLOCK_TYPE_GRASS,
     NC_BLOCK_TYPE_TORCH,
     NC_BLOCK_TYPE_TEST,
+    NC_BLOCK_TYPE_WATER,
 
-    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_TEST,
+    NC_BLOCK_TYPE_COUNT = NC_BLOCK_TYPE_WATER,
 };
 
 typedef uint8_t nc_block_flags_t;
 enum {
-    NC_BLOCK_FLAG_FULLY_SOLID = 1 << 0,
-    NC_BLOCK_FLAG_BLOCKS_LIGHT = 1 << 1,
+    NC_BLOCK_FLAG_BLOCKS_LIGHT = 1 << 0,
+    // TODO: Can this flag be inferred from the texture used?
+    NC_BLOCK_FLAG_TRANSPARENT = 1 << 1,
 };
 
 typedef struct nc_block_t {

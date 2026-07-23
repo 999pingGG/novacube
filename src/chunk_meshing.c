@@ -17,16 +17,18 @@
 #define NC__MESHER_BLOCK_LIGHT_SHIFT 0
 #define NC__MESHER_SKY_LIGHT_SHIFT 4
 
-static bool nc__is_solid(const nc_block_registry_t* block_registry, const uint16_t block_type) {
-    return (nc_block_registry_get(block_registry, (nc_block_type_t)block_type)->flags
-            & NC_BLOCK_FLAG_FULLY_SOLID) != 0;
-}
-
-static const nc_block_model_t* nc__get_block_model(
+static bool nc__chunk_block_is_full_for_pass(
     const nc_block_registry_t* block_registry,
-    const uint16_t block_type
+    const uint16_t block_type,
+    const bool transparent
 ) {
-    return nc_block_registry_get_model(block_registry, (nc_block_type_t)block_type);
+    const nc_block_t* block = nc_block_registry_get(block_registry, (nc_block_type_t)block_type);
+    if (transparent != !!(block->flags & NC_BLOCK_FLAG_TRANSPARENT)) {
+        return false;
+    }
+
+    const nc_block_model_t* model = nc_block_registry_get_model(block_registry, (nc_block_type_t)block_type);
+    return (model->flags & NC_BLOCK_MODEL_FLAGS_FULL_BIT) != 0;
 }
 
 static void nc__chunk_add_voxel_to_axis_columns(
@@ -170,7 +172,7 @@ static uint8_t nc__chunk_get_face_plane_light(
 }
 
 static bool nc__chunk_is_solid_from_axis_columns(
-    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
+    const uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
     const int x,
     const int y,
     const int z
@@ -185,7 +187,7 @@ static const int8_t nc__chunk_face_sample_offsets[9][2] = {
 };
 
 static uint16_t nc__chunk_build_face_ao_mask(
-    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
+    const uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE],
     const int direction,
     int x,
     int y,
@@ -389,145 +391,140 @@ static vkm_ubvec3 nc__quad_position_to_block_coords(const int direction, const i
     }
 }
 
+// TODO: Can we just omit this function and instead just compute both opaque and transparent meshes at once?
+void nc_mesher_compute_workspace(
+    const nc_block_registry_t* block_registry,
+    const uint16_t* chunk_and_neighbors[3][3][3],
+    nc_mesher_workspace_t* workspace
+) {
+    *workspace = (nc_mesher_workspace_t){ 0 };
+    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
+        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y++) {
+            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
+                const uint16_t block_type = nc__chunk_get_block(
+                        chunk_and_neighbors,
+                        x - 1,
+                        y - 1,
+                        z - 1);
+                const nc_block_t* block = nc_block_registry_get(
+                        block_registry,
+                        (nc_block_type_t)block_type);
+                const bool transparent = (block->flags & NC_BLOCK_FLAG_TRANSPARENT) != 0;
+                if (nc__chunk_block_is_full_for_pass(block_registry, block_type, transparent)) {
+                    nc__chunk_add_voxel_to_axis_columns(
+                            x,
+                            y,
+                            z,
+                            transparent ? workspace->transparent_axis_columns : workspace->opaque_axis_columns);
+                }
+            }
+        }
+    }
+}
+
 void nc_mesher_compute_chunk(
     const nc_block_registry_t* block_registry,
     const uint16_t* chunk_and_neighbors[3][3][3],
     const uint8_t* light_levels_and_neighbors[3][3][3],
+    const nc_mesher_workspace_t* workspace,
     nc_mesh_quad_vec* quads_result,
-    nc_mesh_face_data_vec* face_data_result
+    nc_mesh_face_data_vec* face_data_result,
+    const bool transparent
 ) {
-    // solid binary for each x,y,z axis (3)
-    uint32_t axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = { 0 };
-
-    // the cull mask to perform greedy slicing, based on solids on previous axis_cols
-    uint32_t face_masks[6][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = { 0 };
-
+    const uint32_t (*const axis_columns)[NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = transparent
+            ? workspace->transparent_axis_columns
+            : workspace->opaque_axis_columns;
+    const uint32_t (*const opaque_axis_columns)[NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] =
+            workspace->opaque_axis_columns;
     *quads_result = (nc_mesh_quad_vec){ 0 };
-    // Something that can help reduce the allocations done without wasting too much memory.
-    nc_mesh_quad_vec_reserve(quads_result, 512);
     *face_data_result = (nc_mesh_face_data_vec){ 0 };
+    // Some capacity that can help reduce the allocations done without wasting too much memory, hopefully.
+    nc_mesh_quad_vec_reserve(quads_result, 512);
     nc_mesh_face_data_vec_reserve(face_data_result, 512);
 
-    // inner chunk voxels.
     const uint16_t* chunk = chunk_and_neighbors[1][1][1];
-    if (!chunk) {
-        return;
-    }
+    NC_ASSERT(chunk);
 
-    int block_index = 0;
-    for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+    for (int z = 0, block_index = 0; z < NC_CHUNK_SIZE; z++) {
         for (int y = 0; y < NC_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_CHUNK_SIZE; x++) {
-                const nc_block_model_t* model = nc__get_block_model(block_registry, chunk[block_index]);
-
-                if (model->solid) {
-                    // Solid blocks are greedy-meshed.
-                    nc__chunk_add_voxel_to_axis_columns(x + 1, y + 1, z + 1, axis_columns);
-                } else if (model->quads.count) {
-                    // Non-solid blocks' models are straight up copied into the result and not greedy-meshed.
-                    // This is an optimization opportunity to cull hidden faces.
-
-                    // Append the model's quads into the resulting quad list.
-                    nc_mesh_quad_t* new_quad = memcpy(
-                            nc_mesh_quad_vec_grow(quads_result, model->quads.count),
-                            model->quads.array,
-                            (size_t)model->quads.count * sizeof(nc_mesh_quad_t));
-
-                    // Some sanity checks.
-                    for (int direction = 1; direction < 6; direction++) {
-                        NC_ASSERT(model->direction_offsets[direction] >= model->direction_offsets[direction - 1]);
-                    }
-                    NC_ASSERT(model->direction_offsets[5] >= 0);
-                    NC_ASSERT((uint32_t)model->direction_offsets[5] == model->quads.count);
-
-                    // Every "small quad" inside the block model need its own block face data struct instance.
-                    // Also, offset all quad positions by the current block position.
-                    nc_mesh_face_data_t* face_data = nc_mesh_face_data_vec_grow(face_data_result, 6);
-                    int face_data_offset = (int)(face_data - face_data_result->array);
-                    int offset = 0;
-
-                    for (int direction = 0; direction < 6; direction++, face_data_offset++) {
-                        face_data[direction] = (nc_mesh_face_data_t){
-                            .texture_layer = nc_block_registry_get(
-                                    block_registry,
-                                    (nc_block_type_t)chunk[block_index])->texture_array_layers[direction],
-                        };
-
-                        const int quads_in_direction = model->direction_offsets[direction] - offset;
-                        offset = model->direction_offsets[direction];
-
-                        for (int i = 0; i < quads_in_direction; i++) {
-                            new_quad->face_data_offset = (uint16_t)face_data_offset;
-
-                            // Offset the quad's position based on the block's position in the chunk.
-                            const vkm_ubvec3 position_offset =
-                                nc__quad_position_to_block_coords(new_quad->direction, z, x, y);
-                            new_quad->quad.x += (uint8_t)(position_offset.x << 3);
-                            new_quad->quad.y += (uint8_t)(position_offset.y << 3);
-                            new_quad->plane += (uint8_t)(position_offset.z << 3);
-
-                            new_quad++;
-                        }
-                    }
+            for (int x = 0; x < NC_CHUNK_SIZE; x++, block_index++) {
+                const nc_block_t* block = nc_block_registry_get(block_registry, (nc_block_type_t)chunk[block_index]);
+                if (transparent != !!(block->flags & NC_BLOCK_FLAG_TRANSPARENT)) {
+                    continue;
                 }
 
-                block_index++;
+                const nc_block_model_t* model = nc_block_registry_get_model(
+                        block_registry,
+                        (nc_block_type_t)chunk[block_index]);
+                if ((model->flags & NC_BLOCK_MODEL_FLAGS_FULL_BIT) || !model->quads.count) {
+                    continue;
+                }
+
+                // Non-full block models are directly copied into the result and not greedy-meshed.
+                // This is an optimization opportunity to cull hidden faces.
+                nc_mesh_quad_t* new_quad = memcpy(
+                        nc_mesh_quad_vec_grow(quads_result, model->quads.count),
+                        model->quads.array,
+                        (size_t)model->quads.count * sizeof(nc_mesh_quad_t));
+
+                for (int direction = 1; direction < 6; direction++) {
+                    NC_ASSERT(model->direction_offsets[direction] >= model->direction_offsets[direction - 1]);
+                }
+                NC_ASSERT(model->direction_offsets[5] >= 0);
+                NC_ASSERT((uint32_t)model->direction_offsets[5] == model->quads.count);
+
+                nc_mesh_face_data_t* face_data = nc_mesh_face_data_vec_grow(face_data_result, 6);
+                int face_data_offset = (int)(face_data - face_data_result->array);
+                int offset = 0;
+                for (int direction = 0; direction < 6; direction++, face_data_offset++) {
+                    face_data[direction] = (nc_mesh_face_data_t){
+                        .texture_layer = block->texture_array_layers[direction],
+                    };
+
+                    const int quads_in_direction = model->direction_offsets[direction] - offset;
+                    offset = model->direction_offsets[direction];
+                    for (int i = 0; i < quads_in_direction; i++) {
+                        new_quad->face_data_offset = (uint16_t)face_data_offset;
+
+                        const vkm_ubvec3 position_offset = nc__quad_position_to_block_coords(
+                                new_quad->direction,
+                                z,
+                                x,
+                                y);
+                        new_quad->quad.x += (uint8_t)(position_offset.x << 3);
+                        new_quad->quad.y += (uint8_t)(position_offset.y << 3);
+                        new_quad->plane += (uint8_t)(position_offset.z << 3);
+                        new_quad++;
+                    }
+                }
             }
         }
     }
 
     const uint32_t non_solid_face_data_count = face_data_result->count;
 
-    // neighbor chunk voxels.
-    // note(leddoo): couldn't be bothered to optimize these.
-    // might be worth it though. together, they take
-    // almost as long as the entire "inner chunk" loop.
-    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z += NC_CHUNK_SIZE + 1) {
-        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
-                if (nc__is_solid(block_registry, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
-                    nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
-                }
-            }
-        }
-    }
-
-    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y += NC_CHUNK_SIZE + 1) {
-            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
-                if (nc__is_solid(block_registry, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
-                    nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
-                }
-            }
-        }
-    }
-
-    for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
-        for (int y = 0; y < NC_PADDED_CHUNK_SIZE; y++) {
-            for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x += NC_CHUNK_SIZE + 1) {
-                if (nc__is_solid(block_registry, nc__chunk_get_block(chunk_and_neighbors, x - 1, y - 1, z - 1))) {
-                    nc__chunk_add_voxel_to_axis_columns(x, y, z, axis_columns);
-                }
-            }
-        }
-    }
-
     if (non_solid_face_data_count != 0) {
         nc_mesh_face_data_t* face_data = face_data_result->array;
         uint32_t face_data_index = 0;
 
-        block_index = 0;
-        for (int z = 0; z < NC_CHUNK_SIZE; z++) {
+        for (int z = 0, block_index = 0; z < NC_CHUNK_SIZE; z++) {
             for (int y = 0; y < NC_CHUNK_SIZE; y++) {
-                for (int x = 0; x < NC_CHUNK_SIZE; x++) {
-                    const nc_block_model_t* model = nc__get_block_model(block_registry, chunk[block_index]);
-                    if (!model->solid && model->quads.count) {
-                        const uint8_t light_emission = nc_block_registry_get(
-                                block_registry,
-                                (nc_block_type_t)chunk[block_index])->light_emission;
+                for (int x = 0; x < NC_CHUNK_SIZE; x++, block_index++) {
+                    const nc_block_t* block = nc_block_registry_get(
+                            block_registry,
+                            (nc_block_type_t)chunk[block_index]);
+                    if (transparent != !!(block->flags & NC_BLOCK_FLAG_TRANSPARENT)) {
+                        continue;
+                    }
+
+                    const nc_block_model_t* model = nc_block_registry_get_model(
+                            block_registry,
+                            (nc_block_type_t)chunk[block_index]);
+                    if (!(model->flags & NC_BLOCK_MODEL_FLAGS_FULL_BIT) && model->quads.count) {
+                        const uint8_t light_emission = block->light_emission;
                         for (int direction = 0; direction < 6; direction++) {
                             const uint16_t ao_mask = nc__chunk_build_face_ao_mask(
-                                    axis_columns,
+                                    opaque_axis_columns,
                                     direction,
                                     x,
                                     y,
@@ -558,8 +555,6 @@ void nc_mesher_compute_chunk(
 
                         face_data_index += 6;
                     }
-
-                    block_index++;
                 }
             }
         }
@@ -568,6 +563,8 @@ void nc_mesher_compute_chunk(
     }
 
     // face culling
+    // the cull mask to perform greedy slicing, based on solids on previous axis_cols
+    uint32_t face_masks[6][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE] = { 0 };
     for (int axis = 0; axis < 3; axis++) {
         for (int z = 0; z < NC_PADDED_CHUNK_SIZE; z++) {
             for (int x = 0; x < NC_PADDED_CHUNK_SIZE; x++) {
@@ -575,6 +572,13 @@ void nc_mesher_compute_chunk(
 
                 face_masks[2 * axis + 0][z][x] = column & ~(column << 1);
                 face_masks[2 * axis + 1][z][x] = column & ~(column >> 1);
+                if (transparent) {
+                    const uint32_t opaque_column = opaque_axis_columns[axis][z][x];
+                    // Faces against opaque full blocks can never contribute. Removing them makes the remaining
+                    // transparent boundaries safe to render two-sided without coplanar transparent/opaque z-fighting.
+                    face_masks[2 * axis + 0][z][x] &= ~(opaque_column << 1);
+                    face_masks[2 * axis + 1][z][x] &= ~(opaque_column >> 1);
+                }
             }
         }
     }
@@ -633,13 +637,16 @@ void nc_mesher_compute_chunk(
                     for (int x = 0; x < quad.width; x++) {
                         const vkm_ubvec3 block_coords =
                             nc__quad_position_to_block_coords(direction, plane, quad.x + x, quad.y + y);
-                        block_index = NC_CHUNK_COORDS_TO_INDEX(block_coords.x, block_coords.y, block_coords.z);
+                        const int block_index = NC_CHUNK_COORDS_TO_INDEX(
+                                block_coords.x,
+                                block_coords.y,
+                                block_coords.z);
                         const nc_block_t* block = nc_block_registry_get(
                                 block_registry,
                                 (nc_block_type_t)chunk[block_index]);
 
                         const uint16_t ao_mask = nc__chunk_build_face_ao_mask(
-                                axis_columns,
+                                opaque_axis_columns,
                                 direction,
                                 block_coords.x,
                                 block_coords.y,
@@ -683,24 +690,63 @@ bool nc_mesher_upload_chunk(
     const uint16_t* chunk_and_neighbors[3][3][3],
     const uint8_t* light_levels_and_neighbors[3][3][3]
 ) {
-    nc_mesh_quad_vec quads;
-    nc_mesh_face_data_vec face_data;
-    nc_mesher_compute_chunk(block_registry, chunk_and_neighbors, light_levels_and_neighbors, &quads, &face_data);
+    nc_mesh_quad_vec opaque_quads;
+    nc_mesh_quad_vec transparent_quads;
+    nc_mesh_face_data_vec opaque_face_data;
+    nc_mesh_face_data_vec transparent_face_data;
+    nc_mesher_workspace_t workspace;
+    nc_mesher_compute_workspace(block_registry, chunk_and_neighbors, &workspace);
+    nc_mesher_compute_chunk(
+            block_registry,
+            chunk_and_neighbors,
+            light_levels_and_neighbors,
+            &workspace,
+            &opaque_quads,
+            &opaque_face_data,
+            false);
+    nc_mesher_compute_chunk(
+            block_registry,
+            chunk_and_neighbors,
+            light_levels_and_neighbors,
+            &workspace,
+            &transparent_quads,
+            &transparent_face_data,
+            true);
 
     bool result = true;
-    chunk->quad_count = quads.count;
-    if (chunk->quad_count) {
+
+    chunk->opaque_quad_count = opaque_quads.count;
+    if (chunk->opaque_quad_count) {
         result = nc_renderer_queue_buffer_upload(
-                renderer, chunk->quad_buffer, quads.array, sizeof(*quads.array) * quads.count);
+                renderer,
+                chunk->opaque_quad_buffer,
+                opaque_quads.array,
+                sizeof(*opaque_quads.array) * opaque_quads.count);
         result &= nc_renderer_queue_buffer_upload(
                 renderer,
-                chunk->face_data_buffer,
-                face_data.array,
-                sizeof(*face_data.array) * nc_mesh_face_data_vec_count(&face_data));
+                chunk->opaque_face_data_buffer,
+                opaque_face_data.array,
+                sizeof(*opaque_face_data.array) * nc_mesh_face_data_vec_count(&opaque_face_data));
     }
 
-    nc_mesh_face_data_vec_fini(&face_data);
-    nc_mesh_quad_vec_fini(&quads);
+    chunk->transparent_quad_count = transparent_quads.count;
+    if (chunk->transparent_quad_count) {
+        result &= nc_renderer_queue_buffer_upload(
+                renderer,
+                chunk->transparent_quad_buffer,
+                transparent_quads.array,
+                sizeof(*transparent_quads.array) * transparent_quads.count);
+        result &= nc_renderer_queue_buffer_upload(
+            renderer,
+            chunk->transparent_face_data_buffer,
+            transparent_face_data.array,
+            sizeof(*transparent_face_data.array) * nc_mesh_face_data_vec_count(&transparent_face_data));
+    }
+
+    nc_mesh_face_data_vec_fini(&opaque_face_data);
+    nc_mesh_quad_vec_fini(&opaque_quads);
+    nc_mesh_face_data_vec_fini(&transparent_face_data);
+    nc_mesh_quad_vec_fini(&transparent_quads);
     return result;
 }
 

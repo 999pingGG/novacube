@@ -1,4 +1,3 @@
-#version 450
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 layout(early_fragment_tests) in;
@@ -28,8 +27,6 @@ layout(push_constant) uniform push_constants {
     layout(offset = 16) face_data_array face_data;
 } pc;
 
-layout(location = 0) out vec4 out_color;
-
 const float ambient_intensity = 0.01;
 const float ambient_occlusion_curve[4] = float[4](1.0, 0.7, 0.45, 0.2);
 
@@ -52,7 +49,7 @@ uint unpack_corner_light(uint light, int corner) {
     return light >> (corner * 4) & 0xfu;
 }
 
-void main() {
+vec4 compute_color() {
     // Interpolation and rasterization precision can put fragments on the far edge a hair beyond the quad. Clamp the
     // discrete lookup so those fragments cannot read past the face-data array through the device address.
     uvec2 face_data_coord = min(uvec2(floor(face_data_uv)), face_data_size - uvec2(1));
@@ -91,5 +88,5 @@ void main() {
     float illumination_top = mix(corner3_illumination, corner2_illumination, face_cell_uv.x);
     float illumination = mix(illumination_bottom, illumination_top, face_cell_uv.y);
 
-    out_color = texture(terrain_textures, vec3(face_uv, texture_array_layer)) * vec4(vec3(illumination), 1.0);
+    return texture(terrain_textures, vec3(face_uv, texture_array_layer)) * vec4(vec3(illumination), 1.0);
 }

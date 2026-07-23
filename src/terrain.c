@@ -5,13 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <novacube/macros.h>
+NC_IGNORE_ALL_WARNINGS_BEGIN
+#include <FastNoiseLite.h>
+NC_IGNORE_ALL_WARNINGS_END
 #include <SDL3/SDL.h>
 #include <rapidhash.h>
 
 #include <novacube/camera.h>
 #include <novacube/cvar.h>
 #include <novacube/cvkm.h>
-#include <novacube/macros.h>
 #include <novacube/mesher.h>
 #include <novacube/standard_functions.h>
 #include <novacube/terrain.h>
@@ -59,8 +62,6 @@ typedef struct nc__terrain_sky_light_chunk_range_t {
     int32_t last_chunk_y;
 } nc__terrain_sky_light_chunk_range_t;
 
-typedef nc_chunk_t nc__terrain_chunk_t;
-
 typedef struct nc__terrain_frustum_plane_t {
     float x;
     float y;
@@ -82,7 +83,7 @@ typedef struct nc__terrain_light_removal_node_t {
 } nc__terrain_light_removal_node_t;
 
 typedef struct nc__terrain_block_location_t {
-    nc__terrain_chunk_t* chunk;
+    nc_chunk_t* chunk;
     uint16_t index;
 } nc__terrain_block_location_t;
 
@@ -96,7 +97,7 @@ static uint64_t nc__terrain_hash_chunk_xz_coords(const vkm_ivec2* coords) {
 
 #define TDS_TYPE nc__terrain_chunk_map
 #define TDS_KEY_T vkm_ivec3
-#define TDS_VALUE_T nc__terrain_chunk_t*
+#define TDS_VALUE_T nc_chunk_t*
 #define TDS_HASH_KEY(key) nc__terrain_hash_chunk_coords(&(key))
 #define TDS_KEY_EQUALS(a, b) ((a).x == (b).x && (a).y == (b).y && (a).z == (b).z)
 #include <tds/hashmap.h>
@@ -107,11 +108,9 @@ static uint64_t nc__terrain_hash_chunk_xz_coords(const vkm_ivec2* coords) {
 #define nc__terrain_chunk_column_dirty_bitset_set_all nc_chunk_column_dirty_bitset_set_all
 #define nc__terrain_chunk_column_dirty_bitset_any nc_chunk_column_dirty_bitset_any
 
-typedef nc_chunk_column_t nc__terrain_chunk_column_t;
-
 #define TDS_TYPE nc__terrain_chunk_column_map
 #define TDS_KEY_T vkm_ivec2
-#define TDS_VALUE_T nc__terrain_chunk_column_t*
+#define TDS_VALUE_T nc_chunk_column_t*
 #define TDS_HASH_KEY(key) nc__terrain_hash_chunk_xz_coords(&(key))
 #define TDS_KEY_EQUALS(a, b) ((a).x == (b).x && (a).y == (b).y)
 #include <tds/hashmap.h>
@@ -178,15 +177,15 @@ static const vkm_bvec3 nc__terrain_light_neighbor_offsets[] = {
 
 static void nc__terrain_update_chunk_column_from_chunk(
     const nc_terrain_t* terrain,
-    nc__terrain_chunk_column_t* column,
-    const nc__terrain_chunk_t* chunk
+    nc_chunk_column_t* column,
+    const nc_chunk_t* chunk
 ) {
     nc_chunk_column_include_chunk(column, chunk, terrain->block_registry);
 }
 
 // Returns NULL if the chunk isn't loaded.
-static nc__terrain_chunk_t* nc__terrain_get_chunk(const nc_terrain_t* terrain, const vkm_ivec3* coords) {
-    nc__terrain_chunk_t** chunk = nc__terrain_chunk_map_get(&terrain->chunks, *coords);
+static nc_chunk_t* nc__terrain_get_chunk(const nc_terrain_t* terrain, const vkm_ivec3* coords) {
+    nc_chunk_t** chunk = nc__terrain_chunk_map_get(&terrain->chunks, *coords);
     return chunk ? *chunk : NULL;
 }
 
@@ -197,7 +196,7 @@ static nc_chunk_t* nc__terrain_lookup_chunk(void* context, const vkm_ivec3* coor
 static void nc__terrain_update_dirty_chunk_column(
     const nc_terrain_t* terrain,
     const vkm_ivec2 column_coords,
-    nc__terrain_chunk_column_t* column
+    nc_chunk_column_t* column
 ) {
     nc_chunk_column_update_dirty(
             column,
@@ -214,9 +213,10 @@ static const char* nc__terrain_texture_paths[] = {
     NC__TERRAIN_ASSETS_BASE_PATH "textures/torch" NC__TERRAIN_TEXTURE_EXTENSION,
     NC__TERRAIN_ASSETS_BASE_PATH "textures/torch-top" NC__TERRAIN_TEXTURE_EXTENSION,
     NC__TERRAIN_ASSETS_BASE_PATH "textures/testbox" NC__TERRAIN_TEXTURE_EXTENSION,
+    NC__TERRAIN_ASSETS_BASE_PATH "textures/water" NC__TERRAIN_TEXTURE_EXTENSION,
 };
 
-static void nc__terrain_mark_chunk_dirty(nc_terrain_t* terrain, nc__terrain_chunk_t* chunk) {
+static void nc__terrain_mark_chunk_dirty(nc_terrain_t* terrain, nc_chunk_t* chunk) {
     if (chunk->flags & NC__TERRAIN_CHUNK_MESH_PENDING_BIT) {
         return;
     }
@@ -235,7 +235,7 @@ static void nc__terrain_mark_chunk_and_neighbors_dirty(nc_terrain_t* terrain, co
                     continue;
                 }
 
-                nc__terrain_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
+                nc_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
                 if (neighbor) {
                     nc__terrain_mark_chunk_dirty(terrain, neighbor);
                 }
@@ -265,7 +265,7 @@ static void nc__terrain_mark_block_chunks_dirty(
                     continue;
                 }
 
-                nc__terrain_chunk_t* affected = nc__terrain_get_chunk(terrain, &affected_coords);
+                nc_chunk_t* affected = nc__terrain_get_chunk(terrain, &affected_coords);
                 if (affected) {
                     nc__terrain_mark_chunk_dirty(terrain, affected);
                 }
@@ -274,6 +274,7 @@ static void nc__terrain_mark_block_chunks_dirty(
     }
 }
 
+// TODO: what...
 #include "terrain_lighting.c"
 
 static bool nc__terrain_normal_is_zero(const vkm_bvec3 normal) {
@@ -283,7 +284,7 @@ static bool nc__terrain_normal_is_zero(const vkm_bvec3 normal) {
 bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_coords, uint16_t* block) {
     vkm_ivec3 chunk_coords;
     nc_block_to_chunk_coords(block_coords, &chunk_coords);
-    const nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
+    const nc_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
     if (!chunk) {
         return false;
     }
@@ -300,7 +301,7 @@ bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_co
 static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* block_coords, const uint16_t block) {
     vkm_ivec3 chunk_coords;
     nc_block_to_chunk_coords(block_coords, &chunk_coords);
-    nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
+    nc_chunk_t* chunk = nc__terrain_get_chunk(terrain, &chunk_coords);
     if (!chunk) {
         return false;
     }
@@ -347,7 +348,7 @@ static bool nc__terrain_set_world_block(nc_terrain_t* terrain, const vkm_ivec3* 
             nc__terrain_queue_light_neighbors(terrain, NC__TERRAIN_LIGHT_CHANNEL_BLOCK, chunk, index, &local_coords);
         }
 
-        nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
+        nc_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                 &terrain->chunk_columns,
                 nc_chunk_to_chunk_column_coords(&chunk_coords));
         NC_ASSERT(column);
@@ -413,13 +414,13 @@ static void nc__terrain_load_or_replace_chunk(
 ) {
     NC_ASSERT(nc_chunk_coords_are_valid(coords));
 
-    nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
+    nc_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
     if (chunk) {
         int32_t old_top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK];
         nc__terrain_queue_chunk_boundary_light_removal(terrain, chunk);
         memset(chunk->light_levels, 0, sizeof(chunk->light_levels));
         nc_chunk_replace_blocks(chunk, blocks);
-        nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
+        nc_chunk_column_t** column = nc__terrain_chunk_column_map_get(
                 &terrain->chunk_columns,
                 nc_chunk_to_chunk_column_coords(coords));
         NC_ASSERT(column);
@@ -449,7 +450,7 @@ static void nc__terrain_load_or_replace_chunk(
     (void)chunk_was_added;
 
     const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(coords);
-    nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
+    nc_chunk_column_t** column = nc__terrain_chunk_column_map_get(
             &terrain->chunk_columns,
             column_coords);
     int32_t old_top_light_blocking_blocks[NC_BLOCK_COLUMNS_PER_CHUNK];
@@ -467,7 +468,7 @@ static void nc__terrain_load_or_replace_chunk(
         }
         nc__terrain_update_chunk_column_from_chunk(terrain, *column, chunk);
     } else {
-        nc__terrain_chunk_column_t* new_column = nc_chunk_column_init(chunk);
+        nc_chunk_column_t* new_column = nc_chunk_column_init(chunk);
         nc__terrain_update_chunk_column_from_chunk(terrain, new_column, chunk);
         const int column_was_added = nc__terrain_chunk_column_map_set(
                 &terrain->chunk_columns,
@@ -498,13 +499,13 @@ static void nc__terrain_load_or_replace_chunk(
 static void nc__terrain_unload_chunk(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_ivec3* coords) {
     NC_ASSERT(nc_chunk_coords_are_valid(coords));
 
-    nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
+    nc_chunk_t* chunk = nc__terrain_get_chunk(terrain, coords);
     if (!chunk) {
         return;
     }
 
     const vkm_ivec2 column_coords = nc_chunk_to_chunk_column_coords(coords);
-    nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
+    nc_chunk_column_t** column = nc__terrain_chunk_column_map_get(&terrain->chunk_columns, column_coords);
     NC_ASSERT(column && (*column)->ref_count > 0);
     if (nc__terrain_chunk_column_dirty_bitset_any(&(*column)->dirty_top_light_blocking_blocks)) {
         nc__terrain_update_dirty_chunk_column(terrain, column_coords, *column);
@@ -795,6 +796,10 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
         goto error;
     }
 
+    result->generator.noise_state = fnlCreateState();
+    result->generator.noise_state.octaves = 3;
+    result->generator.noise_state.fractal_type = FNL_FRACTAL_FBM;
+
     return result;
 
 error:
@@ -819,7 +824,7 @@ static void nc__terrain_get_chunk_data_and_neighbors(
                     continue;
                 }
 
-                const nc__terrain_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
+                const nc_chunk_t* neighbor = nc__terrain_get_chunk(terrain, &neighbor_coords);
                 if (neighbor) {
                     blocks[x + 1][y + 1][z + 1] = neighbor->blocks;
                     light_levels[x + 1][y + 1][z + 1] = neighbor->light_levels;
@@ -829,7 +834,7 @@ static void nc__terrain_get_chunk_data_and_neighbors(
     }
 }
 
-static bool nc__terrain_remesh(const nc_terrain_t* terrain, nc_renderer_t* renderer, nc__terrain_chunk_t* chunk) {
+static bool nc__terrain_remesh(const nc_terrain_t* terrain, nc_renderer_t* renderer, nc_chunk_t* chunk) {
     const uint16_t* chunk_and_neighbors[3][3][3];
     const uint8_t* light_levels_and_neighbors[3][3][3];
     nc__terrain_get_chunk_data_and_neighbors(terrain, &chunk->coords, chunk_and_neighbors, light_levels_and_neighbors);
@@ -859,7 +864,7 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
         nc__terrain_light_removal_bfs_queue_clear(&terrain->light_removal_bfs_queues[NC__TERRAIN_LIGHT_CHANNEL_SKY]);
         nc__terrain_chunk_map_iter_t clear_it = nc__terrain_chunk_map_iter(&terrain->chunks);
         while (nc__terrain_chunk_map_next(&clear_it)) {
-            nc__terrain_chunk_t* chunk = *clear_it.value;
+            nc_chunk_t* chunk = *clear_it.value;
             for (int i = 0; i < NC_BLOCKS_PER_CHUNK; i++) {
                 nc__terrain_set_sky_light(&chunk->light_levels[i], 0);
             }
@@ -898,7 +903,7 @@ bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer) {
 
     while (nc__terrain_stream_queue_count(&terrain->mesh_queue) && SDL_GetTicksNS() < deadline) {
         const vkm_ivec3 coords = nc__terrain_stream_queue_pop(&terrain->mesh_queue);
-        nc__terrain_chunk_t* chunk = nc__terrain_get_chunk(terrain, &coords);
+        nc_chunk_t* chunk = nc__terrain_get_chunk(terrain, &coords);
         if (!chunk) {
             continue;
         }
@@ -943,10 +948,11 @@ static bool nc__terrain_chunk_is_outside_frustum(const nc__terrain_frustum_plane
     return false;
 }
 
-void nc_terrain_get_opaque_draws(
+void nc_terrain_get_chunk_draws(
     const nc_terrain_t* terrain,
     const vkm_mat4* view_projection,
-    nc_renderer_chunk_opaque_draw_vec* draws,
+    nc_renderer_chunk_draw_vec* opaque,
+    nc_renderer_chunk_draw_vec* transparent,
     nc_terrain_frustum_culling_stats_t* stats
 ) {
     const nc__terrain_frustum_plane_t planes[6] = {
@@ -986,9 +992,9 @@ void nc_terrain_get_opaque_draws(
     nc_terrain_frustum_culling_stats_t culling_stats = { 0 };
     nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
     while (nc__terrain_chunk_map_next(&it)) {
-        const nc__terrain_chunk_t* chunk = *it.value;
+        const nc_chunk_t* chunk = *it.value;
         culling_stats.loaded_chunk_count++;
-        if (chunk->quad_count == 0) {
+        if (chunk->opaque_quad_count == 0 && chunk->transparent_quad_count == 0) {
             culling_stats.empty_chunk_count++;
             continue;
         }
@@ -998,30 +1004,47 @@ void nc_terrain_get_opaque_draws(
             chunk->coords.y * NC_CHUNK_SIZE,
             chunk->coords.z * NC_CHUNK_SIZE,
         } };
-
         const float half_chunk_size = (float)NC_CHUNK_SIZE * 0.5f;
         const vkm_vec3 center = { {
             (float)block_coords.x + half_chunk_size,
             (float)block_coords.y + half_chunk_size,
             (float)block_coords.z + half_chunk_size,
         } };
+
         if (nc__terrain_chunk_is_outside_frustum(planes, &center)) {
             culling_stats.culled_chunk_count++;
             continue;
         }
 
-        nc_renderer_chunk_opaque_draw_vec_append(draws, (nc_renderer_chunk_opaque_draw_t){
-            .chunk_buffer = chunk->quad_buffer,
-            .quad_count = chunk->quad_count,
-            .face_data_buffer = chunk->face_data_buffer,
-            .texture = terrain->texture_array,
-            .position = { {
-                .x = (float)block_coords.x,
-                .y = (float)block_coords.y,
-                .z = (float)block_coords.z,
-            } },
-        });
-        culling_stats.drawn_chunk_count++;
+        if (chunk->opaque_quad_count) {
+            nc_renderer_chunk_draw_vec_append(opaque, (nc_renderer_chunk_draw_t){
+                .chunk_buffer = chunk->opaque_quad_buffer,
+                .quad_count = chunk->opaque_quad_count,
+                .face_data_buffer = chunk->opaque_face_data_buffer,
+                .texture = terrain->texture_array,
+                .position = { {
+                    .x = (float)block_coords.x,
+                    .y = (float)block_coords.y,
+                    .z = (float)block_coords.z,
+                } },
+            });
+            culling_stats.opaque_drawn_chunk_count++;
+        }
+
+        if (chunk->transparent_quad_count) {
+            nc_renderer_chunk_draw_vec_append(transparent, (nc_renderer_chunk_draw_t){
+                .chunk_buffer = chunk->transparent_quad_buffer,
+                .quad_count = chunk->transparent_quad_count,
+                .face_data_buffer = chunk->transparent_face_data_buffer,
+                .texture = terrain->texture_array,
+                .position = { {
+                    .x = (float)block_coords.x,
+                    .y = (float)block_coords.y,
+                    .z = (float)block_coords.z,
+                } },
+            });
+            culling_stats.transparent_drawn_chunk_count++;
+        }
     }
 
     *stats = culling_stats;
@@ -1185,7 +1208,7 @@ void nc_terrain_entity_set_block(nc_terrain_t* terrain, const nc_camera_t* camer
 int32_t nc_terrain_get_top_light_blocking_block(const nc_terrain_t* terrain, const vkm_ivec2 block_column_coords) {
     vkm_ivec2 chunk_column_coords;
     nc_block_column_to_chunk_column_coords(&block_column_coords, &chunk_column_coords);
-    nc__terrain_chunk_column_t** column = nc__terrain_chunk_column_map_get(
+    nc_chunk_column_t** column = nc__terrain_chunk_column_map_get(
             &terrain->chunk_columns,
             chunk_column_coords);
     if (!column) {

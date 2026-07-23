@@ -74,6 +74,12 @@ typedef struct nc_mesh_face_data_t {
 #define TDS_TYPE nc_mesh_face_data_vec
 #include <tds/vector.h>
 
+typedef uint8_t nc_block_model_flags_t;
+enum {
+    // As an optimization.
+    NC_BLOCK_MODEL_FLAGS_FULL_BIT = 1 << 0,
+};
+
 typedef struct nc_block_model_t {
     nc_mesh_quad_vec quads;
     uint16_t voxel_model_id;
@@ -81,21 +87,34 @@ typedef struct nc_block_model_t {
                                         // Will be useful in the future for quickly splitting the block into more than
                                         // one chunk mesh because different faces need different array textures (a
                                         // single chunk mesh needs to use a single array texture).
-    bool solid;                         // As an optimization.
+    nc_block_model_flags_t flags;
     bool full_faces[6];                 // For every direction, whether that face is full, for greedy mesher
                                         // optimization purposes... but currently unused.
 } nc_block_model_t;
 
-struct nc_block_registry_t;
+typedef struct nc_block_registry_t nc_block_registry_t;
 
+// TODO: Optimization where you say whether the chunk contains any transparent or opaque voxels
+// so we can skip the building of the corresponding axis columns.
+typedef struct nc_mesher_workspace_t {
+    uint32_t opaque_axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE];
+    uint32_t transparent_axis_columns[3][NC_PADDED_CHUNK_SIZE][NC_PADDED_CHUNK_SIZE];
+} nc_mesher_workspace_t;
+
+void nc_mesher_compute_workspace(
+        const nc_block_registry_t* block_registry,
+        const uint16_t* chunk_and_neighbors[3][3][3],
+        nc_mesher_workspace_t* workspace);
 void nc_mesher_compute_chunk(
-        const struct nc_block_registry_t* block_registry,
+        const nc_block_registry_t* block_registry,
         const uint16_t* chunk_and_neighbors[3][3][3],
         const uint8_t* light_levels_and_neighbors[3][3][3],
+        const nc_mesher_workspace_t* workspace,
         nc_mesh_quad_vec* quads_result,
-        nc_mesh_face_data_vec* face_data_result);
+        nc_mesh_face_data_vec* face_data_result,
+        bool transparent);
 bool nc_mesher_upload_chunk(
-        const struct nc_block_registry_t* block_registry,
+        const nc_block_registry_t* block_registry,
         nc_renderer_t* renderer,
         nc_chunk_t* chunk,
         const uint16_t* chunk_and_neighbors[3][3][3],

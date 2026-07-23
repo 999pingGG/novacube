@@ -19,14 +19,13 @@
 #define NC_CHUNK_COLUMN_COORDS_TO_INDEX(x, z) ((x) + (z) * NC_CHUNK_SIZE)
 #define NC_CHUNK_COORDS_TO_INDEX(x, y, z) \
         ((x) + (y) * NC_CHUNK_SIZE + (z) * NC_CHUNK_SIZE * NC_CHUNK_SIZE)
-#define NC_CHUNK_INDEX_TO_COORDS(index, x, y, z) \
+#define NC_CHUNK_INDEX_TO_LOCAL_COORDS(index, result) \
         do { \
-            (x) = (uint8_t)((index) % NC_CHUNK_SIZE); \
-            (y) = (uint8_t)((index) / NC_CHUNK_SIZE % NC_CHUNK_SIZE); \
-            (z) = (uint8_t)((index) / (NC_CHUNK_SIZE * NC_CHUNK_SIZE)); \
+            (result).x = (uint8_t)((index) % NC_CHUNK_SIZE); \
+            (result).y = (uint8_t)((index) / NC_CHUNK_SIZE % NC_CHUNK_SIZE); \
+            (result).z = (uint8_t)((index) / (NC_CHUNK_SIZE * NC_CHUNK_SIZE)); \
         } while (false)
 
-void nc_chunk_index_to_local_coords(uint16_t index, vkm_ivec3* result);
 bool nc_block_offset_coords(vkm_ivec3 coords, vkm_bvec3 offset, vkm_ivec3* result);
 bool nc_chunk_offset_block_index(
         const vkm_ivec3* chunk_coords,
@@ -56,9 +55,13 @@ typedef struct nc_chunk_t {
     uint8_t light_levels[NC_BLOCKS_PER_CHUNK];
     // Owned by terrain lighting. Kept opaque here to avoid leaking its private queue-bitset implementation.
     void* queued_light_nodes[2];
-    nc_renderer_buffer_t* quad_buffer;
-    nc_renderer_buffer_t* face_data_buffer;
-    uint32_t quad_count;
+    // TODO: Keep all of the following fields private.
+    nc_renderer_buffer_t* opaque_quad_buffer;
+    nc_renderer_buffer_t* transparent_quad_buffer;
+    nc_renderer_buffer_t* opaque_face_data_buffer;
+    nc_renderer_buffer_t* transparent_face_data_buffer;
+    uint32_t opaque_quad_count;
+    uint32_t transparent_quad_count;
     nc_chunk_flags_t flags;
 } nc_chunk_t;
 
@@ -101,17 +104,11 @@ static inline int32_t nc_block_coord_to_chunk_coord(const int32_t block_coord) {
     return result;
 }
 
-static inline int32_t nc_block_coord_to_chunk_local_coord(
-    const int32_t block_coord,
-    const int32_t chunk_coord
-) {
+static inline int32_t nc_block_coord_to_chunk_local_coord(const int32_t block_coord, const int32_t chunk_coord) {
     return (int32_t)((int64_t)block_coord - (int64_t)chunk_coord * NC_CHUNK_SIZE);
 }
 
-static inline int32_t nc_chunk_local_coord_to_block_coord(
-    const int32_t chunk_coord,
-    const int32_t local_coord
-) {
+static inline int32_t nc_chunk_local_coord_to_block_coord(const int32_t chunk_coord, const int32_t local_coord) {
     return chunk_coord * NC_CHUNK_SIZE + local_coord;
 }
 
@@ -139,10 +136,7 @@ static inline vkm_ivec2 nc_chunk_to_chunk_column_coords(const vkm_ivec3* chunk_c
     return (vkm_ivec2){ { chunk_coords->x, chunk_coords->z } };
 }
 
-static inline void nc_block_column_to_chunk_column_coords(
-    const vkm_ivec2* block_coords,
-    vkm_ivec2* chunk_coords
-) {
+static inline void nc_block_column_to_chunk_column_coords(const vkm_ivec2* block_coords, vkm_ivec2* chunk_coords) {
     *chunk_coords = (vkm_ivec2){ {
         nc_block_coord_to_chunk_coord(block_coords->x),
         nc_block_coord_to_chunk_coord(block_coords->y),

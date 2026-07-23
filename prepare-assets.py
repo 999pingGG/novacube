@@ -35,22 +35,23 @@ ASTCENC_COMMAND = 'astcenc-avx2'
 # ---------------------------------------
 
 
-def run(cmd):
+def run(cmd, cwd=None):
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        cwd=cwd,
     )
 
     if result.returncode != 0:
-        print("Command failed:")
-        print(" ".join(cmd))
+        print('Command failed:')
+        print(' '.join(cmd))
         if result.stdout:
-            print("---- stdout ----")
+            print('---- stdout ----')
             print(result.stdout)
         if result.stderr:
-            print("---- stderr ----")
+            print('---- stderr ----')
             print(result.stderr)
 
     return result.returncode == 0
@@ -121,20 +122,24 @@ def compile_shaders(debug):
         for shader in base_dir.rglob('*'):
             stage = shader.suffix.lstrip('.')
             if stage not in SHADER_STAGES:
+                # The stage given in the file extension is not recognized.
+                continue
+            if '.inc' in str(shader):
+                # The file is meant to be included in shaders instead of directly compiled.
                 continue
 
             out = out_dir / f'{shader.stem}-{stage}.spv'
             out_android = out_dir_android / f'{shader.stem}-{stage}.spv'
 
-            print(f'[SHADER] Compiling {shader} -> {out}')
-            
-            params = ['glslc', '--target-env=vulkan1.1', str(shader), '-o', str(out)]
+            print(f'[SHADER] Compiling {shader.name} -> {out}')
+
+            params = ['glslc', '--target-env=vulkan1.1', str(shader.name), '-o', str(out.resolve())]
             if debug:
                 params.extend(['-g', '-O0'])
             else:
                 params.append('-O')
 
-            if run(params):
+            if run(params, base_dir):
                 print(f'[SHADER] Copying {out} -> {out_android}')
                 shutil.copy2(out, out_android)
 

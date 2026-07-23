@@ -12,11 +12,6 @@
 #define TDS_WORD_T uint64_t
 #include <tds/bitset.h>
 
-void nc_chunk_index_to_local_coords(const uint16_t index, vkm_ivec3* result) {
-    NC_ASSERT(index < NC_BLOCKS_PER_CHUNK);
-    NC_CHUNK_INDEX_TO_COORDS(index, result->x, result->y, result->z);
-}
-
 bool nc_block_offset_coords(const vkm_ivec3 coords, const vkm_bvec3 offset, vkm_ivec3* result) {
     const int64_t x = (int64_t)coords.x + offset.x;
     const int64_t y = (int64_t)coords.y + offset.y;
@@ -36,7 +31,7 @@ bool nc_chunk_offset_block_index(
     uint16_t* result_index
 ) {
     vkm_ivec3 local_coords;
-    nc_chunk_index_to_local_coords(index, &local_coords);
+    NC_CHUNK_INDEX_TO_LOCAL_COORDS(index, local_coords);
     local_coords.x += offset.x;
     local_coords.y += offset.y;
     local_coords.z += offset.z;
@@ -68,8 +63,17 @@ nc_chunk_t* nc_chunk_init(
     nc_chunk_t* result = calloc(1, sizeof(*result));
     result->coords = *coords;
     nc_chunk_replace_blocks(result, blocks);
-    result->quad_buffer = nc_renderer_create_buffer(NULL, NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ, 0);
-    result->face_data_buffer = nc_renderer_create_buffer(NULL, NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ, 0);
+    result->opaque_quad_buffer = nc_renderer_create_buffer(NULL, NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ, 0);
+    result->transparent_quad_buffer = nc_renderer_create_buffer(
+            NULL,
+            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
+            0);
+    result->opaque_face_data_buffer = nc_renderer_create_buffer(NULL,
+            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
+            0);
+    result->transparent_face_data_buffer = nc_renderer_create_buffer(NULL,
+            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
+            0);
     (void)renderer;
     return result;
 }
@@ -86,8 +90,10 @@ void nc_chunk_fini(nc_renderer_t* renderer, nc_chunk_t* chunk) {
     if (!chunk) {
         return;
     }
-    nc_renderer_destroy_buffer(renderer, chunk->face_data_buffer);
-    nc_renderer_destroy_buffer(renderer, chunk->quad_buffer);
+    nc_renderer_destroy_buffer(renderer, chunk->opaque_face_data_buffer);
+    nc_renderer_destroy_buffer(renderer, chunk->transparent_face_data_buffer);
+    nc_renderer_destroy_buffer(renderer, chunk->opaque_quad_buffer);
+    nc_renderer_destroy_buffer(renderer, chunk->transparent_quad_buffer);
     free(chunk->queued_light_nodes[0]);
     free(chunk->queued_light_nodes[1]);
     free(chunk);

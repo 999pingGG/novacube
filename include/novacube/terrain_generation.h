@@ -4,10 +4,12 @@
 
 #include <stdint.h>
 
+#include <FastNoiseLite.h>
+
 #include <novacube/chunk.h>
 
 typedef struct nc_terrain_generator_t {
-    uint64_t seed;
+    fnl_state noise_state;
 } nc_terrain_generator_t;
 
 void nc_terrain_generator_generate_chunk(

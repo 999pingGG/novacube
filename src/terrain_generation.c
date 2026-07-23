@@ -1,3 +1,10 @@
+#include <stdint.h>
+
+#include <novacube/macros.h>
+NC_IGNORE_ALL_WARNINGS_BEGIN
+#include <FastNoiseLite.h>
+NC_IGNORE_ALL_WARNINGS_END
+
 #include <novacube/block.h>
 #include <novacube/cvkm.h>
 #include <novacube/terrain_generation.h>
@@ -7,19 +14,22 @@ void nc_terrain_generator_generate_chunk(
     const vkm_ivec3* chunk_coords,
     uint16_t blocks[NC_BLOCKS_PER_CHUNK]
 ) {
-    (void)generator->seed;
-    for (int index = 0; index < NC_BLOCKS_PER_CHUNK; index++) {
-        vkm_ivec3 local_coords;
-        nc_chunk_index_to_local_coords((uint16_t)index, &local_coords);
-        const int32_t x = nc_chunk_local_coord_to_block_coord(chunk_coords->x, local_coords.x);
-        const int32_t y = nc_chunk_local_coord_to_block_coord(chunk_coords->y, local_coords.y);
-        const int32_t z = nc_chunk_local_coord_to_block_coord(chunk_coords->z, local_coords.z);
-        const int32_t height = (int32_t)(
-            (15.0f + vkm_sin((float)z / 3.0f) * 3.0f + (15.0f + vkm_cos((float)x / 3.0f) * 3.0f)) / 2.0f);
-        blocks[index] = y >= height
-                ? NC_BLOCK_TYPE_AIR
-                : y == height - 1
-                        ? NC_BLOCK_TYPE_GRASS
-                        : y > height - 5 ? NC_BLOCK_TYPE_DIRT : NC_BLOCK_TYPE_STONE;
+    for (int z = 0, index = 0; z < NC_CHUNK_SIZE; z++) {
+        const int block_z = nc_chunk_local_coord_to_block_coord(chunk_coords->z, z);
+        for (int y = 0; y < NC_CHUNK_SIZE; y++) {
+            const int block_y = nc_chunk_local_coord_to_block_coord(chunk_coords->y, y);
+            for (int x = 0; x < NC_CHUNK_SIZE; x++, index++) {
+                const int block_x = nc_chunk_local_coord_to_block_coord(chunk_coords->x, x);
+
+                const int elevation = (int)(vkm_pow(
+                        fnlGetNoise2D(
+                                &generator->noise_state,
+                                (FNLfloat)block_x + 0.5,
+                                (FNLfloat)block_z + 0.5),
+                        5.0f)
+                        * 50.0f);
+                blocks[index] = block_y > elevation ? (block_y <= 0 ? NC_BLOCK_TYPE_WATER : NC_BLOCK_TYPE_AIR) : NC_BLOCK_TYPE_STONE;
+            }
+        }
     }
 }
