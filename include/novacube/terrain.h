@@ -36,8 +36,26 @@ typedef struct nc_terrain_timing_stats_t {
     double meshing_ms;
 } nc_terrain_timing_stats_t;
 
+typedef enum nc_terrain_light_channel_t {
+    NC_TERRAIN_LIGHT_CHANNEL_BLOCK,
+    NC_TERRAIN_LIGHT_CHANNEL_SKY,
+    NC_TERRAIN_LIGHT_CHANNEL_COUNT,
+} nc_terrain_light_channel_t;
+
+typedef struct nc_terrain_lighting_t {
+    bool sky_light_has_propagated;
+    bool sky_light_needs_rebuild;
+    bool sky_light_frontier_queued;
+} nc_terrain_lighting_t;
+
 nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer);
 void nc_terrain_update(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_vec3* player_position);
+uint8_t nc_terrain_light_get(uint8_t packed_light, nc_terrain_light_channel_t channel);
+void nc_terrain_light_set(uint8_t* packed_light, nc_terrain_light_channel_t channel, uint8_t light);
+uint8_t nc_terrain_light_get_block(uint8_t packed_light);
+uint8_t nc_terrain_light_get_sky(uint8_t packed_light);
+void nc_terrain_light_set_block(uint8_t* packed_light, uint8_t light);
+void nc_terrain_light_set_sky(uint8_t* packed_light, uint8_t light);
 bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_coords, uint16_t* block);
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 void nc_terrain_get_timing_stats(const nc_terrain_t* terrain, nc_terrain_timing_stats_t* stats);
