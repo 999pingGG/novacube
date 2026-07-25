@@ -21,5 +21,5 @@ information.
 3. Run `python3 ./prepare-assets.py --compress-android` (the script is also directly executable on Linux). This will
    compress and/or copy textures, compile shaders, etc. You need to have `astcenc-avx2` in your `PATH` to be able to
    compress textures for Android, but the binary name is customizable in the script. You can also pass `--strip-exif` to
-   use the Pillow package to strip EXIF data from the source assets before processing them.
+   strip EXIF data from the source assets before processing them. Useful to not commit images with metadata in them.
 4. Do a standard CMake build.

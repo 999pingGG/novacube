@@ -3,7 +3,6 @@ import argparse
 import shutil
 import subprocess
 from pathlib import Path
-import sys
 
 # ---------------- CONFIG ----------------
 
@@ -61,17 +60,34 @@ def strip_exif_if_requested(path: Path, enabled: bool):
     if not enabled:
         return
 
-    try:
-        from PIL import Image
-    except ImportError:
-        print('EXIF stripping requested but Pillow is not installed.', file=sys.stderr)
-        sys.exit(1)
+    png_signature = b'\x89PNG\r\n\x1a\n'
+    metadata_chunks = {
+        b'bKGD', b'cHRM', b'eXIf', b'gAMA', b'hIST', b'iCCP', b'iTXt',
+        b'pHYs', b'sBIT', b'sPLT', b'sRGB', b'tEXt', b'tIME', b'zTXt',
+    }
 
-    img = Image.open(path)
-    data = list(img.getdata())
-    clean = Image.new(img.mode, img.size)
-    clean.putdata(data)
-    clean.save(path)
+    contents = path.read_bytes()
+    if not contents.startswith(png_signature):
+        return
+
+    output = bytearray(png_signature)
+    offset = len(png_signature)
+    while offset + 12 <= len(contents):
+        length = int.from_bytes(contents[offset:offset + 4], 'big')
+        chunk_end = offset + 12 + length
+        if chunk_end > len(contents):
+            raise ValueError(f'Invalid PNG chunk length in {path}')
+
+        chunk_type = contents[offset + 4:offset + 8]
+        if chunk_type not in metadata_chunks:
+            output.extend(contents[offset:chunk_end])
+
+        offset = chunk_end
+        if chunk_type == b'IEND':
+            break
+
+    with path.open('wb') as file:
+        file.write(output)
 
 
 def process_textures(compress_android, strip_exif):
