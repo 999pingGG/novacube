@@ -13,6 +13,12 @@ _Pragma("clang diagnostic ignored \"-Weverything\"")
 #define NC_IGNORE_ALL_WARNINGS_BEGIN _Pragma("GCC diagnostic push") \
 _Pragma("GCC diagnostic ignored \"-Wmissing-braces\"")
 _Pragma("GCC diagnostic ignored \"-Wempty-body\"")
+_Pragma("GCC diagnostic ignored \"-Wpedantic\"")
+_Pragma("GCC diagnostic ignored \"-Wunused-variable\"")
+_Pragma("GCC diagnostic ignored \"-Wunused-parameter\"")
+_Pragma("GCC diagnostic ignored \"-Wmissing-field-initializers\"")
+_Pragma("GCC diagnostic ignored \"-Wsign-compare\"")
+_Pragma("GCC diagnostic ignored \"-Waggressive-loop-optimizations\"")
 #define NC_IGNORE_ALL_WARNINGS_END   _Pragma("GCC diagnostic pop")
 #else
 #define NC_IGNORE_ALL_WARNINGS_BEGIN

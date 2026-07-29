@@ -39,11 +39,43 @@ typedef enum nc_renderer_texture_type_t {
     NC_RENDERER_TEXTURE_TYPE_DATA,
 } nc_renderer_texture_type_t;
 
-typedef struct nc_renderer_overlay_draw_command_t {
+// Tags the union in nc_renderer_overlay_draw_command_t. Rectangle commands reference a batch;
+// image commands carry one texture because changing textures breaks a rectangle batch.
+typedef uint8_t nc_renderer_overlay_command_type_t;
+enum {
+    NC_RENDERER_OVERLAY_COMMAND_RECTANGLES = 1,
+    NC_RENDERER_OVERLAY_COMMAND_IMAGE,
+};
+
+typedef struct nc_renderer_overlay_rectangle_t {
+    SDL_FRect rectangle;
+    vkm_vec4 color;
+    vkm_vec4 corner_radii;
+    vkm_uvec4 border_widths;
+    vkm_vec4 overlay_color;
+    uint32_t character;
+} nc_renderer_overlay_rectangle_t;
+
+typedef struct nc_renderer_overlay_image_t {
     const nc_renderer_texture_t* texture;
-    SDL_Rect clip_rect;
-    uint32_t element_count;
-    uint32_t first_index;
+    SDL_FRect rectangle;
+    vkm_vec4 color;
+    vkm_vec4 corner_radii;
+    vkm_vec4 overlay_color;
+} nc_renderer_overlay_image_t;
+
+// One ordered rendering operation. Keeping order here is required for correct alpha blending.
+typedef struct nc_renderer_overlay_draw_command_t {
+    nc_renderer_overlay_command_type_t type;
+    bool clip_enabled;
+    SDL_FRect clip_rect;
+    union {
+        struct {
+            uint32_t first_rectangle;
+            uint32_t rectangle_count;
+        } rectangles;
+        nc_renderer_overlay_image_t image;
+    };
 } nc_renderer_overlay_draw_command_t;
 
 typedef struct nc_renderer_chunk_draw_t {
@@ -61,11 +93,15 @@ typedef struct nc_renderer_chunk_draw_t {
 #define TDS_TYPE nc_renderer_chunk_draw_vec
 #include <tds/vector.h>
 
+// Rectangle data is stored separately so adjacent solid/text commands can be drawn as one
+// instanced batch.
 typedef struct nc_renderer_overlay_draw_t {
-    const nc_renderer_buffer_t* vertex_buffer;
-    const nc_renderer_buffer_t* index_buffer;
+    // TODO: Can those be replaced with a TDS vector?
+    const nc_renderer_overlay_rectangle_t* rectangles;
+    uint32_t rectangle_count;
     const nc_renderer_overlay_draw_command_t* draw_commands;
     uint32_t draw_command_count;
+    const nc_renderer_texture_t* font_texture;
 } nc_renderer_overlay_draw_t;
 
 typedef struct nc_renderer_procedural_overlay_draw_t {
@@ -113,10 +149,11 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event);
 bool nc_renderer_begin_frame(nc_renderer_t* renderer);
 bool nc_renderer_end_frame(nc_renderer_t* renderer);
 bool nc_renderer_set_relative_mouse_mode(nc_renderer_t* renderer, bool enabled);
+bool nc_renderer_is_relative_mouse_mode(const nc_renderer_t* renderer);
 bool nc_renderer_is_foreground(const nc_renderer_t* renderer);
 vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer);
-vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer);
-float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer);
+// Returns actual framebuffer pixels in the current display orientation, not SDL window units.
+vkm_usvec2 nc_renderer_get_framebuffer_size(const nc_renderer_t* renderer);
 void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect);
 nc_renderer_buffer_t* nc_renderer_create_buffer(
         nc_renderer_t* renderer,
@@ -145,7 +182,6 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
         uint16_t path_count);
 void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture);
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame);
-float nc_renderer_get_window_pixel_density(const nc_renderer_t* renderer);
 void nc_renderer_fini(nc_renderer_t* renderer);
 
 #endif
