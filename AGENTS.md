@@ -11,6 +11,8 @@ A guide for [coding agents](https://agents.md/).
 - Don't delete code comments, unless they're outdated or they're a "TODO" or "FIXME" that you have fixed. You may only
   improve them. As an AI model, you might not need them, but flesh-and-bone engineers do need them. How primitive,
   isn't it?
+- Do leave useful comments explaining design choices, logic, algorithms, etc. Think about saving time for people trying
+  to understand and modify the code later.
 - When passing and returning structs > 8 bytes, prefer to do it with pointers.
 - Use a 120 column limit.
 - For the love of God don't use the "u" suffix for integer literals, unless getting an unsigned type is necessary.
