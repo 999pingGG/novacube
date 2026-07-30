@@ -61,7 +61,7 @@ void main() {
             character = 127;
         }
         character -= 32;
-        out_uv = vec2(character % 12, character / 12) * vec2(5.0 / 64.0, 8.0 / 64.0) +
-            corner * vec2(5.0 / 64.0, 8.0 / 64.0);
+        out_uv = vec2(character % 12, character / 12) * vec2(5.0 / 64.0, 8.0 / 64.0)
+                + corner * vec2(5.0 / 64.0, 8.0 / 64.0);
     }
 }

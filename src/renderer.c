@@ -1425,6 +1425,7 @@ static void nc__renderer_initialize_render_pass_attachments(nc_renderer_t* rende
     // starts from safe layouts. Establish those layouts once after each swapchain recreation; the render pass then
     // performs all recurring subpass and final transitions implicitly.
     // This exists for the transaction elimination ARM optimization.
+    // TODO: Check whether doing this is really necessary.
     if (!renderer->render_pass_attachments_initialized) {
         const VkImageMemoryBarrier barriers[] = {
             {

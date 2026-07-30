@@ -364,7 +364,13 @@ static void nc__gui_build_draw_list(
                         clipped,
                         clip);
                 break;
-            case CLAY_RENDER_COMMAND_TYPE_BORDER:
+            case CLAY_RENDER_COMMAND_TYPE_BORDER: {
+                const Clay_BorderWidth* width = &command->renderData.border.width;
+                // Clay emits betweenChildren dividers as separate rectangle commands. A BORDER
+                // command with no outer sides must therefore not become a filled bounding box.
+                if (!(width->left || width->right || width->top || width->bottom)) {
+                    break;
+                }
                 nc__gui_append_rectangle(
                         context,
                         &(nc_renderer_overlay_rectangle_t){
@@ -372,16 +378,17 @@ static void nc__gui_build_draw_list(
                             .color = nc__gui_color_from_clay_color(command->renderData.border.color),
                             .corner_radii = nc__gui_vec4_from_corner_radii(&command->renderData.border.cornerRadius),
                             .border_widths = { {
-                                command->renderData.border.width.left,
-                                command->renderData.border.width.right,
-                                command->renderData.border.width.top,
-                                command->renderData.border.width.bottom,
+                                width->left,
+                                width->right,
+                                width->top,
+                                width->bottom,
                             } },
                             .overlay_color = overlay,
                         },
                         clipped,
                         clip);
                 break;
+            }
             case CLAY_RENDER_COMMAND_TYPE_TEXT:
                 nc__gui_append_text(context, command, clipped, clip, overlay);
                 break;
