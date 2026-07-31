@@ -13,8 +13,6 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(NC_SOURCES
-        libs/cvkm/cvkm.h
-        libs/rapidhash/rapidhash.h
         src/block.c
         src/block_meshing.c
         src/camera.c
@@ -89,13 +87,13 @@ endif()
 
 target_include_directories(novacube PRIVATE
         include
-        libs/clay
-        libs/cvkm
-        libs/FastNoiseLite
-        libs/rapidhash
-        libs/tds/include
-        libs/vma
-        libs/volk)
+        vendor/clay
+        vendor/cvkm
+        vendor/FastNoiseLite
+        vendor/rapidhash
+        vendor/tds/include
+        vendor/vma
+        vendor/volk)
 
 if(NOT ANDROID AND (WIN32 OR UNIX))
     add_custom_command(
