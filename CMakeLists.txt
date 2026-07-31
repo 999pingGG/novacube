@@ -14,7 +14,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(NC_SOURCES
         libs/cvkm/cvkm.h
-        libs/nuklear/nuklear.h
         libs/rapidhash/rapidhash.h
         src/block.c
         src/block_meshing.c
@@ -27,6 +26,7 @@ set(NC_SOURCES
         src/gui.c
         src/main.c
         src/mesher.c
+        src/player_input.c
         src/renderer.c
         src/string_builder.c
         src/terrain.c
@@ -89,9 +89,9 @@ endif()
 
 target_include_directories(novacube PRIVATE
         include
+        libs/clay
         libs/cvkm
         libs/FastNoiseLite
-        libs/nuklear
         libs/rapidhash
         libs/tds/include
         libs/vma

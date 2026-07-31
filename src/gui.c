@@ -1,34 +1,58 @@
-#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include <novacube/macros.h>
+#define CLAY_IMPLEMENTATION
+NC_IGNORE_ALL_WARNINGS_BEGIN
+#include <clay.h>
+NC_IGNORE_ALL_WARNINGS_END
+#include <SDL3/SDL.h>
 
 #include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 #include <novacube/gui.h>
-#include <novacube/error_handling.h>
-#include <novacube/macros.h>
+#include <novacube/player_input.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
 #include <novacube/string_builder.h>
 
-#define NK_PRIVATE
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_STANDARD_IO
-#define NK_INCLUDE_STANDARD_VARARGS
-#define NK_INCLUDE_STANDARD_BOOL
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_BUTTON_TRIGGER_ON_RELEASE
-#define NK_KEYSTATE_BASED_INPUT
-#define NK_ASSERT NC_ASSERT
-
-#define NK_IMPLEMENTATION
-NC_IGNORE_ALL_WARNINGS_BEGIN
-#include <nuklear.h>
-NC_IGNORE_ALL_WARNINGS_END
+// Spleen 5x8, packed one bit per pixel into a 64x64 atlas. Character 127 is a diamond fallback.
+static const uint8_t nc__spleen_font_bits[512] = {
+    0x80, 0x28, 0x40, 0x10, 0x21, 0x48, 0x00, 0x00,   0x80, 0x28, 0xe5, 0x92, 0x22, 0x84, 0x00, 0x00,
+    0x80, 0xa8, 0x5f, 0x8a, 0x22, 0x02, 0x25, 0x02,   0x80, 0x00, 0x65, 0x88, 0x01, 0x02, 0x19, 0x02,
+    0x80, 0x00, 0xc5, 0x44, 0x05, 0x02, 0xbd, 0x0f,   0x00, 0x80, 0xcf, 0x54, 0x02, 0x02, 0x19, 0x02,
+    0x80, 0x00, 0x75, 0x92, 0x05, 0x84, 0x24, 0x02,   0x00, 0x00, 0x40, 0x02, 0x00, 0x48, 0x00, 0x00,
+    0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,   0x00, 0x00, 0x64, 0x88, 0x31, 0xe1, 0x99, 0x07,
+    0x00, 0x00, 0x92, 0x4c, 0x4a, 0x25, 0x84, 0x04,   0x00, 0x00, 0xd2, 0x08, 0x22, 0xe5, 0x1c, 0x04,
+    0xe0, 0x01, 0xb1, 0x88, 0x41, 0x0f, 0x25, 0x02,   0x04, 0x00, 0x91, 0x48, 0x48, 0x04, 0x25, 0x01,
+    0x04, 0x90, 0x60, 0xdc, 0x33, 0xe4, 0x18, 0x01,   0x02, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00,   0xc6, 0x00, 0x80, 0x80, 0x48, 0xc6, 0x1c, 0x07,
+    0x29, 0x01, 0x40, 0x00, 0x41, 0x29, 0xa5, 0x00,   0x26, 0x11, 0x22, 0x1e, 0x22, 0x2d, 0x9d, 0x00,
+    0xc9, 0x01, 0x20, 0x00, 0x12, 0xed, 0xa5, 0x00,   0x09, 0x01, 0x42, 0x1e, 0x01, 0x21, 0xa5, 0x00,
+    0xc6, 0x10, 0x82, 0x80, 0x10, 0x2e, 0x1d, 0x07,   0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,   0xc7, 0x39, 0x97, 0x9c, 0x4b, 0x21, 0x25, 0x03,
+    0x29, 0x84, 0x90, 0x08, 0x49, 0xe1, 0xad, 0x04,   0xe9, 0x84, 0xf6, 0x08, 0x39, 0xe1, 0xad, 0x04,
+    0x29, 0x9c, 0x94, 0x08, 0x49, 0x21, 0xb5, 0x04,   0x29, 0x84, 0x94, 0x08, 0x49, 0x21, 0xb5, 0x04,
+    0xc7, 0x05, 0x97, 0xdc, 0x48, 0x2e, 0x25, 0x03,   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,   0xc7, 0x1c, 0xf7, 0x53, 0x4a, 0x29, 0x3d, 0x01,
+    0x29, 0xa5, 0x40, 0x52, 0x4a, 0x29, 0x21, 0x01,   0x29, 0x25, 0x43, 0x52, 0x4a, 0x26, 0x11, 0x01,
+    0x27, 0x1d, 0x44, 0x52, 0x7a, 0xc6, 0x09, 0x01,   0x21, 0x25, 0x44, 0x92, 0x79, 0x09, 0x05, 0x01,
+    0xc1, 0xa4, 0x43, 0x9c, 0x49, 0xe9, 0x3c, 0x01,   0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+    0xc1, 0x01, 0x20, 0x40, 0x00, 0x08, 0x30, 0x00,   0x01, 0x11, 0x40, 0x40, 0x00, 0x08, 0x08, 0x00,
+    0x02, 0x29, 0x00, 0xcc, 0x71, 0xce, 0x09, 0x07,   0x02, 0x45, 0x00, 0x50, 0x0a, 0x29, 0x9d, 0x04,
+    0x04, 0x01, 0x00, 0x5c, 0x0a, 0xe9, 0x89, 0x04,   0x04, 0x01, 0x00, 0x52, 0x0a, 0x29, 0x08, 0x03,
+    0x08, 0x01, 0x00, 0xdc, 0x71, 0xce, 0x09, 0x04,   0xc8, 0x81, 0x07, 0x00, 0x00, 0x00, 0x80, 0x03,
+    0x01, 0x80, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,   0x81, 0x90, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x07, 0x80, 0x24, 0xd2, 0x31, 0xc7, 0x39, 0x07,   0xc9, 0x90, 0x22, 0x5e, 0x4a, 0x29, 0xa5, 0x00,
+    0x89, 0x90, 0x21, 0x5e, 0x4a, 0x29, 0x05, 0x03,   0x89, 0x90, 0x22, 0x52, 0x4a, 0xc7, 0x05, 0x04,
+    0x89, 0x91, 0xc4, 0x52, 0x32, 0x01, 0x85, 0x03,   0x00, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x60, 0x64, 0x00, 0x02,   0x02, 0x00, 0x00, 0x00, 0x10, 0x84, 0x00, 0x07,
+    0x27, 0xa5, 0x94, 0xd2, 0x13, 0x84, 0x00, 0x07,   0x22, 0xa5, 0x64, 0x12, 0x1a, 0x84, 0xc9, 0x0f,
+    0x22, 0xa5, 0x67, 0x12, 0x19, 0x84, 0xb5, 0x0f,   0x22, 0x99, 0x97, 0x9c, 0x10, 0x84, 0x00, 0x07,
+    0xcc, 0x99, 0x94, 0xd0, 0x13, 0x84, 0x00, 0x07,   0x00, 0x00, 0x00, 0x0e, 0x60, 0x64, 0x00, 0x02,
+};
 
 #ifdef ANDROID
 #define NC__GUI_ASSETS_BASE_PATH ""
@@ -38,107 +62,46 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__GUI_TEXTURE_EXTENSION ".png"
 #endif
 
-#define NC__GUI_INITIAL_BUFFER_CAPACITY 65536
-#define NC__GUI_MAX_TOUCHES 8
-#define NC__TOUCH_CONTROLS_SWITCH_THRESHOLD 0.2f
+#define NC__GUI_FONT_WIDTH 5
+#define NC__GUI_FONT_HEIGHT 8
+// Clay multiplies scroll deltas by 10. SDL reports one conventional wheel detent as 1, so
+// multiplying by three moves one 30-pixel inspector row while preserving trackpad fractions.
+#define NC__GUI_MOUSE_WHEEL_SCALE 3.0f
+// Render commands use these stacks for nested clips and color overlays. Clay emits balanced
+// start/end commands, so the limit only needs to cover nesting authored by the GUI.
+#define NC__GUI_STACK_CAPACITY 64
 
-typedef uint8_t nc__gui_control_id_t;
-enum {
-    // movement controls
-    NC__GUI_CONTROL_LEFT,
-    NC__GUI_CONTROL_RIGHT,
-    NC__GUI_CONTROL_FORWARD,
-    NC__GUI_CONTROL_BACKWARD,
-    NC__GUI_CONTROL_UP,
-    NC__GUI_CONTROL_DOWN,
+#define TDS_TYPE nc__gui_rectangle_vec
+#define TDS_VALUE_T nc_renderer_overlay_rectangle_t
+#include <tds/vector.h>
 
-    // action controls
-    NC__GUI_CONTROL_PLACE_BLOCK,
-    NC__GUI_CONTROL_REMOVE_BLOCK,
-
-    NC__GUI_CONTROL_COUNT,
-    NC__GUI_CONTROL_NONE = NC__GUI_CONTROL_COUNT,
-};
-
-typedef uint8_t nc__gui_touch_action_t;
-enum {
-    NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK,
-    NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK,
-    NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG,
-
-    NC__GUI_TOUCH_ACTION_COUNT,
-    NC__GUI_TOUCH_ACTION_NONE = NC__GUI_TOUCH_ACTION_COUNT,
-};
-
-typedef struct nc__gui_texture_t {
-    nc_renderer_texture_t* texture;
-    struct nk_image nuklear_image;
-} nc__gui_texture_t;
-
-typedef struct nc__gui_vertex_t {
-    float position[2];
-    float uv[2];
-    vkm_ubvec4 color;
-} nc__gui_vertex_t;
-
-typedef struct nc__gui_pointer_t {
-    SDL_FingerID finger_id;
-    vkm_vec2 position;
-    vkm_vec2 initial_position;
-    nc__gui_control_id_t captured_control;
-    nc__gui_touch_action_t touch_action;
-    bool active;
-} nc__gui_pointer_t;
+#define TDS_TYPE nc__gui_command_vec
+#define TDS_VALUE_T nc_renderer_overlay_draw_command_t
+#include <tds/vector.h>
 
 typedef struct nc_gui_context_t {
-    vkm_usvec2 window_size;
-    vkm_usvec2 pixel_viewport;
-    float window_display_scale;
-
-    struct nk_context nuklear_context;
-    struct nk_font_atlas font_atlas;
-    struct nk_font* default_font;
-    struct nk_draw_null_texture null_texture;
-    struct nk_buffer command_buffer;
-    struct nk_buffer vertex_buffer;
-    struct nk_buffer index_buffer;
-    bool nuklear_initialized;
-    bool font_atlas_initialized;
-
-    nc_renderer_buffer_t* vertex_gpu_buffer;
-    nc_renderer_buffer_t* index_gpu_buffer;
-
-    nc__gui_texture_t font_texture;
-    nc__gui_texture_t control_textures[NC__GUI_CONTROL_COUNT];
-
-    struct nk_rect control_rects[NC__GUI_CONTROL_COUNT];
-    nc_gui_controls_t controls;
-    nc_gui_actions_t pending_actions;
-    nc__gui_pointer_t touch_points[NC__GUI_MAX_TOUCHES];
-
-    nc_renderer_overlay_draw_command_t* draw_commands;
-    uint32_t draw_command_count;
-    uint32_t draw_command_capacity;
-    bool draw_ready;
-    bool overlay_dirty;
-
-    vkm_vec2 look_delta;
-    float mode_switch_accumulator;
-    bool touch_controls_enabled;
-
+    nc_renderer_t* renderer;
+    void* clay_memory;
+    nc_gui_view_t view;
+    SDL_FingerID captured_finger;
+    bool captured_finger_active;
+    uint8_t captured_mouse_button;
+    Clay_Vector2 pointer_position;
+    Clay_Vector2 scroll_delta;
+    bool pointer_down;
+    nc_renderer_texture_t* font_texture;
+    nc_renderer_texture_t* control_textures[NC_PLAYER_INPUT_CONTROL_COUNT];
     nc_string_builder_t debug_string_builder;
 
-    struct nk_rect safe_area;
+    // Retained vectors own the draw list until nc_renderer_draw() consumes it later in the frame.
+    nc__gui_rectangle_vec rectangles;
+    nc__gui_command_vec commands;
+
+    // Avoid logging one warning per frame for an unsupported custom command.
+    uint64_t last_custom_warning;
 } nc_gui_context_t;
 
-static const struct nk_draw_vertex_layout_element nc__gui_vertex_layout[] = {
-    { NK_VERTEX_POSITION, NK_FORMAT_FLOAT, offsetof(nc__gui_vertex_t, position) },
-    { NK_VERTEX_TEXCOORD, NK_FORMAT_FLOAT, offsetof(nc__gui_vertex_t, uv) },
-    { NK_VERTEX_COLOR, NK_FORMAT_R8G8B8A8, offsetof(nc__gui_vertex_t, color) },
-    { NK_VERTEX_LAYOUT_END },
-};
-
-static const char* nc__gui_control_texture_paths[NC__GUI_CONTROL_COUNT] = {
+static const char* nc__gui_control_texture_paths[NC_PLAYER_INPUT_CONTROL_COUNT] = {
     NC__GUI_ASSETS_BASE_PATH "textures/gui/left"        NC__GUI_TEXTURE_EXTENSION,
     NC__GUI_ASSETS_BASE_PATH "textures/gui/right"       NC__GUI_TEXTURE_EXTENSION,
     NC__GUI_ASSETS_BASE_PATH "textures/gui/up"          NC__GUI_TEXTURE_EXTENSION,
@@ -149,939 +112,671 @@ static const char* nc__gui_control_texture_paths[NC__GUI_CONTROL_COUNT] = {
     NC__GUI_ASSETS_BASE_PATH "textures/gui/remove"      NC__GUI_TEXTURE_EXTENSION,
 };
 
-static bool nc__gui_point_in_rect(const struct nk_rect rect, const float x, const float y) {
-    return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+// GUI colors are treated as linear values in Clay's conventional 0..255 range. The sRGB
+// swapchain performs the final display encoding.
+static vkm_vec4 nc__gui_color_from_clay_color(const Clay_Color color) {
+    return (vkm_vec4){ { color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f } };
 }
 
-static bool nc__gui_is_movement_control(const nc__gui_control_id_t control_id) {
-    return control_id <= NC__GUI_CONTROL_DOWN;
+// Nested clips may only draw inside both their own bounds and every parent clip.
+static SDL_FRect nc__gui_intersect_rects(const SDL_FRect a, const SDL_FRect b) {
+    const float left = vkm_max(a.x, b.x);
+    const float top = vkm_max(a.y, b.y);
+    const float right = vkm_min(a.x + a.w, b.x + b.w);
+    const float bottom = vkm_min(a.y + a.h, b.y + b.h);
+    return (SDL_FRect){ left, top, vkm_max(right - left, 0.0f), vkm_max(bottom - top, 0.0f) };
 }
 
-static nc_gui_controls_t nc__gui_control_flag(const nc__gui_control_id_t control_id) {
-    static const nc_gui_controls_t flags[] = {
-        [NC__GUI_CONTROL_LEFT] =        NC_GUI_CONTROL_MOVE_LEFT,
-        [NC__GUI_CONTROL_RIGHT] =       NC_GUI_CONTROL_MOVE_RIGHT,
-        [NC__GUI_CONTROL_FORWARD] =     NC_GUI_CONTROL_MOVE_FORWARD,
-        [NC__GUI_CONTROL_BACKWARD] =    NC_GUI_CONTROL_MOVE_BACKWARD,
-        [NC__GUI_CONTROL_UP] =          NC_GUI_CONTROL_MOVE_UP,
-        [NC__GUI_CONTROL_DOWN] =        NC_GUI_CONTROL_MOVE_DOWN,
+// Converts SDL's window-coordinate safe area into the framebuffer coordinates used by Clay.
+static void nc__gui_update_view(nc_gui_context_t* context) {
+    const vkm_usvec2 framebuffer_size = nc_renderer_get_framebuffer_size(context->renderer);
+    const vkm_usvec2 window_size = nc_renderer_get_window_size(context->renderer);
+    context->view.framebuffer_size = framebuffer_size;
+
+    SDL_Rect window_safe_area;
+    nc_renderer_get_window_safe_area(context->renderer, &window_safe_area);
+    // A minimized desktop window and an Android surface transition can temporarily report zero.
+    if (window_size.x == 0 || window_size.y == 0) {
+        context->view.gui_safe_area = (SDL_FRect){ 0 };
+        return;
+    }
+
+    const float window_to_framebuffer_x = (float)framebuffer_size.x / (float)window_size.x;
+    const float window_to_framebuffer_y = (float)framebuffer_size.y / (float)window_size.y;
+    const SDL_FRect safe_area = {
+        (float)window_safe_area.x * window_to_framebuffer_x,
+        (float)window_safe_area.y * window_to_framebuffer_y,
+        (float)window_safe_area.w * window_to_framebuffer_x,
+        (float)window_safe_area.h * window_to_framebuffer_y,
     };
-
-    NC_ASSERT(control_id < NC__GUI_CONTROL_COUNT);
-    return nc__gui_is_movement_control(control_id) ? flags[control_id] : 0;
+    const SDL_FRect canvas = { 0.0f, 0.0f, framebuffer_size.x, framebuffer_size.y };
+    context->view.gui_safe_area = nc__gui_intersect_rects(safe_area, canvas);
 }
 
-static uint32_t nc__gui_next_capacity(const uint32_t current, const uint32_t required) {
-    uint32_t capacity = current ? current : 16;
-    while (capacity < required) {
-        if (capacity > UINT32_MAX / 2) {
-            capacity = UINT32_MAX;
-            break;
-        }
-        capacity *= 2;
+static Clay_Vector2 nc__gui_window_to_clay_position(const nc_gui_context_t* context, const float x, const float y) {
+    const vkm_usvec2 window_size = nc_renderer_get_window_size(context->renderer);
+    if (window_size.x == 0 || window_size.y == 0) {
+        return (Clay_Vector2){ 0 };
     }
 
-    NC_ASSERT(capacity >= required);
-    return capacity;
+    return (Clay_Vector2){
+        x * (float)context->view.framebuffer_size.x / (float)window_size.x -
+                context->view.gui_safe_area.x,
+        y * (float)context->view.framebuffer_size.y / (float)window_size.y -
+                context->view.gui_safe_area.y,
+    };
 }
 
-static void nc__gui_reserve_draw_commands(nc_gui_context_t* context, const uint32_t additional_commands) {
-    NC_ASSERT(additional_commands);
-
-    const uint32_t required = context->draw_command_count + additional_commands;
-    NC_ASSERT(required > context->draw_command_count);
-
-    if (required <= context->draw_command_capacity) {
-        return;
-    }
-
-    const uint32_t new_capacity = nc__gui_next_capacity(context->draw_command_capacity, required);
-    context->draw_commands = realloc(context->draw_commands, new_capacity * sizeof(*context->draw_commands));
-    context->draw_command_capacity = new_capacity;
+static Clay_Vector2 nc__gui_touch_to_clay_position(const nc_gui_context_t* context, const float x, const float y) {
+    return (Clay_Vector2){
+        x * (float)context->view.framebuffer_size.x - context->view.gui_safe_area.x,
+        y * (float)context->view.framebuffer_size.y - context->view.gui_safe_area.y,
+    };
 }
 
-static void nc__gui_destroy_texture(nc_renderer_t* renderer, nc__gui_texture_t* texture) {
-    if (!texture->texture) {
-        return;
-    }
-
-    nc_renderer_destroy_texture(renderer, texture->texture);
-    *texture = (nc__gui_texture_t){ 0 };
+static bool nc__gui_pointer_over_element(const nc_gui_context_t* context, const Clay_Vector2 position) {
+    Clay_SetPointerState(position, context->pointer_down);
+    // Pass-through floating roots allow Clay to continue hit-testing the implicit root container.
+    // A capturing overlay, such as the debug inspector, stops the search before that root is reached.
+    return Clay_GetPointerOverIds().length > 0 && !Clay_PointerOver(CLAY_ID("Clay__RootContainer"));
 }
 
-static bool nc__gui_load_texture(nc_renderer_t* renderer, const char* path, nc__gui_texture_t* texture) {
-    texture->texture = nc_renderer_create_texture_2d_from_file(renderer, NC_RENDERER_TEXTURE_TYPE_COLOR, path);
-    if (!texture->texture) {
-        goto error;
-    }
-
-    texture->nuklear_image = nk_image_ptr(texture->texture);
-    return true;
-
-error:
-    return false;
+static void nc__gui_clay_error_handler(const Clay_ErrorData error) {
+    SDL_LogError(
+            SDL_LOG_CATEGORY_APPLICATION,
+            "Clay: %.*s",
+            (int)error.errorText.length,
+            error.errorText.chars);
 }
 
-static void nc__gui_layout_controls(nc_gui_context_t* context) {
-    struct nk_rect safe_area = context->safe_area;
+static Clay_Dimensions nc__gui_measure_text(
+    const Clay_StringSlice text,
+    Clay_TextElementConfig* config,
+    void* user_data
+) {
+    (void)user_data;
 
-    const float safe_left = safe_area.x;
-    const float safe_top = safe_area.y;
-    const float safe_right = safe_area.x + safe_area.w;
-    const float safe_bottom = safe_area.y + safe_area.h;
-    const float button_size = (float)nc_cvar_get_gui_button_size() * context->window_display_scale;
-    const float gap = button_size * 0.12f;
-    const float margin = button_size * 0.35f;
-    const float dpad_width = button_size * 3.0f + gap * 2.0f;
-    const float dpad_height = dpad_width;
-    const float action_row_width = button_size * 2.0f + gap;
-    const float right_column_height = button_size * 2.0f + gap;
-    const float action_row_bottom_gap = button_size * 0.45f + gap * 2.0f;
-
-    const float dpad_left = vkm_min(
-            vkm_max(safe_left + margin, safe_left),
-            vkm_max(safe_right - margin - dpad_width, safe_left));
-    const float dpad_top = vkm_min(
-            vkm_max(safe_bottom - margin - dpad_height, safe_top),
-            vkm_max(safe_bottom - button_size, safe_top));
-
-    context->control_rects[NC__GUI_CONTROL_FORWARD] = nk_rect(
-            dpad_left + button_size + gap,
-            dpad_top,
-            button_size,
-            button_size);
-    context->control_rects[NC__GUI_CONTROL_LEFT] = nk_rect(
-            dpad_left,
-            dpad_top + button_size + gap,
-            button_size,
-            button_size);
-    context->control_rects[NC__GUI_CONTROL_BACKWARD] = nk_rect(
-            dpad_left + button_size + gap,
-            dpad_top + (button_size + gap) * 2.0f,
-            button_size,
-            button_size);
-    context->control_rects[NC__GUI_CONTROL_RIGHT] = nk_rect(
-            dpad_left + (button_size + gap) * 2.0f,
-            dpad_top + button_size + gap,
-            button_size,
-            button_size);
-
-    const float right_column_left = vkm_max(safe_right - margin - button_size, safe_left);
-    const float right_column_top = vkm_min(
-            vkm_max(safe_bottom - margin - right_column_height, safe_top),
-            vkm_max(safe_bottom - button_size, safe_top));
-    const float action_row_left = vkm_max(safe_right - margin - action_row_width, safe_left);
-    const float action_row_top = vkm_max(
-            right_column_top - button_size - action_row_bottom_gap,
-            safe_top);
-
-    context->control_rects[NC__GUI_CONTROL_PLACE_BLOCK] = nk_rect(
-            action_row_left,
-            action_row_top,
-            button_size,
-            button_size);
-    context->control_rects[NC__GUI_CONTROL_REMOVE_BLOCK] = nk_rect(
-            action_row_left + button_size + gap,
-            action_row_top,
-            button_size,
-            button_size);
-
-    context->control_rects[NC__GUI_CONTROL_UP] = nk_rect(
-            right_column_left,
-            right_column_top,
-            button_size,
-            button_size);
-    context->control_rects[NC__GUI_CONTROL_DOWN] = nk_rect(
-            right_column_left,
-            right_column_top + button_size + gap,
-            button_size,
-            button_size);
-}
-
-static void nc__gui_refresh_controls(nc_gui_context_t* context) {
-    nc_gui_controls_t controls = 0;
-
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        if (!pointer->active || !nc__gui_is_movement_control(pointer->captured_control)) {
+    const float glyph_width = (float)config->fontSize * NC__GUI_FONT_WIDTH / NC__GUI_FONT_HEIGHT;
+    const float line_height = (float)(config->lineHeight ? config->lineHeight : config->fontSize);
+    float width = 0.0f;
+    float max_width = 0.0f;
+    float height = line_height;
+    for (int32_t i = 0; i < text.length; i++) {
+        const char character = text.chars[i];
+        if (character == '\r' && i + 1 < text.length && text.chars[i + 1] == '\n') {
             continue;
         }
-
-        const float x = pointer->position.x * (float)context->pixel_viewport.x;
-        const float y = pointer->position.y * (float)context->pixel_viewport.y;
-        if (nc__gui_point_in_rect(context->control_rects[pointer->captured_control], x, y)) {
-            controls |= nc__gui_control_flag(pointer->captured_control);
+        if (character == '\r' || character == '\n') {
+            max_width = vkm_max(max_width, width);
+            width = 0.0f;
+            height += line_height;
+        } else {
+            width += (glyph_width + (float)config->letterSpacing) * (character == '\t' ? 4.0f : 1.0f);
         }
     }
 
-    context->controls = controls;
+    return (Clay_Dimensions){ vkm_max(max_width, width), text.length ? height : 0.0f };
 }
 
-static void nc__gui_update_safe_area(nc_gui_context_t* context, nc_renderer_t* renderer) {
-    SDL_Rect rect;
-    nc_renderer_get_window_safe_area(renderer, &rect);
-
-    const struct nk_rect safe_area = {
-        .x = (float)rect.x,
-        .y = (float)rect.y,
-        .w = (float)rect.w,
-        .h = (float)rect.h,
-    };
-
-    if (       context->safe_area.x == safe_area.x
-            && context->safe_area.y == safe_area.y
-            && context->safe_area.w == safe_area.w
-            && context->safe_area.h == safe_area.h) {
+// Adds a solid, border, or glyph instance and extends the preceding compatible batch.
+static void nc__gui_append_rectangle(
+    nc_gui_context_t* context,
+    const nc_renderer_overlay_rectangle_t* rectangle,
+    const bool clip_enabled,
+    const SDL_FRect clip
+) {
+    if (rectangle->rectangle.w <= 0 || rectangle->rectangle.h <= 0 || (clip_enabled && (clip.w <= 0 || clip.h <= 0))) {
         return;
     }
 
-    context->safe_area = safe_area;
-    nc__gui_layout_controls(context);
-    nc__gui_refresh_controls(context);
-    context->overlay_dirty = true;
-}
+    const uint32_t index = nc__gui_rectangle_vec_count(&context->rectangles);
+    nc__gui_rectangle_vec_append(&context->rectangles, *rectangle);
 
-static bool nc__gui_is_control_visible(nc__gui_control_id_t control_id);
-
-static nc__gui_control_id_t nc__gui_hit_test_control(const nc_gui_context_t* context, const float x, const float y) {
-    for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
-        if (nc__gui_is_control_visible(i) && nc__gui_point_in_rect(context->control_rects[i], x, y)) {
-            return i;
+    const uint32_t command_count = nc__gui_command_vec_count(&context->commands);
+    if (command_count) {
+        nc_renderer_overlay_draw_command_t* previous = &context->commands.array[command_count - 1];
+        if (    previous->type == NC_RENDERER_OVERLAY_COMMAND_RECTANGLES
+                && previous->clip_enabled == clip_enabled
+                && (!clip_enabled || memcmp(&previous->clip_rect, &clip, sizeof(clip)) == 0)
+                && previous->rectangles.first_rectangle + previous->rectangles.rectangle_count == index) {
+            previous->rectangles.rectangle_count++;
+            return;
         }
     }
 
-    return NC__GUI_CONTROL_NONE;
+    nc__gui_command_vec_append(&context->commands, (nc_renderer_overlay_draw_command_t){
+        .type = NC_RENDERER_OVERLAY_COMMAND_RECTANGLES,
+        .clip_enabled = clip_enabled,
+        .clip_rect = clip,
+        .rectangles = { .first_rectangle = index, .rectangle_count = 1 },
+    });
 }
 
-static nc__gui_pointer_t* nc__gui_find_touch(nc_gui_context_t* context, const SDL_FingerID finger_id) {
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        if (context->touch_points[i].active && context->touch_points[i].finger_id == finger_id) {
-            return &context->touch_points[i];
-        }
+// Collapses two nested Clay color overlays into one equivalent shader operation.
+static vkm_vec4 nc__gui_compose_overlay(const vkm_vec4 bottom, const vkm_vec4 top) {
+    const float alpha = bottom.a + top.a * (1.0f - bottom.a);
+    if (alpha <= 0.0f) {
+        return (vkm_vec4){ 0 };
     }
-
-    return NULL;
-}
-
-static nc__gui_pointer_t* nc__gui_alloc_touch(nc_gui_context_t* context) {
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        if (!context->touch_points[i].active) {
-            return &context->touch_points[i];
-        }
-    }
-
-    return NULL;
-}
-
-static float nc__gui_analog_stick_ring_radius(const nc_gui_context_t* context) {
-    return (float)nc_cvar_get_analog_stick_ring_radius() * context->window_display_scale;
-}
-
-static bool nc__gui_uses_movement_buttons(void) {
-    return nc_cvar_get_touch_movement_mode() == NC_TOUCH_MOVEMENT_MODE_BUTTONS;
-}
-
-static bool nc__gui_uses_camera_analog_stick(void) {
-    return nc_cvar_get_touch_camera_mode() == NC_TOUCH_CAMERA_MODE_ANALOG;
-}
-
-static bool nc__gui_is_planar_movement_control(const nc__gui_control_id_t control_id) {
-    return     control_id == NC__GUI_CONTROL_LEFT
-            || control_id == NC__GUI_CONTROL_RIGHT
-            || control_id == NC__GUI_CONTROL_FORWARD
-            || control_id == NC__GUI_CONTROL_BACKWARD;
-}
-
-static bool nc__gui_is_control_visible(const nc__gui_control_id_t control_id) {
-    return nc__gui_uses_movement_buttons() || !nc__gui_is_planar_movement_control(control_id);
-}
-
-static bool nc__gui_is_touch_action_captured(
-    const nc_gui_context_t* context,
-    const nc__gui_touch_action_t touch_action
-) {
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        if (context->touch_points[i].active && context->touch_points[i].touch_action == touch_action) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static nc__gui_touch_action_t nc__gui_touch_action_for_touch(const nc_gui_context_t* context, const float x) {
-    nc__gui_touch_action_t touch_action = nc__gui_uses_camera_analog_stick()
-            ? NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK
-            : NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG;
-
-    if (!nc__gui_uses_movement_buttons() && x < (float)context->pixel_viewport.x * 0.5f) {
-        touch_action = NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK;
-    }
-
-    return nc__gui_is_touch_action_captured(context, touch_action) ?
-            NC__GUI_TOUCH_ACTION_NONE :
-            touch_action;
-}
-
-static vkm_vec2 nc__gui_pointer_pixel_position(const nc_gui_context_t* context, const nc__gui_pointer_t* pointer) {
-    return (vkm_vec2){ {
-        pointer->position.x * (float)context->pixel_viewport.x,
-        pointer->position.y * (float)context->pixel_viewport.y,
+    return (vkm_vec4){ {
+        (bottom.r * bottom.a * (1.0f - top.a) + top.r * top.a) / alpha,
+        (bottom.g * bottom.a * (1.0f - top.a) + top.g * top.a) / alpha,
+        (bottom.b * bottom.a * (1.0f - top.a) + top.b * top.a) / alpha,
+        alpha,
     } };
 }
 
-static vkm_vec2 nc__gui_pointer_start_pixel_position(
-    const nc_gui_context_t* context,
-    const nc__gui_pointer_t* pointer
+// Expands Spleen text into glyph rectangle instances. Measurement and emission intentionally use
+// the same glyph advance and line-height rules.
+static void nc__gui_append_text(
+    nc_gui_context_t* context,
+    const Clay_RenderCommand* command,
+    const bool clip_enabled,
+    const SDL_FRect clip,
+    const vkm_vec4 overlay
 ) {
-    return (vkm_vec2){ {
-        pointer->initial_position.x * (float)context->pixel_viewport.x,
-        pointer->initial_position.y * (float)context->pixel_viewport.y,
-    } };
-}
-
-static vkm_vec2 nc__gui_get_clamped_analog_stick_position(
-    const nc_gui_context_t* context,
-    const nc__gui_pointer_t* pointer
-) {
-    const vkm_vec2 ring_position = nc__gui_pointer_start_pixel_position(context, pointer);
-    const vkm_vec2 pointer_position = nc__gui_pointer_pixel_position(context, pointer);
-    vkm_vec2 delta;
-    vkm_sub(&pointer_position, &ring_position, &delta);
-
-    const float radius = nc__gui_analog_stick_ring_radius(context);
-    const float length = vkm_length(&delta);
-    if (length > radius && length > 0.0f) {
-        vkm_mul(&delta, radius / length, &delta);
+    const Clay_TextRenderData* text = &command->renderData.text;
+    if (!text->stringContents.length || command->boundingBox.width <= 0 || command->boundingBox.height <= 0) {
+        return;
     }
-
-    vkm_vec2 result;
-    vkm_add(&ring_position, &delta, &result);
-    return result;
-}
-
-static bool nc__gui_get_analog_stick_delta(
-        const nc_gui_context_t* context,
-        const nc__gui_touch_action_t touch_action,
-        vkm_vec2* delta
-) {
-    *delta = (vkm_vec2){ { 0.0f, 0.0f } };
-
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        if (!pointer->active || pointer->touch_action != touch_action) {
+    const float glyph_width = vkm_max(
+            (float)text->fontSize * NC__GUI_FONT_WIDTH / NC__GUI_FONT_HEIGHT,
+            1.0f);
+    const float glyph_height = vkm_max((float)text->fontSize, 1.0f);
+    const float line_height = text->lineHeight ? text->lineHeight : glyph_height;
+    const float origin_x = command->boundingBox.x + context->view.gui_safe_area.x;
+    float x = origin_x;
+    float y = command->boundingBox.y + context->view.gui_safe_area.y;
+    for (int32_t i = 0; i < text->stringContents.length; i++) {
+        uint8_t character = (uint8_t)text->stringContents.chars[i];
+        if (character == '\r' && i + 1 < text->stringContents.length &&
+                text->stringContents.chars[i + 1] == '\n') {
             continue;
         }
-
-        const vkm_vec2 ring_position = nc__gui_pointer_start_pixel_position(context, pointer);
-        const vkm_vec2 stick_position = nc__gui_get_clamped_analog_stick_position(context, pointer);
-        vkm_sub(&stick_position, &ring_position, delta);
-
-        const float radius = nc__gui_analog_stick_ring_radius(context);
-        if (radius > 0.0f) {
-            delta->x /= radius;
-            delta->y /= -radius;
+        if (character == '\r' || character == '\n') {
+            x = origin_x;
+            y += line_height;
+            continue;
         }
-        return true;
-    }
-
-    return false;
-}
-
-static void nc__gui_clear_touch_state(nc_gui_context_t* context) {
-    memset(context->touch_points, 0, sizeof(context->touch_points));
-    context->look_delta = (vkm_vec2){ { 0.0f, 0.0f } };
-    nc__gui_refresh_controls(context);
-}
-
-static bool nc__gui_is_control_pressed(const nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        const float x = pointer->position.x * (float)context->pixel_viewport.x;
-        const float y = pointer->position.y * (float)context->pixel_viewport.y;
-        if (pointer->active &&
-                pointer->captured_control == control_id &&
-                nc__gui_point_in_rect(context->control_rects[control_id], x, y)) {
-            return true;
+        if (character == '\t') {
+            x += (glyph_width + text->letterSpacing) * 4;
+            continue;
         }
-    }
-
-    return false;
-}
-
-static void nc__gui_push_action(nc_gui_context_t* context, const nc__gui_control_id_t control_id) {
-    switch (control_id) {
-        case NC__GUI_CONTROL_PLACE_BLOCK:
-            context->pending_actions |= NC_GUI_ACTION_PLACE_BLOCK;
-            break;
-        case NC__GUI_CONTROL_REMOVE_BLOCK:
-            context->pending_actions |= NC_GUI_ACTION_REMOVE_BLOCK;
-            break;
-        default:
-            break;
+        if (character < 32 || character > 127) {
+            character = 127;
+        }
+        nc__gui_append_rectangle(
+                context,
+                &(nc_renderer_overlay_rectangle_t){
+                    .rectangle = { x, y, glyph_width, glyph_height },
+                    .color = nc__gui_color_from_clay_color(text->textColor),
+                    .overlay_color = overlay,
+                    .character = character,
+                },
+                clip_enabled,
+                clip);
+        x += glyph_width + text->letterSpacing;
     }
 }
 
-// This function issues one draw text command for every line contained in the debug text buffer.
-static void nc__gui_draw_debug_text(nc_gui_context_t* context, struct nk_command_buffer* canvas, struct nk_rect rect) {
-    for (size_t current_beginning = 0, current_position = 0; context->debug_string_builder.data[current_position];) {
-        while (    context->debug_string_builder.data[current_position]
-                && context->debug_string_builder.data[current_position] != '\n') {
-            current_position++;
-        }
-
-        const int length = (int)(current_position - current_beginning);
-        nk_draw_text(
-                canvas,
-                rect,
-                &context->debug_string_builder.data[current_beginning],
-                length,
-                &context->default_font->handle,
-                nk_black,
-                nk_white);
-        rect.y += context->default_font->info.height;
-
-        if (context->debug_string_builder.data[current_position] == '\n') {
-            current_position++;
-            current_beginning += length + 1;
-        }
-    }
-
-    nc_string_builder_clear(&context->debug_string_builder);
+static vkm_vec4 nc__gui_vec4_from_corner_radii(const Clay_CornerRadius* radii) {
+    return (vkm_vec4){ { radii->topLeft, radii->topRight, radii->bottomLeft, radii->bottomRight } };
 }
 
-static void nc__gui_build_overlay(nc_gui_context_t* context) {
-    struct nk_context* nuklear = &context->nuklear_context;
-    const struct nk_style_window saved_window_style = nuklear->style.window;
+static SDL_FRect nc__gui_rect_from_clay(const nc_gui_context_t* context, const Clay_BoundingBox* box) {
+    return (SDL_FRect){
+        box->x + context->view.gui_safe_area.x,
+        box->y + context->view.gui_safe_area.y,
+        box->width,
+        box->height,
+    };
+}
 
-    nuklear->style.window.fixed_background = nk_style_item_color(nk_rgba(0, 0, 0, 0));
-    nuklear->style.window.background = nk_rgba(0, 0, 0, 0);
-    nuklear->style.window.border_color = nk_rgba(0, 0, 0, 0);
-    nuklear->style.window.spacing = nk_vec2(0.0f, 0.0f);
-    nuklear->style.window.padding = nk_vec2(0.0f, 0.0f);
-    nuklear->style.window.group_padding = nk_vec2(0.0f, 0.0f);
-    nuklear->style.window.border = 0.0f;
+// Converts Clay's heterogeneous command array into the renderer's ordered rectangle/image stream.
+static void nc__gui_build_draw_list(nc_gui_context_t* context, Clay_RenderCommandArray clay_commands) {
+    SDL_FRect clips[NC__GUI_STACK_CAPACITY];
+    vkm_vec4 overlays[NC__GUI_STACK_CAPACITY] = { 0 };
+    uint32_t clip_count = 0;
+    uint32_t overlay_count = 1;
+    nc__gui_rectangle_vec_clear(&context->rectangles);
+    nc__gui_command_vec_clear(&context->commands);
 
-    if (nk_begin(
-            nuklear,
-            "hud-overlay",
-            context->safe_area,
-            NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND | NK_WINDOW_NO_INPUT)) {
-        struct nk_command_buffer* canvas = nk_window_get_canvas(nuklear);
+    for (int32_t i = 0; i < clay_commands.length; i++) {
+        const Clay_RenderCommand* command = Clay_RenderCommandArray_Get(&clay_commands, i);
+        const bool clipped = clip_count != 0;
+        const SDL_FRect clip = clipped ? clips[clip_count - 1] : (SDL_FRect){ 0 };
+        const vkm_vec4 overlay = overlays[overlay_count - 1];
+        switch (command->commandType) {
+            case CLAY_RENDER_COMMAND_TYPE_NONE:
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_RECTANGLE:
+                nc__gui_append_rectangle(
+                        context,
+                        &(nc_renderer_overlay_rectangle_t){
+                            .rectangle = nc__gui_rect_from_clay(context, &command->boundingBox),
+                            .color = nc__gui_color_from_clay_color(command->renderData.rectangle.backgroundColor),
+                            .corner_radii = nc__gui_vec4_from_corner_radii(&command->renderData.rectangle.cornerRadius),
+                            .overlay_color = overlay,
+                        },
+                        clipped,
+                        clip);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_BORDER: {
+                const Clay_BorderWidth* width = &command->renderData.border.width;
+                // Clay emits betweenChildren dividers as separate rectangle commands. A BORDER
+                // command with no outer sides must therefore not become a filled bounding box.
+                if (!(width->left || width->right || width->top || width->bottom)) {
+                    break;
+                }
+                nc__gui_append_rectangle(
+                        context,
+                        &(nc_renderer_overlay_rectangle_t){
+                            .rectangle = nc__gui_rect_from_clay(context, &command->boundingBox),
+                            .color = nc__gui_color_from_clay_color(command->renderData.border.color),
+                            .corner_radii = nc__gui_vec4_from_corner_radii(&command->renderData.border.cornerRadius),
+                            .border_widths = { {
+                                width->left,
+                                width->right,
+                                width->top,
+                                width->bottom,
+                            } },
+                            .overlay_color = overlay,
+                        },
+                        clipped,
+                        clip);
+                break;
+            }
+            case CLAY_RENDER_COMMAND_TYPE_TEXT:
+                nc__gui_append_text(context, command, clipped, clip, overlay);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
+                if (!command->renderData.image.imageData || command->boundingBox.width <= 0 ||
+                        command->boundingBox.height <= 0 || (clipped && (clip.w <= 0 || clip.h <= 0))) {
+                    break;
+                }
+                Clay_Color tint = command->renderData.image.backgroundColor;
+                // Clay reserves exactly transparent black as the default "untinted" image color.
+                if (tint.r == 0.0f && tint.g == 0.0f && tint.b == 0.0f && tint.a == 0.0f) {
+                    tint = (Clay_Color){ 255, 255, 255, 255 };
+                }
+                nc__gui_command_vec_append(&context->commands, (nc_renderer_overlay_draw_command_t){
+                    .type = NC_RENDERER_OVERLAY_COMMAND_IMAGE,
+                    .clip_enabled = clipped,
+                    .clip_rect = clip,
+                    .image = {
+                        .texture = command->renderData.image.imageData,
+                        .rectangle = nc__gui_rect_from_clay(context, &command->boundingBox),
+                        .color = nc__gui_color_from_clay_color(tint),
+                        .corner_radii = nc__gui_vec4_from_corner_radii(&command->renderData.image.cornerRadius),
+                        .overlay_color = overlay,
+                    },
+                });
+                break;
+            }
+            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
+                NC_ASSERT(clip_count < NC__GUI_STACK_CAPACITY);
+                SDL_FRect next = context->view.gui_safe_area;
+                const SDL_FRect bounds = nc__gui_rect_from_clay(context, &command->boundingBox);
+                // Floating roots inherit a clip through a Clay-generated command whose axis flags
+                // are both zero. Clay still documents that command as clipping to its whole bounds.
+                const bool inherited_clip =
+                        !command->renderData.clip.horizontal && !command->renderData.clip.vertical;
+                if (command->renderData.clip.horizontal || inherited_clip) {
+                    next.x = bounds.x;
+                    next.w = bounds.w;
+                }
+                if (command->renderData.clip.vertical || inherited_clip) {
+                    next.y = bounds.y;
+                    next.h = bounds.h;
+                }
+                if (clip_count) {
+                    next = nc__gui_intersect_rects(clips[clip_count - 1], next);
+                }
+                clips[clip_count++] = next;
+                break;
+            }
+            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END:
+                if (clip_count) {
+                    clip_count--;
+                }
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_START:
+                NC_ASSERT(overlay_count < NC__GUI_STACK_CAPACITY);
+                overlays[overlay_count] = nc__gui_compose_overlay(
+                        overlays[overlay_count - 1],
+                        nc__gui_color_from_clay_color(command->renderData.overlayColor.color));
+                overlay_count++;
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_END:
+                if (overlay_count > 1) {
+                    overlay_count--;
+                }
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_CUSTOM:
+                if (!context->last_custom_warning || SDL_GetTicks() - context->last_custom_warning >= 5000) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Skipping unsupported Clay custom command");
+                    context->last_custom_warning = SDL_GetTicks();
+                }
+                break;
+        }
+    }
+}
 
-        if (context->touch_controls_enabled) {
-            for (uint8_t i = 0; i < (uint8_t)NC__GUI_CONTROL_COUNT; i++) {
-                if (!nc__gui_is_control_visible(i)) {
+// Declares the touchscreen buttons and debug text to Clay. Analog sticks and the crosshair
+// are procedural renderer passes and are not part of this layout.
+static void nc__gui_build_hud(nc_gui_context_t* context, const nc_player_input_overlay_t* player_input) {
+    Clay_BeginLayout();
+
+    CLAY(CLAY_ID("HUD"), {
+        .layout = { .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) } },
+        .floating = {
+            .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+        },
+    }) {
+        if (player_input->touch_controls_enabled) {
+            for (uint32_t i = 0; i < NC_PLAYER_INPUT_CONTROL_COUNT; i++) {
+                if (!player_input->controls_visible[i]) {
                     continue;
                 }
-
-                const struct nk_rect rect = context->control_rects[i];
-                const bool pressed = nc__gui_is_control_pressed(context, i);
+                const SDL_FRect rect = player_input->control_rects[i];
                 const float inset = rect.w * 0.18f;
-                const struct nk_rect image_rect = nk_rect(
-                        rect.x + inset,
-                        rect.y + inset,
-                        rect.w - inset * 2.0f,
-                        rect.h - inset * 2.0f);
-
-                nk_fill_rect(
-                        canvas,
-                        rect,
-                        rect.w * 0.22f,
-                        pressed ? nk_rgba(255, 255, 255, 52) : nk_rgba(0, 0, 0, 96));
-                nk_stroke_rect(
-                        canvas,
-                        rect,
-                        rect.w * 0.22f,
-                        2.0f,
-                        pressed ? nk_rgba(255, 255, 255, 160) : nk_rgba(255, 255, 255, 64));
-                nk_draw_image(
-                        canvas,
-                        image_rect,
-                        &context->control_textures[i].nuklear_image,
-                        pressed ? nk_rgba(255, 255, 255, 255) : nk_rgba(255, 255, 255, 224));
+                const bool pressed = player_input->controls_pressed[i];
+                CLAY(CLAY_IDI("HUD control", i), {
+                    .layout = {
+                        .sizing = {
+                            CLAY_SIZING_FIXED(rect.w),
+                            CLAY_SIZING_FIXED(rect.h),
+                        },
+                        .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+                    },
+                    .backgroundColor = pressed
+                            ? (Clay_Color){ 255, 255, 255, 52 }
+                            : (Clay_Color){ 0, 0, 0, 96 },
+                    .cornerRadius = CLAY_CORNER_RADIUS(rect.w * 0.22f),
+                    .floating = {
+                        .offset = {
+                            rect.x - context->view.gui_safe_area.x,
+                            rect.y - context->view.gui_safe_area.y,
+                        },
+                        .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                        .attachTo = CLAY_ATTACH_TO_ROOT,
+                    },
+                    .border = {
+                        .color = pressed
+                                ? (Clay_Color){ 255, 255, 255, 160 }
+                                : (Clay_Color){ 255, 255, 255, 64 },
+                        .width = CLAY_BORDER_ALL(2),
+                    },
+                }) {
+                    CLAY_AUTO_ID({
+                        .layout = {
+                            .sizing = {
+                                CLAY_SIZING_FIXED(vkm_max(rect.w - inset * 2.0f, 1.0f)),
+                                CLAY_SIZING_FIXED(vkm_max(rect.h - inset * 2.0f, 1.0f)),
+                            },
+                        },
+                        .image = { .imageData = context->control_textures[i] },
+                    }) {}
+                }
             }
         }
 
         if (context->debug_string_builder.length) {
-            nc__gui_draw_debug_text(context, canvas, context->safe_area);
+            CLAY(CLAY_ID("Debug text"), {
+                .layout = {
+                    .sizing = {
+                        CLAY_SIZING_FIXED(context->view.gui_safe_area.w),
+                        CLAY_SIZING_FIT(0),
+                    },
+                },
+                .floating = {
+                    .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                    .attachTo = CLAY_ATTACH_TO_ROOT,
+                },
+            }) {
+                CLAY_TEXT(
+                        ((Clay_String){
+                            .length = (int32_t)context->debug_string_builder.length,
+                            .chars = context->debug_string_builder.data,
+                        }),
+                        CLAY_TEXT_CONFIG({
+                            .textColor = { 255, 255, 255, 255 },
+                            .fontSize = 16,
+                            .lineHeight = 16,
+                            .wrapMode = CLAY_TEXT_WRAP_NEWLINES,
+                        }));
+            }
         }
     }
-    nk_end(nuklear);
-
-    nuklear->style.window = saved_window_style;
-}
-
-static bool nc__is_touchscreen_available(void) {
-    int count = 0;
-    SDL_TouchID* devices = SDL_GetTouchDevices(&count);
-
-    if (devices) {
-        SDL_free(devices);
-    } else {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "%s", SDL_GetError());
-        SDL_ClearError();
-    }
-
-    return count > 0;
 }
 
 nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
-    bool atlas_began = false;
-    nc_gui_context_t* result = calloc(1, sizeof(*result));
+    nc_gui_context_t* context = calloc(1, sizeof(*context));
+    context->renderer = renderer;
+    nc__gui_update_view(context);
 
-    result->window_size = nc_renderer_get_window_size(renderer);
-    result->pixel_viewport = nc_renderer_get_viewport(renderer);
+    const uint32_t clay_memory_size = Clay_MinMemorySize();
+    context->clay_memory = malloc(clay_memory_size);
+    Clay_Initialize(
+            Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, context->clay_memory),
+            (Clay_Dimensions){
+                context->view.gui_safe_area.w,
+                context->view.gui_safe_area.h,
+            },
+            (Clay_ErrorHandler){ .errorHandlerFunction = nc__gui_clay_error_handler, .userData = context });
+    Clay_SetMeasureTextFunction(nc__gui_measure_text, NULL);
+    nc__gui_rectangle_vec_reserve(&context->rectangles, 256);
+    nc__gui_command_vec_reserve(&context->commands, 64);
 
-    nk_buffer_init_default(&result->command_buffer);
-    nk_buffer_init_default(&result->vertex_buffer);
-    nk_buffer_init_default(&result->index_buffer);
-
-    nk_font_atlas_init_default(&result->font_atlas);
-    result->font_atlas_initialized = true;
-    nk_font_atlas_begin(&result->font_atlas);
-    atlas_began = true;
-
-    result->default_font = nk_font_atlas_add_default(&result->font_atlas, 18.0f, NULL);
-    NC_CHECK_RESULT(result->default_font, "nk_font_atlas_add_default() failed.");
-
-    int font_width = 0;
-    int font_height = 0;
-    const void* font_pixels = nk_font_atlas_bake(&result->font_atlas, &font_width, &font_height, NK_FONT_ATLAS_RGBA32);
-    NC_CHECK_RESULT(font_pixels, "nk_font_atlas_bake() failed.");
-
-    NC_ASSERT(font_width <= INT16_MAX);
-    NC_ASSERT(font_height <= INT16_MAX);
-
-    result->font_texture.texture = nc_renderer_create_rgba_texture_2d(
+    uint8_t pixels[64 * 64 * 4];
+    for (size_t i = 0; i < 64 * 64; i++) {
+        const uint8_t value = (nc__spleen_font_bits[i / 8] & (1 << (i % 8))) ? 255 : 0;
+        pixels[i * 4 + 0] = value;
+        pixels[i * 4 + 1] = value;
+        pixels[i * 4 + 2] = value;
+        pixels[i * 4 + 3] = value;
+    }
+    context->font_texture = nc_renderer_create_rgba_texture_2d(
             renderer,
             NC_RENDERER_TEXTURE_TYPE_DATA,
-            (int16_t)font_width,
-            (int16_t)font_height,
-            font_pixels);
-    NC_CHECK_RESULT(result->font_texture.texture, "Failed to create the Nuklear font texture.");
-    result->font_texture.nuklear_image = nk_image_ptr(result->font_texture.texture);
+            64,
+            64,
+            pixels);
+    if (!context->font_texture) {
+        goto error;
+    }
 
-    nk_font_atlas_end(&result->font_atlas, nk_handle_ptr(result->font_texture.texture), &result->null_texture);
-    atlas_began = false;
-
-    const bool nuklear_result = nk_init_default(&result->nuklear_context, &result->default_font->handle);
-    NC_CHECK_RESULT(nuklear_result, "nk_init_default() failed.");
-    result->nuklear_initialized = true;
-
-    for (int i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
-        if (!nc__gui_load_texture(renderer, nc__gui_control_texture_paths[i], &result->control_textures[i])) {
+    for (uint32_t i = 0; i < NC_PLAYER_INPUT_CONTROL_COUNT; i++) {
+        context->control_textures[i] = nc_renderer_create_texture_2d_from_file(
+                renderer,
+                NC_RENDERER_TEXTURE_TYPE_COLOR,
+                nc__gui_control_texture_paths[i]);
+        if (!context->control_textures[i]) {
             goto error;
         }
     }
-
-    result->vertex_gpu_buffer = nc_renderer_create_buffer(
-            renderer,
-            NC_RENDERER_BUFFER_USAGE_VERTEX,
-            NC__GUI_INITIAL_BUFFER_CAPACITY);
-    NC_CHECK_RESULT(result->vertex_gpu_buffer, "Failed to create the GUI vertex buffer.");
-
-    result->index_gpu_buffer = nc_renderer_create_buffer(
-            renderer,
-            NC_RENDERER_BUFFER_USAGE_INDEX,
-            NC__GUI_INITIAL_BUFFER_CAPACITY);
-    NC_CHECK_RESULT(result->index_gpu_buffer, "Failed to create the GUI index buffer.");
-
-    result->window_display_scale = nc_renderer_get_window_display_scale(renderer);
-    result->touch_controls_enabled = nc__is_touchscreen_available();
-    nc__gui_update_safe_area(result, renderer);
-
-    nc_gui_set_window_size(result, result->window_size.x, result->window_size.y);
-    nc_gui_set_pixel_viewport(result, result->pixel_viewport.x, result->pixel_viewport.y);
-
-    nc_string_builder_init(&result->debug_string_builder);
-
-    return result;
+    nc_string_builder_init(&context->debug_string_builder);
+    return context;
 
 error:
-    if (atlas_began) {
-        nk_font_atlas_end(&result->font_atlas, nk_handle_ptr(result->font_texture.texture), &result->null_texture);
-    }
-    nc_gui_fini(result, renderer);
+    nc_gui_fini(context);
     return NULL;
 }
 
-void nc_gui_set_window_size(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
-    context->window_size.x = width;
-    context->window_size.y = height;
-}
-
-void nc_gui_set_pixel_viewport(nc_gui_context_t* context, const uint16_t width, const uint16_t height) {
-    if (context->pixel_viewport.x == width && context->pixel_viewport.y == height) {
-        return;
-    }
-
-    context->pixel_viewport.x = width;
-    context->pixel_viewport.y = height;
-    nc__gui_layout_controls(context);
-    nc__gui_refresh_controls(context);
-    context->overlay_dirty = true;
-}
-
-void nc_gui_set_window_display_scale(nc_gui_context_t* context, const float window_display_scale) {
-    context->window_display_scale = window_display_scale;
-    nc__gui_layout_controls(context);
-    nc__gui_refresh_controls(context);
-    context->overlay_dirty = true;
+const nc_gui_view_t* nc_gui_get_view(nc_gui_context_t* context) {
+    nc__gui_update_view(context);
+    return &context->view;
 }
 
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
+    nc__gui_update_view(context);
+
     switch (event->type) {
-        case SDL_EVENT_FINGER_DOWN: {
-            if (!context->touch_controls_enabled) {
-                return false;
+        case SDL_EVENT_MOUSE_MOTION:
+            if (!context->captured_finger_active &&
+                    (!nc_renderer_is_relative_mouse_mode(context->renderer) ||
+                    context->captured_mouse_button)) {
+                context->pointer_position =
+                        nc__gui_window_to_clay_position(context, event->motion.x, event->motion.y);
             }
-
-            const float x = event->tfinger.x * (float)context->pixel_viewport.x;
-            const float y = event->tfinger.y * (float)context->pixel_viewport.y;
-            const nc__gui_control_id_t control_id = nc__gui_hit_test_control(
-                    context,
-                    x,
-                    y);
-            const nc__gui_touch_action_t touch_action = control_id == NC__GUI_CONTROL_NONE
-                    ? nc__gui_touch_action_for_touch(context, x)
-                    : NC__GUI_TOUCH_ACTION_NONE;
-            if (control_id == NC__GUI_CONTROL_NONE && touch_action == NC__GUI_TOUCH_ACTION_NONE) {
-                return false;
-            }
-
-            nc__gui_pointer_t* pointer = nc__gui_alloc_touch(context);
-            if (!pointer) {
-                return false;
-            }
-
-            *pointer = (nc__gui_pointer_t){
-                .finger_id = event->tfinger.fingerID,
-                .position = { { event->tfinger.x, event->tfinger.y } },
-                .initial_position = { { event->tfinger.x, event->tfinger.y } },
-                .captured_control = control_id,
-                .touch_action = touch_action,
-                .active = true,
-            };
-            if (control_id != NC__GUI_CONTROL_NONE) {
-                nc__gui_refresh_controls(context);
-                context->overlay_dirty = true;
-            }
-            return true;
-        }
-        case SDL_EVENT_FINGER_MOTION: {
-            if (!context->touch_controls_enabled) {
-                const vkm_vec2 delta = { { event->tfinger.dx, event->tfinger.dy } };
-                const float length = vkm_length(&delta);
-                // Some arbitrary factor to increase sensitivity.
-                context->mode_switch_accumulator += length * 2.0f;
-                return false;
-            }
-
-            nc__gui_pointer_t* pointer = nc__gui_find_touch(context, event->tfinger.fingerID);
-            if (!pointer) {
-                return false;
-            }
-
-            pointer->position.x = event->tfinger.x;
-            pointer->position.y = event->tfinger.y;
-            if (pointer->touch_action == NC__GUI_TOUCH_ACTION_CAMERA_FREE_DRAG) {
-                context->look_delta.x +=
-                        event->tfinger.dx * (float)context->pixel_viewport.x / context->window_display_scale;
-                context->look_delta.y +=
-                        event->tfinger.dy * (float)context->pixel_viewport.y / context->window_display_scale;
-            } else if (pointer->captured_control != NC__GUI_CONTROL_NONE) {
-                nc__gui_refresh_controls(context);
-                context->overlay_dirty = true;
-            }
-            return true;
-        }
-        case SDL_EVENT_FINGER_UP:
-        case SDL_EVENT_FINGER_CANCELED: {
-            nc__gui_pointer_t* pointer = nc__gui_find_touch(context, event->tfinger.fingerID);
-            if (!pointer) {
-                return false;
-            }
-
-            pointer->position.x = event->tfinger.x;
-            pointer->position.y = event->tfinger.y;
-            if (event->type == SDL_EVENT_FINGER_UP &&
-                    pointer->captured_control != NC__GUI_CONTROL_NONE &&
-                    nc__gui_point_in_rect(
-                            context->control_rects[pointer->captured_control],
-                            pointer->position.x * (float)context->pixel_viewport.x,
-                            pointer->position.y * (float)context->pixel_viewport.y)) {
-                nc__gui_push_action(context, pointer->captured_control);
-            }
-
-            *pointer = (nc__gui_pointer_t){ 0 };
-            nc__gui_refresh_controls(context);
-            context->overlay_dirty = true;
-            return true;
-        }
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP:
+            return context->captured_mouse_button != 0;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-        case SDL_EVENT_MOUSE_WHEEL:
-            nc__gui_clear_touch_state(context);
-            context->overlay_dirty = true;
-            context->touch_controls_enabled = false;
-            context->mode_switch_accumulator = 0.0f;
-            return false;
-        case SDL_EVENT_MOUSE_MOTION: {
-            if (!context->touch_controls_enabled) {
+            if (context->captured_finger_active ||
+                    nc_renderer_is_relative_mouse_mode(context->renderer)) {
                 return false;
             }
-
-            const vkm_vec2 delta = { { event->motion.xrel, event->motion.yrel } };
-            const float length = vkm_length(&delta);
-            // Some arbitrary factor to reduce sensitivity.
-            context->mode_switch_accumulator += length * 0.002f;
-            return false;
+            if (context->captured_mouse_button) {
+                return true;
+            }
+            if (!nc__gui_pointer_over_element(context, nc__gui_window_to_clay_position(
+                    context,
+                    event->button.x,
+                    event->button.y))) {
+                return false;
+            }
+            context->captured_mouse_button = event->button.button;
+            context->pointer_position =
+                    nc__gui_window_to_clay_position(context, event->button.x, event->button.y);
+            context->pointer_down = true;
+            return true;
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event->button.button != context->captured_mouse_button) {
+                return false;
+            }
+            context->pointer_position =
+                    nc__gui_window_to_clay_position(context, event->button.x, event->button.y);
+            context->pointer_down = false;
+            context->captured_mouse_button = 0;
+            return true;
+        case SDL_EVENT_MOUSE_WHEEL: {
+            const Clay_Vector2 position =
+                    nc__gui_window_to_clay_position(context, event->wheel.mouse_x, event->wheel.mouse_y);
+            if (!nc__gui_pointer_over_element(context, position)) {
+                return false;
+            }
+            const float direction = event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;
+            context->pointer_position = position;
+            context->scroll_delta.x += event->wheel.x * direction * NC__GUI_MOUSE_WHEEL_SCALE;
+            context->scroll_delta.y += event->wheel.y * direction * NC__GUI_MOUSE_WHEEL_SCALE;
+            return true;
         }
+        case SDL_EVENT_FINGER_DOWN:
+            if (context->captured_finger_active || context->captured_mouse_button) {
+                return false;
+            }
+            if (!nc__gui_pointer_over_element(context, nc__gui_touch_to_clay_position(
+                    context,
+                    event->tfinger.x,
+                    event->tfinger.y))) {
+                return false;
+            }
+            context->captured_finger = event->tfinger.fingerID;
+            context->captured_finger_active = true;
+            context->pointer_position =
+                    nc__gui_touch_to_clay_position(context, event->tfinger.x, event->tfinger.y);
+            context->pointer_down = true;
+            return true;
+        case SDL_EVENT_FINGER_MOTION:
+            if (!context->captured_finger_active ||
+                    event->tfinger.fingerID != context->captured_finger) {
+                return false;
+            }
+            context->pointer_position =
+                    nc__gui_touch_to_clay_position(context, event->tfinger.x, event->tfinger.y);
+            return true;
+        case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_CANCELED:
+            if (!context->captured_finger_active ||
+                    event->tfinger.fingerID != context->captured_finger) {
+                return false;
+            }
+            context->pointer_position =
+                    nc__gui_touch_to_clay_position(context, event->tfinger.x, event->tfinger.y);
+            context->pointer_down = false;
+            context->captured_finger_active = false;
+            return true;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            if (context->captured_finger_active || context->captured_mouse_button) {
+                context->pointer_down = false;
+                context->captured_finger_active = false;
+                context->captured_mouse_button = 0;
+            }
+            return false;
         default:
             return false;
     }
 }
 
-nc_gui_controls_t nc_gui_get_controls(const nc_gui_context_t* context) {
-    return context->controls;
-}
-
-void nc_gui_get_movement_delta(const nc_gui_context_t* context, vkm_vec2* delta) {
-    nc__gui_get_analog_stick_delta(context, NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK, delta);
-}
-
-void nc_gui_get_camera_delta(const nc_gui_context_t* context, vkm_vec2* delta) {
-    nc__gui_get_analog_stick_delta(context, NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK, delta);
-}
-
-nc_gui_actions_t nc_gui_consume_actions(nc_gui_context_t* context) {
-    const nc_gui_actions_t actions = context->pending_actions;
-    context->pending_actions = 0;
-    return actions;
-}
-
-bool nc_gui_consume_look_delta(nc_gui_context_t* context, vkm_vec2* delta) {
-    const bool result = context->look_delta.x != 0.0f || context->look_delta.y != 0.0f;
-
-    *delta = context->look_delta;
-    context->look_delta = (vkm_vec2){ { 0.0f, 0.0f } };
-
-    return result;
-}
-
-bool nc_gui_is_touch_captured(const nc_gui_context_t* context, const SDL_FingerID finger_id) {
-    for (int i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        if (context->touch_points[i].active && context->touch_points[i].finger_id == finger_id) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool nc_gui_prepare_frame(nc_gui_context_t* context, nc_renderer_t* renderer, const float delta_time) {
-    // Automagically enable or disable touchscreen controls when the player starts using a touchscreen
-    // or keyboard & mouse, respectively. But only do so when the player looks around fast enough,
-    // additionally to directly pressing a key or using the mouse wheel.
-    // Looking around increases the accumulator (see the event handler in this file).
-    // Every frame the accumulator is decreased by the delta time.
-    // Do the switching when the input accumulator reaches the threshold.
-
-    context->mode_switch_accumulator -= delta_time;
-
-    if (context->mode_switch_accumulator > NC__TOUCH_CONTROLS_SWITCH_THRESHOLD) {
-        context->touch_controls_enabled = !context->touch_controls_enabled;
-        context->mode_switch_accumulator = 0.0f;
-        context->overlay_dirty = true;
-
-        if (!context->touch_controls_enabled) {
-            // Clear all current touch actions.
-            nc__gui_clear_touch_state(context);
-        }
-    } else if (context->mode_switch_accumulator < 0.0f) {
-        context->mode_switch_accumulator = 0.0f;
-    }
-
-    nc__gui_update_safe_area(context, renderer);
-
-    if (!context->overlay_dirty && context->draw_ready) {
-        return true;
-    }
-
-    context->draw_command_count = 0;
-    context->draw_ready = false;
-
-    nk_clear(&context->nuklear_context);
-    nk_buffer_clear(&context->command_buffer);
-    nk_buffer_clear(&context->vertex_buffer);
-    nk_buffer_clear(&context->index_buffer);
-    nc__gui_build_overlay(context);
-
-    const nk_flags convert_result = nk_convert(
-            &context->nuklear_context,
-            &context->command_buffer,
-            &context->vertex_buffer,
-            &context->index_buffer,
-            &(struct nk_convert_config){
-                .global_alpha = 1.0f,
-                .line_AA = NK_ANTI_ALIASING_OFF,
-                .shape_AA = NK_ANTI_ALIASING_OFF,
-                .circle_segment_count = 22,
-                .arc_segment_count = 22,
-                .curve_segment_count = 22,
-                .tex_null = context->null_texture,
-                .vertex_layout = nc__gui_vertex_layout,
-                .vertex_size = sizeof(nc__gui_vertex_t),
-                .vertex_alignment = _Alignof(nc__gui_vertex_t),
-            });
-    if (convert_result != NK_CONVERT_SUCCESS) {
-        NC_SET_ERROR("nk_convert() failed with code %u", convert_result);
-        goto error;
-    }
-
-    uint32_t first_index = 0;
-    for (const struct nk_draw_command* draw_command = nk__draw_begin(&context->nuklear_context, &context->command_buffer);
-         draw_command;
-         draw_command = nk__draw_next(draw_command, &context->command_buffer, &context->nuklear_context)) {
-        if (draw_command->elem_count == 0 || !draw_command->texture.ptr) {
-            first_index += draw_command->elem_count;
-            continue;
-        }
-
-        const int clip_x = (int)vkm_max(draw_command->clip_rect.x, 0.0f);
-        const int clip_y = (int)vkm_max(draw_command->clip_rect.y, 0.0f);
-        const int clip_right = (int)vkm_min(draw_command->clip_rect.x + draw_command->clip_rect.w, (float)context->pixel_viewport.x);
-        const int clip_bottom = (int)vkm_min(draw_command->clip_rect.y + draw_command->clip_rect.h, (float)context->pixel_viewport.y);
-
-        if (clip_right > clip_x && clip_bottom > clip_y) {
-            nc__gui_reserve_draw_commands(context, 1);
-            context->draw_commands[context->draw_command_count++] = (nc_renderer_overlay_draw_command_t){
-                .texture = (const nc_renderer_texture_t*)draw_command->texture.ptr,
-                .clip_rect = {
-                    .x = clip_x,
-                    .y = clip_y,
-                    .w = clip_right - clip_x,
-                    .h = clip_bottom - clip_y,
-                },
-                .element_count = draw_command->elem_count,
-                .first_index = first_index,
-            };
-        }
-
-        first_index += draw_command->elem_count;
-    }
-
-    if (context->draw_command_count > 0) {
-        const uint32_t vertex_bytes = (uint32_t)nk_buffer_total(&context->vertex_buffer);
-        const uint32_t index_bytes = (uint32_t)nk_buffer_total(&context->index_buffer);
-
-        if (!nc_renderer_queue_buffer_upload(
-                renderer,
-                context->vertex_gpu_buffer,
-                nk_buffer_memory_const(&context->vertex_buffer),
-                vertex_bytes)) {
-            goto error;
-        }
-
-        if (!nc_renderer_queue_buffer_upload(
-                renderer,
-                context->index_gpu_buffer,
-                nk_buffer_memory_const(&context->index_buffer),
-                index_bytes)) {
-            goto error;
-        }
-
-        context->draw_ready = true;
-    }
-
-    nk_clear(&context->nuklear_context);
-    context->overlay_dirty = false;
-    return true;
-
-error:
-    nk_clear(&context->nuklear_context);
-    return false;
+void nc_gui_prepare_frame(
+    nc_gui_context_t* context,
+    const nc_player_input_overlay_t* player_input,
+    const float delta_time
+) {
+    nc__gui_update_view(context);
+    Clay_SetLayoutDimensions((Clay_Dimensions){
+        context->view.gui_safe_area.w,
+        context->view.gui_safe_area.h,
+    });
+    Clay_SetPointerState(context->pointer_position, context->pointer_down);
+    // Clay owns scroll offsets and momentum; SDL wheel events only accumulate deltas here.
+    Clay_UpdateScrollContainers(true, context->scroll_delta, delta_time);
+    context->scroll_delta = (Clay_Vector2){ 0 };
+    // The current HUD is display-only. Touch controls are laid out and hit-tested by player_input
+    // because it supports multiple simultaneous fingers, while Clay accepts only one pointer.
+    nc__gui_build_hud(context, player_input);
+    nc__gui_build_draw_list(context, Clay_EndLayout(delta_time));
+    // It's necessary to reset the cache every frame because the debug text is very dynamic and overflows it.
+    Clay_ResetMeasureTextCache();
+    nc_string_builder_clear(&context->debug_string_builder);
 }
 
 void nc_gui_get_overlay_draw(const nc_gui_context_t* context, nc_renderer_overlay_draw_t* draw) {
     *draw = (nc_renderer_overlay_draw_t){
-        .vertex_buffer = context->vertex_gpu_buffer,
-        .index_buffer = context->index_gpu_buffer,
-        .draw_commands = context->draw_commands,
-        .draw_command_count = context->draw_ready ? context->draw_command_count : 0,
+        .rectangles = context->rectangles.array,
+        .rectangle_count = nc__gui_rectangle_vec_count(&context->rectangles),
+        .draw_commands = context->commands.array,
+        .draw_command_count = nc__gui_command_vec_count(&context->commands),
+        .font_texture = context->font_texture,
     };
 }
 
-void nc_gui_get_procedural_overlay_draw(const nc_gui_context_t* context, nc_renderer_procedural_overlay_draw_t* draw) {
+void nc_gui_get_procedural_overlay_draw(
+    const nc_player_input_overlay_t* player_input,
+    nc_renderer_procedural_overlay_draw_t* draw
+) {
     *draw = (nc_renderer_procedural_overlay_draw_t){
-        .analog_stick_ring_radius = nc__gui_analog_stick_ring_radius(context),
-        .analog_stick_ring_thickness = (float)nc_cvar_get_analog_stick_ring_thickness() * context->window_display_scale,
-        .analog_stick_radius = (float)nc_cvar_get_analog_stick_radius() * context->window_display_scale,
-        .crosshair_size = (float)nc_cvar_get_crosshair_size() * context->window_display_scale,
+        .analog_stick_ring_radius = player_input->analog_stick_ring_radius,
+        .analog_stick_ring_thickness = player_input->analog_stick_ring_thickness,
+        .analog_stick_radius = player_input->analog_stick_radius,
+        .crosshair_size = vkm_max((float)nc_cvar_get_crosshair_size(), 1.0f),
     };
-
-    if (!context->touch_controls_enabled) {
-        return;
-    }
-
-    for (size_t i = 0; i < NC__GUI_MAX_TOUCHES; i++) {
-        const nc__gui_pointer_t* pointer = &context->touch_points[i];
-        if (!pointer->active) {
-            continue;
-        }
-
-        uint8_t analog_stick = 0;
-        switch (pointer->touch_action) {
-            case NC__GUI_TOUCH_ACTION_MOVE_ANALOG_STICK:
-                analog_stick = 0;
-                break;
-            case NC__GUI_TOUCH_ACTION_CAMERA_ANALOG_STICK:
-                analog_stick = 1;
-                break;
-            default:
-                continue;
-        }
-
-        draw->analog_sticks_active[analog_stick] = true;
-        draw->analog_stick_ring_positions[analog_stick] = nc__gui_pointer_start_pixel_position(context, pointer);
-        draw->analog_stick_positions[analog_stick] = nc__gui_get_clamped_analog_stick_position(context, pointer);
+    for (uint32_t i = 0; i < 2; i++) {
+        draw->analog_sticks_active[i] = player_input->analog_sticks_active[i];
+        draw->analog_stick_ring_positions[i] = player_input->analog_stick_ring_positions[i];
+        draw->analog_stick_positions[i] = player_input->analog_stick_positions[i];
     }
 }
 
 void nc_gui_append_debug_text(nc_gui_context_t* context, const char* text, const size_t length) {
     nc_string_builder_append(&context->debug_string_builder, text, length ? length : strlen(text));
-    context->overlay_dirty = true;
 }
 
-void nc_gui_fini(nc_gui_context_t* context, nc_renderer_t* renderer) {
+void nc_gui_fini(nc_gui_context_t* context) {
     if (!context) {
         return;
     }
-
     nc_string_builder_fini(&context->debug_string_builder);
-
-    nc_renderer_destroy_buffer(renderer, context->index_gpu_buffer);
-    nc_renderer_destroy_buffer(renderer, context->vertex_gpu_buffer);
-
-    for (int i = 0; i < NC__GUI_CONTROL_COUNT; i++) {
-        nc__gui_destroy_texture(renderer, &context->control_textures[i]);
+    for (uint32_t i = 0; i < NC_PLAYER_INPUT_CONTROL_COUNT; i++) {
+        if (context->control_textures[i]) {
+            nc_renderer_destroy_texture(context->renderer, context->control_textures[i]);
+        }
     }
-    nc__gui_destroy_texture(renderer, &context->font_texture);
-
-    free(context->draw_commands);
-    if (context->nuklear_initialized) {
-        nk_free(&context->nuklear_context);
+    if (context->font_texture) {
+        nc_renderer_destroy_texture(context->renderer, context->font_texture);
     }
-    if (context->font_atlas_initialized) {
-        nk_font_atlas_clear(&context->font_atlas);
-    }
-
-    nk_buffer_free(&context->index_buffer);
-    nk_buffer_free(&context->vertex_buffer);
-    nk_buffer_free(&context->command_buffer);
-
+    nc__gui_command_vec_fini(&context->commands);
+    nc__gui_rectangle_vec_fini(&context->rectangles);
+    free(context->clay_memory);
     free(context);
 }

@@ -126,11 +126,11 @@ typedef enum nc_block_highlight_effect_t {
     X(uint16_t, terrain_load_radius_y, YES, "\n; Number of chunks to keep loaded up and down every player.\n", nc__parse_uint16, nc__print_int, "4", 4) \
     X(uint16_t, terrain_hysteresis, NO,, nc__parse_uint16, nc__print_int, "2", 2) \
     X(double, terrain_streaming_budget_ms, NO,, nc__parse_double, nc__print_double, "10.0", 10.0) \
-    X(double, gui_button_size, NO,, nc__parse_double, nc__print_double,, 50.0) \
+    X(double, gui_button_size, NO,, nc__parse_double, nc__print_double,, 100.0) \
     X(double, crosshair_size, NO,, nc__parse_double, nc__print_double,, 28.0) \
-    X(double, analog_stick_ring_radius, NO,, nc__parse_double, nc__print_double,, 64.0) \
-    X(double, analog_stick_ring_thickness, NO,, nc__parse_double, nc__print_double,, 4.0) \
-    X(double, analog_stick_radius, NO,, nc__parse_double, nc__print_double,, 28.0) \
+    X(double, analog_stick_ring_radius, NO,, nc__parse_double, nc__print_double,, 105.0) \
+    X(double, analog_stick_ring_thickness, NO,, nc__parse_double, nc__print_double,, 8.0) \
+    X(double, analog_stick_radius, NO,, nc__parse_double, nc__print_double,, 64.0) \
     X(nc_block_highlight_effect_t, \
             block_highlight_effect, \
             NO, \

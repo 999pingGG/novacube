@@ -1,5 +1,7 @@
+#include <assert.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +45,7 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
 #define NC__RENDERER_TRANSFER_PAGE_CAPACITY (1024 * 1024)
 #define NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES 60
-#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 32
+#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 256
 #define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
 #define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
 #define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
@@ -55,6 +57,7 @@ NC_IGNORE_ALL_WARNINGS_END
 #define NC__CHECK_VK_RESULT(result) do { \
     const VkResult nc__vk_result = (result); \
     if (nc__vk_result != VK_SUCCESS) { \
+        SDL_ClearError(); \
         NC_SET_ERROR(nc__renderer_vk_result_string(nc__vk_result)); \
         goto error; \
     } \
@@ -124,6 +127,12 @@ typedef struct nc__renderer_retired_buffer_t {
     VmaAllocation allocation;
 } nc__renderer_retired_buffer_t;
 
+typedef struct nc__renderer_retired_texture_t {
+    VkImage image;
+    VkImageView image_view;
+    VmaAllocation allocation;
+} nc__renderer_retired_texture_t;
+
 typedef struct nc_renderer_texture_t {
     VkImage image;
     VmaAllocation allocation;
@@ -152,9 +161,19 @@ typedef struct nc__renderer_procedural_overlay_uniforms_t {
 
 typedef struct nc__renderer_gui_uniforms_t {
     vkm_mat4 transform;
-    vkm_vec2 scale;
-    vkm_vec2 translate;
+    vkm_vec2 gui_to_ndc_scale;
 } nc__renderer_gui_uniforms_t;
+
+// The transform is constant for the frame; the rectangle address advances between ordered batches.
+typedef struct nc__renderer_gui_push_constants_t {
+    VkDeviceAddress uniforms;
+    VkDeviceAddress rectangles;
+} nc__renderer_gui_push_constants_t;
+
+static_assert(sizeof(nc_renderer_overlay_rectangle_t) == 84, "GUI rectangle must match its scalar GLSL layout");
+static_assert(
+        offsetof(nc_renderer_overlay_rectangle_t, character) == 80,
+        "GUI rectangle character offset must match GLSL");
 
 typedef struct nc__renderer_block_highlight_vertex_uniforms_t {
     vkm_mat4 view_projection;
@@ -202,6 +221,10 @@ typedef struct nc__renderer_address_push_constants_t {
 #define TDS_VALUE_T nc__renderer_retired_buffer_t
 #include <tds/vector.h>
 
+#define TDS_TYPE nc__renderer_retired_texture_vec
+#define TDS_VALUE_T nc__renderer_retired_texture_t
+#include <tds/vector.h>
+
 typedef struct nc__renderer_image_t {
     VkImage image;
     VmaAllocation allocation;
@@ -229,7 +252,9 @@ typedef struct nc_renderer_t {
     VkFramebuffer* framebuffers;
     uint32_t swapchain_image_count;
     vkm_usvec2 window_size;
-    vkm_usvec2 viewport;
+    // Native-orientation dimensions of the images owned by the current Vulkan swapchain.
+    // This is authoritative for rendering; SDL window dimensions belong to input coordinates.
+    vkm_usvec2 swapchain_extent;
     VkSurfaceTransformFlagBitsKHR surface_transform;
     bool foreground;
     bool swapchain_dirty;
@@ -252,6 +277,7 @@ typedef struct nc_renderer_t {
     VkPipeline transparent_chunk_pipeline;
     VkPipeline composite_chunk_pipeline;
     VkPipeline gui_pipeline;
+    VkPipeline gui_image_pipeline;
     VkPipeline procedural_overlay_invert_pipeline;
     VkPipeline procedural_overlay_stick_pipeline;
     VkPipeline outline_block_highlight_pipeline;
@@ -276,6 +302,7 @@ typedef struct nc_renderer_t {
 
     nc__renderer_upload_op_vec upload_ops;
     nc__renderer_retired_buffer_vec retired_buffers;
+    nc__renderer_retired_texture_vec retired_textures;
     bool uploads_dirty;
 
     uint64_t frame_id;
@@ -390,14 +417,6 @@ static bool nc__renderer_surface_transform_swaps_extent(const VkSurfaceTransform
             transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
 }
 
-static vkm_usvec2 nc__renderer_get_display_viewport(const nc_renderer_t* renderer) {
-    if (nc__renderer_surface_transform_swaps_extent(renderer->surface_transform)) {
-        return (vkm_usvec2){ { renderer->viewport.y, renderer->viewport.x } };
-    }
-
-    return renderer->viewport;
-}
-
 static void nc__renderer_get_pre_rotation_matrix(const nc_renderer_t* renderer, vkm_mat4* result) {
     const vkm_vec3 axis = CVKM_VEC3_FORWARD;
     float angle;
@@ -435,8 +454,8 @@ static void nc__renderer_pre_rotate_rect(const nc_renderer_t* renderer, const SD
     const int y = rect->y;
     const int w = rect->w;
     const int h = rect->h;
-    const int buffer_width = renderer->viewport.x;
-    const int buffer_height = renderer->viewport.y;
+    const int buffer_width = renderer->swapchain_extent.x;
+    const int buffer_height = renderer->swapchain_extent.y;
 
     switch (renderer->surface_transform) {
         case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
@@ -455,8 +474,8 @@ static void nc__renderer_pre_rotate_rect(const nc_renderer_t* renderer, const SD
 }
 
 static vkm_vec2 nc__renderer_pre_rotate_point(const nc_renderer_t* renderer, const vkm_vec2 point) {
-    const float buffer_width = (float)renderer->viewport.x;
-    const float buffer_height = (float)renderer->viewport.y;
+    const float buffer_width = (float)renderer->swapchain_extent.x;
+    const float buffer_height = (float)renderer->swapchain_extent.y;
 
     switch (renderer->surface_transform) {
         case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
@@ -1031,9 +1050,11 @@ static bool nc__renderer_create_window(nc_renderer_t* renderer, const nc_rendere
 
 #ifndef ANDROID
     if (exclusive) {
+        const SDL_DisplayID display_id = SDL_GetDisplayForWindow(renderer->window);
+        NC_CHECK_SDL_RESULT(display_id);
         SDL_DisplayMode display_mode;
         bool sdl_result = SDL_GetClosestFullscreenDisplayMode(
-                SDL_GetDisplayForWindow(renderer->window),
+                display_id,
                 info->window_width,
                 info->window_height,
                 (float)info->refresh_rate,
@@ -1061,8 +1082,8 @@ static bool nc__renderer_create_window(nc_renderer_t* renderer, const nc_rendere
 
     sdl_result = SDL_GetWindowSizeInPixels(renderer->window, &width, &height);
     NC_CHECK_SDL_RESULT(sdl_result);
-    renderer->viewport.x = (uint16_t)width;
-    renderer->viewport.y = (uint16_t)height;
+    renderer->swapchain_extent.x = (uint16_t)width;
+    renderer->swapchain_extent.y = (uint16_t)height;
     return true;
 
 error:
@@ -1126,21 +1147,13 @@ static bool nc__renderer_get_swapchain_extent(
     const VkSurfaceCapabilitiesKHR* capabilities,
     VkExtent2D* out_extent
 ) {
-    if (capabilities->currentExtent.width == 0 || capabilities->currentExtent.height == 0) {
-        return false;
+#ifndef ANDROID
+    if (capabilities->currentExtent.width != UINT32_MAX) {
+        *out_extent = capabilities->currentExtent;
+        return out_extent->width != 0 && out_extent->height != 0;
     }
+#endif
 
-#ifdef ANDROID
-    (void)renderer;
-
-    *out_extent = capabilities->currentExtent;
-    if (nc__renderer_surface_transform_swaps_extent(capabilities->currentTransform)) {
-        const uint32_t width = out_extent->width;
-        out_extent->width = out_extent->height;
-        out_extent->height = width;
-    }
-    return true;
-#else
     int width;
     int height;
     const bool sdl_result = SDL_GetWindowSizeInPixels(renderer->window, &width, &height);
@@ -1148,6 +1161,14 @@ static bool nc__renderer_get_swapchain_extent(
 
     if (width <= 0 || height <= 0) {
         return false;
+    }
+
+    // Android permits swapchain images to differ from currentExtent and scales them for
+    // presentation. Use SDL's current drawable size.
+    if (nc__renderer_surface_transform_swaps_extent(capabilities->currentTransform)) {
+        const int display_width = width;
+        width = height;
+        height = display_width;
     }
 
     out_extent->width = vkm_clamp(
@@ -1158,11 +1179,10 @@ static bool nc__renderer_get_swapchain_extent(
             (uint32_t)height,
             capabilities->minImageExtent.height,
             capabilities->maxImageExtent.height);
-    return true;
+    return out_extent->width != 0 && out_extent->height != 0;
 
 error:
     return false;
-#endif
 }
 
 static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
@@ -1327,10 +1347,26 @@ static bool nc__renderer_create_render_pass(nc_renderer_t* renderer) {
                     {
                         .srcSubpass = 1,
                         .dstSubpass = 2,
-                        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+                        .srcStageMask =
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                        .dstStageMask =
+                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                        .srcAccessMask =
+                                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                        // DONT_CARE store operations are still writes for synchronization purposes. Include the color
+                        // and depth store accesses in the last subpass so they happen after the implicit transitions
+                        // that make its input and read-only depth layouts available.
+                        .dstAccessMask =
+                                  VK_ACCESS_INPUT_ATTACHMENT_READ_BIT
+                                | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                         .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
                     },
                 },
@@ -1361,20 +1397,20 @@ static bool nc__renderer_create_render_pass_attachment(
 ) {
     nc__renderer_destroy_image(renderer, image);
 
-    NC__CHECK_VK_RESULT(vmaCreateImage(
+    NC__CHECK_VK_RESULT(vmaCreateDedicatedImage(
             renderer->allocator,
             &(VkImageCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                 .imageType = VK_IMAGE_TYPE_2D,
                 .format = format,
-                .extent = { renderer->viewport.x, renderer->viewport.y, 1, },
+                .extent = { renderer->swapchain_extent.x, renderer->swapchain_extent.y, 1, },
                 .mipLevels = 1,
                 .arrayLayers = 1,
                 .samples = VK_SAMPLE_COUNT_1_BIT,
                 .tiling = VK_IMAGE_TILING_OPTIMAL,
                 .usage = (
                     color_and_input
-                        ? (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)
+                        ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
                         : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
                     | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -1384,6 +1420,7 @@ static bool nc__renderer_create_render_pass_attachment(
             &(VmaAllocationCreateInfo){
                 .preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
             },
+            NULL,
             &image->image,
             &image->allocation,
             NULL));
@@ -1495,7 +1532,9 @@ static void nc__renderer_initialize_render_pass_attachments(nc_renderer_t* rende
         };
         vkCmdPipelineBarrier(
                 renderer->frame_command_buffer,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                // The acquire semaphore is waited at COLOR_ATTACHMENT_OUTPUT. Put the transition's source scope at
+                // that stage too, otherwise it could execute before the swapchain image has actually been acquired.
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 0,
                 0,
@@ -1534,8 +1573,8 @@ static bool nc__renderer_create_framebuffers(nc_renderer_t* renderer) {
                     .renderPass = renderer->render_pass,
                     .attachmentCount = NC_COUNTOF(attachments),
                     .pAttachments = attachments,
-                    .width = renderer->viewport.x,
-                    .height = renderer->viewport.y,
+                    .width = renderer->swapchain_extent.x,
+                    .height = renderer->swapchain_extent.y,
                     .layers = 1,
                 },
                 NULL,
@@ -1687,8 +1726,8 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
 
     renderer->swapchain = new_swapchain;
     renderer->swapchain_format = chosen_format.format;
-    renderer->viewport.x = (uint16_t)extent.width;
-    renderer->viewport.y = (uint16_t)extent.height;
+    renderer->swapchain_extent.x = (uint16_t)extent.width;
+    renderer->swapchain_extent.y = (uint16_t)extent.height;
 
     NC__CHECK_VK_RESULT(vkGetSwapchainImagesKHR(
             renderer->device,
@@ -2020,13 +2059,6 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
     };
-    const VkPipelineRasterizationStateCreateInfo raster_front_cull = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_FRONT_BIT,
-        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .lineWidth = 1.0f,
-    };
     const VkPipelineDepthStencilStateCreateInfo depth_enabled_write = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -2209,43 +2241,32 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
             renderer->pipeline_layout,
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
             NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            &(VkPipelineVertexInputStateCreateInfo){
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                .vertexBindingDescriptionCount = 1,
-                .pVertexBindingDescriptions = &(VkVertexInputBindingDescription){
-                    .binding = 0,
-                    .stride = sizeof(vkm_vec2) + sizeof(vkm_vec2) + sizeof(vkm_ubvec4),
-                    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-                },
-                .vertexAttributeDescriptionCount = 3,
-                .pVertexAttributeDescriptions = (VkVertexInputAttributeDescription[]){
-                    {
-                        .location = 0,
-                        .binding = 0,
-                        .format = VK_FORMAT_R32G32_SFLOAT,
-                        .offset = 0,
-                    },
-                    {
-                        .location = 1,
-                        .binding = 0,
-                        .format = VK_FORMAT_R32G32_SFLOAT,
-                        .offset = sizeof(vkm_vec2),
-                    },
-                    {
-                        .location = 2,
-                        .binding = 0,
-                        .format = VK_FORMAT_R8G8B8A8_UNORM,
-                        .offset = sizeof(vkm_vec2) + sizeof(vkm_vec2),
-                    },
-                },
-            },
-            &raster_front_cull,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+            // Transfer pages already expose device addresses; vertex input would require a
+            // second upload API that exposes each page's VkBuffer and byte offset.
+            &no_vertex_input,
+            &raster_no_cull,
             &depth_disabled,
             1,
             &alpha_blending,
             2,
             &renderer->gui_pipeline)) {
+        return false;
+    }
+
+    if (!nc__renderer_create_graphics_pipeline(
+            renderer,
+            renderer->pipeline_layout,
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
+            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-image-frag.spv",
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+            &no_vertex_input,
+            &raster_no_cull,
+            &depth_disabled,
+            1,
+            &alpha_blending,
+            2,
+            &renderer->gui_image_pipeline)) {
         return false;
     }
 
@@ -2300,6 +2321,7 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     vkDestroyPipeline(renderer->device, renderer->procedural_overlay_stick_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->procedural_overlay_invert_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->sky_pipeline, NULL);
+    vkDestroyPipeline(renderer->device, renderer->gui_image_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->gui_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->composite_chunk_pipeline, NULL);
     vkDestroyPipeline(renderer->device, renderer->transparent_chunk_pipeline, NULL);
@@ -2311,6 +2333,7 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     renderer->procedural_overlay_stick_pipeline = VK_NULL_HANDLE;
     renderer->procedural_overlay_invert_pipeline = VK_NULL_HANDLE;
     renderer->sky_pipeline = VK_NULL_HANDLE;
+    renderer->gui_image_pipeline = VK_NULL_HANDLE;
     renderer->gui_pipeline = VK_NULL_HANDLE;
     renderer->composite_chunk_pipeline = VK_NULL_HANDLE;
     renderer->transparent_chunk_pipeline = VK_NULL_HANDLE;
@@ -2545,15 +2568,15 @@ static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer,
             &(VkViewport){
                 .x = 0.0f,
                 .y = 0.0f,
-                .width = (float)renderer->viewport.x,
-                .height = (float)renderer->viewport.y,
+                .width = (float)renderer->swapchain_extent.x,
+                .height = (float)renderer->swapchain_extent.y,
                 .minDepth = 0.0f,
                 .maxDepth = 1.0f,
             });
 
     VkRect2D scissor = {
         .offset = { 0, 0 },
-        .extent = { renderer->viewport.x, renderer->viewport.y },
+        .extent = { renderer->swapchain_extent.x, renderer->swapchain_extent.y },
     };
     if (scissor_rect) {
         SDL_Rect rotated_rect;
@@ -2583,10 +2606,10 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     VkImageMemoryBarrier* image_barriers = texture_op_count > 0
             ? calloc(texture_op_count, sizeof(*image_barriers))
             : NULL;
-    nc_renderer_texture_t** uploaded_textures = texture_op_count > 0
-            ? calloc(texture_op_count, sizeof(*uploaded_textures))
+    nc_renderer_texture_t** barrier_textures = texture_op_count > 0
+            ? calloc(texture_op_count, sizeof(*barrier_textures))
             : NULL;
-    uint32_t texture_count = 0;
+    uint32_t texture_barrier_count = 0;
     VkPipelineStageFlags texture_src_stages = 0;
 
     for (uint32_t i = 0; i < upload_count; i++) {
@@ -2596,14 +2619,14 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         }
 
         nc_renderer_texture_t* texture = op.texture.texture;
-        bool already_added = false;
-        for (uint32_t j = 0; j < texture_count; j++) {
-            if (uploaded_textures[j] == texture) {
-                already_added = true;
+        bool barrier_already_added = false;
+        for (uint32_t j = 0; j < texture_barrier_count; j++) {
+            if (barrier_textures[j] == texture) {
+                barrier_already_added = true;
                 break;
             }
         }
-        if (already_added) {
+        if (barrier_already_added) {
             continue;
         }
 
@@ -2622,8 +2645,8 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                 break;
         }
 
-        uploaded_textures[texture_count] = texture;
-        image_barriers[texture_count] = (VkImageMemoryBarrier){
+        barrier_textures[texture_barrier_count] = texture;
+        image_barriers[texture_barrier_count] = (VkImageMemoryBarrier){
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .srcAccessMask = src_access,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2638,10 +2661,10 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                 .layerCount = texture->layer_count,
             },
         };
-        texture_count++;
+        texture_barrier_count++;
     }
 
-    if (texture_count > 0) {
+    if (texture_barrier_count > 0) {
         vkCmdPipelineBarrier(
                 renderer->frame_command_buffer,
                 texture_src_stages,
@@ -2651,7 +2674,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                 NULL,
                 0,
                 NULL,
-                texture_count,
+                texture_barrier_count,
                 image_barriers);
     }
 
@@ -2674,6 +2697,8 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                         .size = op.size,
                     });
 
+            // The über optimization here would be to issue separate barriers per stages and accesses,
+            // but I think it would drive up complexity for questionable (performance) benefit.
             if (op.buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) {
                 buffer_dst_stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
                 buffer_dst_access |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
@@ -2705,12 +2730,12 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         }
     }
 
-    for (uint32_t i = 0; i < texture_count; i++) {
+    for (uint32_t i = 0; i < texture_barrier_count; i++) {
         image_barriers[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         image_barriers[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         image_barriers[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         image_barriers[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        uploaded_textures[i]->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier_textures[i]->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
     // All uploads precede all drawing, so one global memory dependency is enough.
@@ -2720,23 +2745,23 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .dstAccessMask = buffer_dst_access,
     };
-    if (buffer_dst_stages || texture_count > 0) {
+    if (buffer_dst_stages || texture_barrier_count > 0) {
         vkCmdPipelineBarrier(
                 renderer->frame_command_buffer,
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                buffer_dst_stages | (texture_count > 0 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+                buffer_dst_stages | (texture_barrier_count > 0 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
                 0,
                 buffer_dst_stages ? 1 : 0,
                 buffer_dst_stages ? &buffer_barrier : NULL,
                 0,
                 NULL,
-                texture_count,
+                texture_barrier_count,
                 image_barriers);
     }
 
     nc__renderer_upload_op_vec_clear(&renderer->upload_ops);
     renderer->uploads_dirty = false;
-    free((void*)uploaded_textures);
+    free((void*)barrier_textures);
     free(image_barriers);
     return true;
 }
@@ -2981,13 +3006,73 @@ error:
     return NULL;
 }
 
-static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
+static void nc__renderer_cancel_uploads_for_texture(nc_renderer_t* renderer, const nc_renderer_texture_t* texture) {
+    // Upload operations retain raw texture pointers until the next flush. Texture-array creation can fail after
+    // queuing some layers, so destroying the partially created texture must remove those operations first.
+    // This makes texture destruction O(pending uploads), which is preferable to maintaining per-texture queue state
+    // for an uncommon operation and keeps cancellation correct for every texture-destruction path.
+    uint32_t i = 0;
+    while (i < nc__renderer_upload_op_vec_count(&renderer->upload_ops)) {
+        const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        if (op.kind == NC__RENDERER_UPLOAD_TEXTURE && op.texture.texture == texture) {
+            nc__renderer_upload_op_vec_remove(&renderer->upload_ops, i);
+        } else {
+            i++;
+        }
+    }
+    renderer->uploads_dirty = nc__renderer_upload_op_vec_count(&renderer->upload_ops) > 0;
+}
+
+static void nc__renderer_cancel_uploads_for_buffer(nc_renderer_t* renderer, const nc_renderer_buffer_t* buffer) {
+    // Buffer upload operations retain raw buffer pointers too. Remove them before freeing the wrapper so an upload
+    // queued but not yet flushed cannot dereference freed memory. Like texture cancellation, this makes destruction
+    // O(pending uploads) without adding per-buffer queue state.
+    uint32_t i = 0;
+    while (i < nc__renderer_upload_op_vec_count(&renderer->upload_ops)) {
+        const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
+        if (op.kind == NC__RENDERER_UPLOAD_BUFFER && op.buffer == buffer) {
+            nc__renderer_upload_op_vec_remove(&renderer->upload_ops, i);
+        } else {
+            i++;
+        }
+    }
+    renderer->uploads_dirty = nc__renderer_upload_op_vec_count(&renderer->upload_ops) > 0;
+}
+
+static void nc__renderer_destroy_or_retire_buffer(
+    nc_renderer_t* renderer,
+    VkBuffer buffer,
+    VmaAllocation allocation
+) {
+    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
+        nc__renderer_retired_buffer_vec_append(
+                &renderer->retired_buffers,
+                (nc__renderer_retired_buffer_t){
+                    .buffer = buffer,
+                    .allocation = allocation,
+                });
+    } else {
+        vmaDestroyBuffer(renderer->allocator, buffer, allocation);
+    }
+}
+
+static void nc__renderer_destroy_or_retire_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
     if (!texture) {
         return;
     }
 
+    nc__renderer_cancel_uploads_for_texture(renderer, texture);
+
     if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        nc__renderer_wait_idle(renderer);
+        nc__renderer_retired_texture_vec_append(
+                &renderer->retired_textures,
+                (nc__renderer_retired_texture_t){
+                    .image = texture->image,
+                    .image_view = texture->image_view,
+                    .allocation = texture->allocation,
+                });
+        free(texture);
+        return;
     }
 
     vkDestroyImageView(renderer->device, texture->image_view, NULL);
@@ -2995,6 +3080,26 @@ static void nc__renderer_destroy_texture_object(nc_renderer_t* renderer, nc_rend
         vmaDestroyImage(renderer->allocator, texture->image, texture->allocation);
     }
     free(texture);
+}
+
+static void nc__renderer_destroy_retired_resources(nc_renderer_t* renderer) {
+    // This renderer has one in-flight submission, and callers reclaim retired resources only after its fence signals.
+    for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_buffers); i++) {
+        const nc__renderer_retired_buffer_t buffer = nc__renderer_retired_buffer_vec_get(
+                &renderer->retired_buffers,
+                i);
+        vmaDestroyBuffer(renderer->allocator, buffer.buffer, buffer.allocation);
+    }
+    nc__renderer_retired_buffer_vec_clear(&renderer->retired_buffers);
+
+    for (uint32_t i = 0; i < nc__renderer_retired_texture_vec_count(&renderer->retired_textures); i++) {
+        const nc__renderer_retired_texture_t texture = nc__renderer_retired_texture_vec_get(
+                &renderer->retired_textures,
+                i);
+        vkDestroyImageView(renderer->device, texture.image_view, NULL);
+        vmaDestroyImage(renderer->allocator, texture.image, texture.allocation);
+    }
+    nc__renderer_retired_texture_vec_clear(&renderer->retired_textures);
 }
 
 static bool nc__renderer_draw_chunk(
@@ -3170,6 +3275,21 @@ static bool nc__renderer_draw_block_highlight(
     return true;
 }
 
+// Vulkan scissors are integer rectangles, so conservatively cover the floating-point GUI clip.
+static SDL_Rect nc__renderer_gui_scissor(const SDL_FRect gui_rect, const vkm_usvec2 framebuffer_size) {
+    const int left = vkm_max((int)floorf(gui_rect.x), 0);
+    const int top = vkm_max((int)floorf(gui_rect.y), 0);
+    const int right = vkm_min((int)ceilf(gui_rect.x + gui_rect.w), framebuffer_size.x);
+    const int bottom = vkm_min((int)ceilf(gui_rect.y + gui_rect.h), framebuffer_size.y);
+    return (SDL_Rect){
+        .x = left,
+        .y = top,
+        .w = vkm_max(right - left, 0),
+        .h = vkm_max(bottom - top, 0),
+    };
+}
+
+// Uploads the instance array once, then preserves Clay order while batching adjacent rectangles.
 static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer_overlay_draw_t* draw) {
     if (draw->draw_command_count == 0) {
         return true;
@@ -3178,48 +3298,128 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
     vkm_mat4 pre_rotation;
     nc__renderer_get_pre_rotation_matrix(renderer, &pre_rotation);
 
-    const vkm_usvec2 display_viewport = nc__renderer_get_display_viewport(renderer);
+    const vkm_usvec2 framebuffer_size = nc_renderer_get_framebuffer_size(renderer);
     const nc__renderer_gui_uniforms_t uniforms = {
         .transform = pre_rotation,
-        .scale = { { 2.0f / (float)display_viewport.x, 2.0f / (float)display_viewport.y } },
-        .translate = { { -1.0f, -1.0f } },
+        .gui_to_ndc_scale = {
+            {
+                2.0f / (float)framebuffer_size.x,
+                2.0f / (float)framebuffer_size.y,
+            },
+        },
     };
-    nc__renderer_address_push_constants_t push_constants;
-    if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data)) {
+    nc__renderer_gui_push_constants_t push_constants;
+    if (!nc__renderer_write_buffer_reference_data(
+            renderer,
+            &uniforms,
+            sizeof(uniforms),
+            &push_constants.uniforms)) {
         return false;
     }
 
-    vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->gui_pipeline);
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
-            sizeof(push_constants),
-            &push_constants);
+    VkDeviceAddress rectangle_address = 0;
+    if (draw->rectangle_count && !nc__renderer_write_buffer_reference_data(
+            renderer,
+            draw->rectangles,
+            draw->rectangle_count * sizeof(draw->rectangles[0]),
+            &rectangle_address)) {
+        return false;
+    }
 
-    const VkDeviceSize vertex_offset = 0;
-    vkCmdBindVertexBuffers(renderer->frame_command_buffer, 0, 1, &draw->vertex_buffer->buffer, &vertex_offset);
-    vkCmdBindIndexBuffer(renderer->frame_command_buffer, draw->index_buffer->buffer, 0, VK_INDEX_TYPE_UINT16);
-
+    VkPipeline bound_pipeline = VK_NULL_HANDLE;
+    const nc_renderer_texture_t* bound_texture = NULL;
     for (uint32_t i = 0; i < draw->draw_command_count; i++) {
         const nc_renderer_overlay_draw_command_t* draw_command = &draw->draw_commands[i];
-        const nc_renderer_texture_t* texture = draw_command->texture;
-        if (!texture || texture->is_array) {
+        SDL_FRect gui_scissor = draw_command->clip_rect;
+        const nc_renderer_texture_t* texture;
+        uint32_t instance_count;
+
+        if (draw_command->type == NC_RENDERER_OVERLAY_COMMAND_RECTANGLES) {
+            texture = draw->font_texture;
+            instance_count = draw_command->rectangles.rectangle_count;
+            push_constants.rectangles = rectangle_address +
+                    draw_command->rectangles.first_rectangle * sizeof(draw->rectangles[0]);
+            if (bound_pipeline != renderer->gui_pipeline) {
+                vkCmdBindPipeline(
+                        renderer->frame_command_buffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        renderer->gui_pipeline);
+                bound_pipeline = renderer->gui_pipeline;
+            }
+        } else if (draw_command->type == NC_RENDERER_OVERLAY_COMMAND_IMAGE) {
+            texture = draw_command->image.texture;
+            instance_count = 1;
+            if (!texture || texture->is_array) {
+                continue;
+            }
+
+            const SDL_FRect bounds = draw_command->image.rectangle;
+            nc_renderer_overlay_rectangle_t image = {
+                .rectangle = bounds,
+                .color = draw_command->image.color,
+                .corner_radii = draw_command->image.corner_radii,
+                .overlay_color = draw_command->image.overlay_color,
+            };
+            if (!nc__renderer_write_buffer_reference_data(
+                    renderer,
+                    &image,
+                    sizeof(image),
+                    &push_constants.rectangles)) {
+                return false;
+            }
+            gui_scissor = bounds;
+            if (draw_command->clip_enabled) {
+                const float left = vkm_max(bounds.x, draw_command->clip_rect.x);
+                const float top = vkm_max(bounds.y, draw_command->clip_rect.y);
+                const float right = vkm_min(bounds.x + bounds.w, draw_command->clip_rect.x +
+                        draw_command->clip_rect.w);
+                const float bottom = vkm_min(bounds.y + bounds.h, draw_command->clip_rect.y +
+                        draw_command->clip_rect.h);
+                gui_scissor = (SDL_FRect){
+                    left,
+                    top,
+                    vkm_max(right - left, 0.0f),
+                    vkm_max(bottom - top, 0.0f),
+                };
+            }
+            if (bound_pipeline != renderer->gui_image_pipeline) {
+                vkCmdBindPipeline(
+                        renderer->frame_command_buffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        renderer->gui_image_pipeline);
+                bound_pipeline = renderer->gui_image_pipeline;
+            }
+        } else {
             continue;
         }
 
-        if (!nc__renderer_bind_texture_descriptor_set(renderer, texture, renderer->gui_sampler)) {
+        if (!texture || texture->is_array) {
+            continue;
+        }
+        if (texture != bound_texture &&
+                !nc__renderer_bind_texture_descriptor_set(renderer, texture, renderer->gui_sampler)) {
             return false;
         }
-        nc__renderer_set_viewport_and_scissor(renderer, &draw_command->clip_rect);
-        vkCmdDrawIndexed(
+        bound_texture = texture;
+
+        SDL_Rect framebuffer_scissor;
+        const SDL_Rect* framebuffer_scissor_pointer = NULL;
+        if (draw_command->clip_enabled || draw_command->type == NC_RENDERER_OVERLAY_COMMAND_IMAGE) {
+            framebuffer_scissor = nc__renderer_gui_scissor(gui_scissor, framebuffer_size);
+            if (framebuffer_scissor.w <= 0 || framebuffer_scissor.h <= 0) {
+                continue;
+            }
+            framebuffer_scissor_pointer = &framebuffer_scissor;
+        }
+        nc__renderer_set_viewport_and_scissor(renderer, framebuffer_scissor_pointer);
+        vkCmdPushConstants(
                 renderer->frame_command_buffer,
-                draw_command->element_count,
-                1,
-                draw_command->first_index,
-                0,
-                0);
+                renderer->pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+                sizeof(push_constants),
+                &push_constants);
+        vkCmdDraw(renderer->frame_command_buffer, 4, instance_count, 0, 0);
     }
 
     return true;
@@ -3253,19 +3453,10 @@ static bool nc__renderer_draw_procedural_overlay(
         uniforms.sticks[i][2] = draw->analog_stick_radius;
     }
 
-    const vkm_usvec2 display_viewport = nc__renderer_get_display_viewport(renderer);
-    const SDL_Rect crosshair_rect = {
-        .x = (int)(((float)display_viewport.x - draw->crosshair_size) * 0.5f),
-        .y = (int)(((float)display_viewport.y - draw->crosshair_size) * 0.5f),
-        .w = (int)draw->crosshair_size,
-        .h = (int)draw->crosshair_size,
-    };
-    SDL_Rect rotated_crosshair_rect;
-    nc__renderer_pre_rotate_rect(renderer, &crosshair_rect, &rotated_crosshair_rect);
-    uniforms.crosshair[0] = (float)rotated_crosshair_rect.x;
-    uniforms.crosshair[1] = (float)rotated_crosshair_rect.y;
-    uniforms.crosshair[2] = (float)rotated_crosshair_rect.w;
-    uniforms.crosshair[3] = (float)rotated_crosshair_rect.h;
+    uniforms.crosshair[0] = ((float)renderer->swapchain_extent.x - draw->crosshair_size) * 0.5f;
+    uniforms.crosshair[1] = ((float)renderer->swapchain_extent.y - draw->crosshair_size) * 0.5f;
+    uniforms.crosshair[2] = draw->crosshair_size;
+    uniforms.crosshair[3] = draw->crosshair_size;
 
     nc__renderer_address_push_constants_t push_constants;
     if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data) ||
@@ -3312,7 +3503,9 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
     NC_CHECK_SDL_RESULT(vk_get_instance_proc_addr);
     volkInitializeCustom((PFN_vkGetInstanceProcAddr)vk_get_instance_proc_addr);
 
-    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    // Keep touch and mouse modalities distinct; player input should never see SDL's emulated mouse copy.
+    sdl_result = SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0") && SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    NC_CHECK_SDL_RESULT(sdl_result);
 
     const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
     if (!nc__renderer_create_instance(result)
@@ -3363,14 +3556,16 @@ bool nc_renderer_handle_event(nc_renderer_t* renderer, const SDL_Event* event) {
             if (event->window.data1 > 0 && event->window.data2 > 0) {
                 renderer->window_size.x = (uint16_t)event->window.data1;
                 renderer->window_size.y = (uint16_t)event->window.data2;
+                // Android first creates its SurfaceView between visible system bars, then
+                // resizes it after SDL's asynchronous immersive-mode request hides them.
+                // Some Android versions report that transition only as a logical resize.
+                renderer->swapchain_dirty = true;
             }
             break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
             if (event->window.data1 > 0 && event->window.data2 > 0) {
-#ifndef ANDROID
-                renderer->viewport.x = (uint16_t)event->window.data1;
-                renderer->viewport.y = (uint16_t)event->window.data2;
-#endif
+                // SDL events are invalidation signals, not Vulkan state. Swapchain recreation
+                // queries VkSurfaceCapabilitiesKHR again and installs its chosen extent.
                 renderer->swapchain_dirty = true;
             }
             break;
@@ -3386,13 +3581,7 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     NC__CHECK_VK_RESULT(vkWaitForFences(renderer->device, 1, &renderer->frame_fence, VK_TRUE, UINT64_MAX));
     renderer->frame_fence_pending = false;
 
-    for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_buffers); i++) {
-        const nc__renderer_retired_buffer_t buffer = nc__renderer_retired_buffer_vec_get(
-                &renderer->retired_buffers,
-                i);
-        vmaDestroyBuffer(renderer->allocator, buffer.buffer, buffer.allocation);
-    }
-    nc__renderer_retired_buffer_vec_clear(&renderer->retired_buffers);
+    nc__renderer_destroy_retired_resources(renderer);
 
     if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         nc__renderer_reset_and_trim_transfer_pages(renderer);
@@ -3417,8 +3606,8 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     renderer->frame_swapchain_image_index = 0;
     if (!renderer->foreground ||
             renderer->swapchain == VK_NULL_HANDLE ||
-            renderer->viewport.x == 0 ||
-            renderer->viewport.y == 0) {
+            renderer->swapchain_extent.x == 0 ||
+            renderer->swapchain_extent.y == 0) {
         return true;
     }
 
@@ -3530,18 +3719,27 @@ error:
     return false;
 }
 
+bool nc_renderer_is_relative_mouse_mode(const nc_renderer_t* renderer) {
+    return SDL_GetWindowRelativeMouseMode(renderer->window);
+}
+
 bool nc_renderer_is_foreground(const nc_renderer_t* renderer) {
     return renderer->foreground;
 }
 
-vkm_usvec2 nc_renderer_get_viewport(const nc_renderer_t* renderer) {
-    return nc__renderer_get_display_viewport(renderer);
+// The swapchain extent follows the surface's native orientation. GUI and input coordinates use the
+// display orientation, so quarter-turn surface transforms swap its axes here.
+vkm_usvec2 nc_renderer_get_framebuffer_size(const nc_renderer_t* renderer) {
+    if (nc__renderer_surface_transform_swaps_extent(renderer->surface_transform)) {
+        return (vkm_usvec2){ { renderer->swapchain_extent.y, renderer->swapchain_extent.x } };
+    }
+
+    return renderer->swapchain_extent;
 }
 
 vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {
     return renderer->window_size;
 }
-
 
 // Renderer and initial_size are optional, but specifying one requires the other.
 // In case no initial size is given, this buffer is lazily-initialized.
@@ -3597,18 +3795,8 @@ void nc_renderer_destroy_buffer(nc_renderer_t* renderer, nc_renderer_buffer_t* b
         return;
     }
 
-    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        nc__renderer_retired_buffer_vec_append(
-                &renderer->retired_buffers,
-                (nc__renderer_retired_buffer_t){
-                    .buffer = buffer->buffer,
-                    .allocation = buffer->allocation,
-                });
-        free(buffer);
-        return;
-    }
-
-    vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
+    nc__renderer_cancel_uploads_for_buffer(renderer, buffer);
+    nc__renderer_destroy_or_retire_buffer(renderer, buffer->buffer, buffer->allocation);
     free(buffer);
 }
 
@@ -3637,7 +3825,7 @@ bool nc_renderer_queue_buffer_upload(
                 &new_allocation,
                 NULL));
 
-        vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
+        nc__renderer_destroy_or_retire_buffer(renderer, buffer->buffer, buffer->allocation);
         buffer->buffer = new_buffer;
         buffer->allocation = new_allocation;
         buffer->capacity = new_capacity;
@@ -3672,7 +3860,7 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
 
     const uint32_t size = (uint32_t)width * (uint32_t)height * 4;
     if (!nc__renderer_queue_texture_upload(renderer, result, 0, pixels, size)) {
-        nc__renderer_destroy_texture_object(renderer, result);
+        nc__renderer_destroy_or_retire_texture(renderer, result);
         return NULL;
     }
 
@@ -3709,7 +3897,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(
             texture_data.size);
     nc__renderer_free_texture_file_data(&texture_data);
     if (!upload_result) {
-        nc__renderer_destroy_texture_object(renderer, texture);
+        nc__renderer_destroy_or_retire_texture(renderer, texture);
         return NULL;
     }
 
@@ -3742,13 +3930,13 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
     bool upload_result = nc__renderer_queue_texture_upload(renderer, result, 0, texture_data.bytes, texture_data.size);
     nc__renderer_free_texture_file_data(&texture_data);
     if (!upload_result) {
-        nc__renderer_destroy_texture_object(renderer, result);
+        nc__renderer_destroy_or_retire_texture(renderer, result);
         return NULL;
     }
 
     for (uint16_t i = 1; i < path_count; i++) {
         if (!nc__renderer_load_texture_file(paths[i], type, &texture_data)) {
-            nc__renderer_destroy_texture_object(renderer, result);
+            nc__renderer_destroy_or_retire_texture(renderer, result);
             return NULL;
         }
 
@@ -3759,14 +3947,14 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
         if (!compatible) {
             NC_SET_ERROR("Texture array layer %u does not match the first layer.", i);
             nc__renderer_free_texture_file_data(&texture_data);
-            nc__renderer_destroy_texture_object(renderer, result);
+            nc__renderer_destroy_or_retire_texture(renderer, result);
             return NULL;
         }
 
         upload_result = nc__renderer_queue_texture_upload(renderer, result, i, texture_data.bytes, texture_data.size);
         nc__renderer_free_texture_file_data(&texture_data);
         if (!upload_result) {
-            nc__renderer_destroy_texture_object(renderer, result);
+            nc__renderer_destroy_or_retire_texture(renderer, result);
             return NULL;
         }
     }
@@ -3775,7 +3963,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
 }
 
 void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
-    nc__renderer_destroy_texture_object(renderer, texture);
+    nc__renderer_destroy_or_retire_texture(renderer, texture);
 }
 
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame) {
@@ -3800,7 +3988,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     nc__renderer_initialize_render_pass_attachments(renderer);
     const VkClearValue clear_values[] = {
         // swapchain image (unused, the load operation is "don't care")
-        { 0 },
+        { .color = { .float32 = { 0.0f } } },
         // depth
         { .depthStencil = { .depth = 1.0f } },
         // accumulation
@@ -3815,7 +4003,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
                 .renderPass = renderer->render_pass,
                 .framebuffer = renderer->framebuffers[renderer->frame_swapchain_image_index],
                 .renderArea = {
-                    .extent = { renderer->viewport.x, renderer->viewport.y },
+                    .extent = { renderer->swapchain_extent.x, renderer->swapchain_extent.y },
                 },
                 .clearValueCount = NC_COUNTOF(clear_values),
                 .pClearValues = clear_values,
@@ -3825,10 +4013,10 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     nc__renderer_set_viewport_and_scissor(renderer, NULL);
 
     const vkm_vec4 quad_expansion = { {
-        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.x,
-        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->viewport.y,
-        (float)renderer->viewport.x / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
-        (float)renderer->viewport.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
+        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->swapchain_extent.x,
+        2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS / (float)renderer->swapchain_extent.y,
+        (float)renderer->swapchain_extent.x / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
+        (float)renderer->swapchain_extent.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
     } };
 
     const nc_renderer_texture_t* bound_chunk_texture = NULL;
@@ -3923,45 +4111,15 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     return true;
 }
 
-float nc_renderer_get_window_pixel_density(const nc_renderer_t* renderer) {
-    const float result = SDL_GetWindowPixelDensity(renderer->window);
-    if (result == 0.0f) {
-        SDL_LogWarn(
-                SDL_LOG_CATEGORY_APPLICATION,
-                "SDL_GetWindowPixelDensity() failed, falling back to 1.0f: %s",
-                SDL_GetError());
-        SDL_ClearError();
-        return 1.0f;
-    }
-
-    return result;
-}
-
-float nc_renderer_get_window_display_scale(const nc_renderer_t* renderer) {
-    const float result = SDL_GetWindowDisplayScale(renderer->window);
-    if (result == 0.0f) {
-        SDL_LogWarn(
-                SDL_LOG_CATEGORY_APPLICATION,
-                "SDL_GetWindowDisplayScale() failed, falling back to pixel density: %s",
-                SDL_GetError());
-        SDL_ClearError();
-        return nc_renderer_get_window_pixel_density(renderer);
-    }
-
-    return result;
-}
-
 void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect) {
-    int count;
-    SDL_Window** windows = SDL_GetWindows(&count);
-    if (count == 0 || !windows[0] || !SDL_GetWindowSafeArea(windows[0], rect)) {
+    if (!SDL_GetWindowSafeArea(renderer->window, rect)) {
         SDL_LogWarn(
                 SDL_LOG_CATEGORY_APPLICATION,
                 "Failed to get the window's safe area. Falling back to the entire window.");
+        SDL_ClearError();
         const vkm_usvec2 window_size = nc_renderer_get_window_size(renderer);
         *rect = (SDL_Rect){ .x = 0, .y = 0, .w = window_size.x, .h = window_size.y };
     }
-    SDL_free((void*)windows);
 }
 
 void nc_renderer_fini(nc_renderer_t* renderer) {
@@ -3971,16 +4129,10 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
 
     if (renderer->device) {
         nc__renderer_wait_idle(renderer);
-
-        for (uint32_t i = 0; i < nc__renderer_retired_buffer_vec_count(&renderer->retired_buffers); i++) {
-            const nc__renderer_retired_buffer_t buffer = nc__renderer_retired_buffer_vec_get(
-                    &renderer->retired_buffers,
-                    i);
-            vmaDestroyBuffer(renderer->allocator, buffer.buffer, buffer.allocation);
-        }
+        nc__renderer_destroy_retired_resources(renderer);
 
         nc__renderer_destroy_descriptor_state(renderer);
-        nc__renderer_destroy_texture_object(renderer, renderer->procedural_overlay_crosshair_texture);
+        nc__renderer_destroy_or_retire_texture(renderer, renderer->procedural_overlay_crosshair_texture);
 
         nc__renderer_destroy_pipelines(renderer);
         vkDestroySampler(renderer->device, renderer->chunk_sampler, NULL);
@@ -4008,6 +4160,7 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
     nc__renderer_transfer_page_vec_fini(&renderer->transfer_pages);
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
     nc__renderer_retired_buffer_vec_fini(&renderer->retired_buffers);
+    nc__renderer_retired_texture_vec_fini(&renderer->retired_textures);
     if (renderer->window) {
         SDL_DestroyWindow(renderer->window);
     }

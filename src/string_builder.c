@@ -38,7 +38,9 @@ void nc_string_builder_append(nc_string_builder_t* string_builder, const char* s
 
 void nc_string_builder_clear(nc_string_builder_t* string_builder) {
     string_builder->length = 0;
-    string_builder->data[0] = '\0';
+    if (string_builder->data) {
+        string_builder->data[0] = '\0';
+    }
 }
 
 void nc_string_builder_fini(nc_string_builder_t* string_builder) {
