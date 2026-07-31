@@ -34,7 +34,7 @@ ASTCENC_COMMAND = 'astcenc-avx2'
 # ---------------------------------------
 
 
-def run(cmd, cwd=None):
+def run(cmd: list[str], cwd: Path | None=None):
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -90,7 +90,7 @@ def strip_exif_if_requested(path: Path, enabled: bool):
         file.write(output)
 
 
-def process_textures(compress_android, strip_exif):
+def process_textures(compress_android: bool, strip_exif: bool):
     for base_dir in TEXTURE_DIRS:
         for img in base_dir.rglob('*'):
             if img.suffix.lower() not in IMAGE_EXTS:
@@ -128,7 +128,7 @@ def process_textures(compress_android, strip_exif):
             strip_exif_if_requested(out, strip_exif)
 
 
-def compile_shaders(debug):
+def compile_shaders(debug: bool):
     out_dir = PC_ASSETS / 'shaders'
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir_android = ANDROID_ASSETS / 'shaders'
