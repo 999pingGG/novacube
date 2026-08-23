@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(NC_SOURCES
+        src/asset_manager.c
         src/block.c
         src/block_meshing.c
         src/camera.c
@@ -26,16 +27,44 @@ set(NC_SOURCES
         src/mesher.c
         src/player_input.c
         src/renderer.c
-        src/string_builder.c
+        src/string_handling.c
         src/terrain.c
         src/terrain_generation.c
-        src/vma_implementation.cpp)
+        src/vma_implementation.cpp
+        vendor/sqlite3/sqlite3.c
+        vendor/zstd/zstd.c)
+if(NOT ANDROID)
+    list(APPEND NC_SOURCES src/argument_parser.c)
+endif()
+
+set(NC_IGNORED_WARNINGS_FILES
+        vendor/sqlite3/sqlite3.c)
 
 if(ANDROID)
     add_library(novacube SHARED ${NC_SOURCES})
 else()
     add_executable(novacube ${NC_SOURCES})
 endif()
+
+target_compile_definitions(novacube PRIVATE
+        SQLITE_DEFAULT_MEMSTATUS=0
+        SQLITE_DQS=0
+        SQLITE_LIKE_DOESNT_MATCH_BLOBS
+        SQLITE_THREADSAFE=0
+        SQLITE_OMIT_AUTHORIZATION
+        SQLITE_OMIT_COMPLETE
+        SQLITE_OMIT_DECLTYPE
+        SQLITE_OMIT_DEPRECATED
+        SQLITE_OMIT_DESERIALIZE
+        SQLITE_OMIT_GENERATED_COLUMNS
+        SQLITE_OMIT_GET_TABLE
+        SQLITE_OMIT_JSON
+        SQLITE_OMIT_LOAD_EXTENSION
+        SQLITE_OMIT_LOCALTIME
+        SQLITE_OMIT_PROGRESS_CALLBACK
+        SQLITE_OMIT_SHARED_CACHE
+        SQLITE_OMIT_TRACE
+        SQLITE_OMIT_UTF16)
 
 find_library(MATH_LIBRARY m)
 if(MATH_LIBRARY)
@@ -68,6 +97,7 @@ if(MSVC)
     elseif(TARGET_ARM)
         target_compile_options(novacube PRIVATE /arch:VFPv4)
     endif()
+    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS /W0)
 else()
     set_source_files_properties(src/vma_implementation.cpp PROPERTIES COMPILE_OPTIONS -w)
     target_compile_options(novacube PRIVATE
@@ -83,6 +113,7 @@ else()
         target_compile_options(novacube PRIVATE -march=haswell)
     endif()
     target_link_options(novacube PRIVATE -nostdlib++)
+    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS -w)
 endif()
 
 target_include_directories(novacube PRIVATE
@@ -91,17 +122,11 @@ target_include_directories(novacube PRIVATE
         vendor/cvkm
         vendor/FastNoiseLite
         vendor/rapidhash
+        vendor/sqlite3
         vendor/tds/include
         vendor/vma
-        vendor/volk)
-
-if(NOT ANDROID AND (WIN32 OR UNIX))
-    add_custom_command(
-            TARGET novacube
-            POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:novacube>/assets
-            COMMENT "Creating assets symlink next to executable.")
-endif()
+        vendor/volk
+        vendor/zstd)
 
 set(NC_BUILD_INFO_TEMPLATE "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h.in")
 set(NC_BUILD_INFO_HEADER "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h")
@@ -122,7 +147,36 @@ add_custom_target(novacube_build_info ALL
         VERBATIM)
 add_dependencies(novacube novacube_build_info)
 
+if(NOT ANDROID)
+    # Keep asset processing in the default desktop build without making it part of the executable target itself. The
+    # asset compiler is the game executable, so this target must wait until novacube exists before checking assets.
+    add_custom_target(novacube_assets ALL
+            COMMAND ${CMAKE_COMMAND}
+                    "-DNC_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                    "-DNC_SOURCE_ASSET_DIR=${CMAKE_SOURCE_DIR}/src-assets"
+                    "-DNC_ASSET_STATE_FILE=${CMAKE_CURRENT_BINARY_DIR}/novacube-assets-$<CONFIG>.state"
+                    "-DNC_ASSET_COMPILER=$<TARGET_FILE:novacube>"
+                    "-DNC_OUTPUT_ASSET_DATABASE=$<TARGET_FILE_DIR:novacube>/assets.db"
+                    "-DNC_DEBUG=$<CONFIG:Debug>"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/check_assets.cmake"
+            DEPENDS novacube
+            COMMENT "Checking source assets for changes."
+            VERBATIM)
+
+    # The asset baker uses the game executable, so novacube_assets must depend on novacube. A separate startup
+    # target preserves that ordering while ensuring IDE build/run commands always perform the asset check.
+    add_custom_target(novacube_dev
+            DEPENDS novacube_assets)
+    set_target_properties(novacube_dev PROPERTIES
+            VS_DEBUGGER_COMMAND "$<TARGET_FILE:novacube>"
+            VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
+endif()
+
 set_target_properties(novacube PROPERTIES
         DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>"
         VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:novacube>")
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube)
+if(NOT ANDROID)
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube_dev)
+else()
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT novacube)
+endif()

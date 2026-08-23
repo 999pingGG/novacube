@@ -48,7 +48,7 @@ typedef struct nc_terrain_lighting_t {
     bool sky_light_frontier_queued;
 } nc_terrain_lighting_t;
 
-nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer);
+nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer, nc_asset_manager_t* asset_manager);
 void nc_terrain_update(nc_terrain_t* terrain, nc_renderer_t* renderer, const vkm_vec3* player_position);
 uint8_t nc_terrain_light_get(uint8_t packed_light, nc_terrain_light_channel_t channel);
 void nc_terrain_light_set(uint8_t* packed_light, nc_terrain_light_channel_t channel, uint8_t light);

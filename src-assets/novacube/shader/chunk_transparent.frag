@@ -1,6 +1,6 @@
 #version 450
 
-#include "chunk-common.inc.frag"
+#include "chunk_common.inc.frag"
 
 layout (location = 0) out vec4 out_accumulation;
 layout (location = 1) out float out_reveal;

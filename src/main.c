@@ -7,6 +7,10 @@
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL_main.h>
 
+#ifndef ANDROID
+#include <novacube/argument_parser.h>
+#endif
+#include <novacube/asset_manager.h>
 #include <novacube/build_info.h>
 #include <novacube/camera.h>
 #include <novacube/cvar.h>
@@ -27,6 +31,7 @@
 #define NC__MOVEMENT_SPEED 5.0f
 
 typedef struct nc__app_t {
+    nc_asset_manager_t* asset_manager;
     nc_renderer_t* renderer;
     nc_terrain_t* terrain;
     nc_gui_context_t* gui;
@@ -75,8 +80,7 @@ static void nc__app_apply_player_command(
     vkm_mul(&right, command->movement.x, &velocity);
     vkm_muladd(&CVKM_VEC3_UP, command->movement.y, &velocity);
     vkm_muladd(&forward, command->movement.z, &velocity);
-    vkm_mul(
-            &velocity,
+    vkm_mul(&velocity,
             NC__MOVEMENT_SPEED * (command->sprint ? 9.0f : 3.0f),
             &velocity);
     vkm_muladd(&velocity, delta_time, &app->camera.position);
@@ -94,8 +98,45 @@ static void nc__app_fini(nc__app_t* app) {
     nc_renderer_fini(app->renderer);
     nc_renderer_chunk_draw_vec_fini(&app->opaque_chunk_draws);
     nc_renderer_chunk_draw_vec_fini(&app->transparent_chunk_draws);
+    nc_asset_manager_fini(app->asset_manager);
     free(app);
 }
+
+static void nc__app_print_build_info(void) {
+    printf(NC_PRODUCT_NAME " " NC_VERSION "\n"
+            "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
+            "Git: " NC_GIT_DESCRIBE "\n"
+            "Commit: " NC_GIT_HASH "\n");
+}
+
+#ifndef ANDROID
+static void nc__app_print_help(void) {
+    printf(NC_PRODUCT_NAME " " NC_VERSION "\n\n"
+            "Usage:\n"
+            "  novacube\n"
+            "  novacube --help\n"
+            "  novacube --version\n"
+            "  novacube --build-assets <source-directory> [changed-asset ...]\n"
+            "           [-o <database>]\n"
+            "           [--platform desktop|mobile]\n"
+            "           [--debug]\n"
+            "           [--strip-png-metadata]\n\n"
+            "Commands:\n"
+            "  No arguments                         Run the game.\n"
+            "  --help                               Print this help and exit.\n"
+            "  --version                            Print build information and exit.\n"
+            "  --build-assets <source-directory>    Bake assets from the source directory.\n\n"
+            "Asset compiler arguments:\n"
+            "  changed-asset                        Path relative to the source directory. Omit all\n"
+            "                                       changed paths to rebuild every asset.\n"
+            "  -o <database>                        Output database; defaults to assets.db.\n"
+            "  --platform desktop|mobile            Output format; defaults to desktop.\n"
+            "  --debug                              Compile shaders with debug information and no\n"
+            "                                       optimization.\n"
+            "  --strip-png-metadata                 Remove ancillary metadata from source PNGs\n"
+            "                                       before baking them.\n");
+}
+#endif
 
 //static void nc__app_animated_test_thingy(nc__app_t* app, const double time) {
 //    const double radius = vkm_sin(time) * 5.0 + 10.0;
@@ -123,15 +164,43 @@ static void nc__app_fini(nc__app_t* app) {
 SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     (void)argc;
     (void)argv;
+    *app_state = NULL;
     nc__app_t* app = NULL;
 
     const bool sdl_success = SDL_SetAppMetadata(NC_PRODUCT_NAME, NC_VERSION, NC_PACKAGE_NAME);
     NC_CHECK_SDL_RESULT(sdl_success);
 
-    SDL_Log(NC_PRODUCT_NAME " " NC_VERSION "\n"
-            "Build: " __DATE__ " " __TIME__ " " NC_BUILD_TYPE "\n"
-            "Git: " NC_GIT_DESCRIBE "\n"
-            "Commit: " NC_GIT_HASH);
+#ifndef ANDROID
+    nc_arguments_t arguments;
+    if (!nc_argument_parser_parse(argv, &arguments)) {
+        // Can't show a messagebox, the program will run in headless mode in asset compiler mode.
+        SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "%s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
+    if (arguments.action == NC_ARGUMENT_ACTION_PRINT_HELP) {
+        nc__app_print_help();
+        return SDL_APP_SUCCESS;
+    }
+    if (arguments.action == NC_ARGUMENT_ACTION_PRINT_VERSION) {
+        nc__app_print_build_info();
+        return SDL_APP_SUCCESS;
+    }
+#endif
+
+    nc__app_print_build_info();
+
+#ifndef ANDROID
+    if (arguments.action == NC_ARGUMENT_ACTION_BUILD_ASSETS) {
+        const bool result = nc_asset_manager_bake_assets(&arguments);
+        if (!result) {
+            SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "%s", SDL_GetError());
+            return SDL_APP_FAILURE;
+        }
+
+        return SDL_APP_SUCCESS;
+    }
+#endif
 
     if (!nc_configuration_load()) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load configuration: %s", SDL_GetError());
@@ -146,6 +215,10 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
     };
     app->selected_type = NC_BLOCK_TYPE_STONE;
 
+    app->asset_manager = nc_asset_manager_init();
+    if (!app->asset_manager) {
+        goto error;
+    }
     app->renderer = nc_renderer_init(&(nc_renderer_create_info_t){
         .window_title = NC_PRODUCT_NAME " " NC_VERSION,
         .window_width = nc_cvar_get_resolution().x,
@@ -153,19 +226,19 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
         .refresh_rate = nc_cvar_get_refresh_rate(),
         .video_mode = nc_cvar_get_video_mode(),
         .prefer_low_power = nc_cvar_get_prefer_low_power_gpu(),
-    });
+    }, app->asset_manager);
     if (!app->renderer) {
         goto error;
     }
 
-    app->gui = nc_gui_init(app->renderer);
+    app->gui = nc_gui_init(app->renderer, app->asset_manager);
     if (!app->gui) {
         goto error;
     }
 
     app->player_input = nc_player_input_init(nc_gui_get_view(app->gui));
 
-    app->terrain = nc_terrain_init(app->renderer);
+    app->terrain = nc_terrain_init(app->renderer, app->asset_manager);
     if (!app->terrain) {
         goto error;
     }
@@ -408,8 +481,7 @@ SDL_AppResult SDL_AppEvent(void* app_state, SDL_Event* event) {
     }
 
     const bool gui_captured_event = nc_gui_handle_event(app->gui, event);
-    if (!gui_captured_event &&
-            !nc_player_input_handle_event(app->player_input, app->renderer, event)) {
+    if (!gui_captured_event && !nc_player_input_handle_event(app->player_input, app->renderer, event)) {
         goto error;
     }
 
@@ -443,8 +515,9 @@ error:
 void SDL_AppQuit(void* app_state, const SDL_AppResult result) {
     (void)result;
 
-    SDL_Log("See you later!");
-
-    nc__app_fini(app_state);
+    if (app_state) {
+        SDL_Log("See you later!");
+        nc__app_fini(app_state);
+    }
     SDL_Quit();
 }

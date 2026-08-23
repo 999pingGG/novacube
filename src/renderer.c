@@ -23,32 +23,29 @@ NC_IGNORE_ALL_WARNINGS_BEGIN
 #include <vk_mem_alloc.h>
 NC_IGNORE_ALL_WARNINGS_END
 
+#include <novacube/asset_manager.h>
 #include <novacube/build_info.h>
 #include <novacube/error_handling.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
 
 #ifdef ANDROID
-#define NC__RENDERER_ASTC_TEXTURES 1
-#define NC__RENDERER_ASSETS_BASE_PATH ""
-#define NC__RENDERER_TEXTURE_EXTENSION ".astc"
 #define NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT VK_FORMAT_R8G8B8A8_SRGB
 #define NC__RENDERER_ALTERNATIVE_SWAPCHAIN_FORMAT VK_FORMAT_B8G8R8A8_SRGB
 #else
-#define NC__RENDERER_ASTC_TEXTURES 0
-#define NC__RENDERER_ASSETS_BASE_PATH "assets/"
-#define NC__RENDERER_TEXTURE_EXTENSION ".png"
 #define NC__RENDERER_PREFERRED_SWAPCHAIN_FORMAT VK_FORMAT_B8G8R8A8_SRGB
 #define NC__RENDERER_ALTERNATIVE_SWAPCHAIN_FORMAT VK_FORMAT_R8G8B8A8_SRGB
 #endif
 
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
-#define NC__RENDERER_TRANSFER_PAGE_CAPACITY (1024 * 1024)
-#define NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES 60
-#define NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS 256
-#define NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT 16
-#define NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET 0
-#define NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET 16
+enum {
+    NC__RENDERER_TRANSFER_PAGE_CAPACITY = 1024 * 1024,
+    NC__RENDERER_TRANSFER_PAGE_RETENTION_FRAMES = 60,
+    NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS = 256,
+    NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT = 16,
+    NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET = 0,
+    NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET = 16,
+};
 // TODO: Maybe this value could be tuned down for devices with a `subPixelPrecisionBits` property higher than 4.
 // Need testing on more devices.
 #define NC__RENDERER_QUAD_EXPANSION_PIXELS 0.1f
@@ -62,9 +59,6 @@ NC_IGNORE_ALL_WARNINGS_END
         goto error; \
     } \
 } while (false)
-
-static const char* nc__renderer_crosshair_texture_path =
-    NC__RENDERER_ASSETS_BASE_PATH "textures/gui/crosshair" NC__RENDERER_TEXTURE_EXTENSION;
 
 static float nc__renderer_srgb_to_linear(const float srgb) {
     if (srgb <= 0.04045f) {
@@ -80,14 +74,6 @@ enum {
     NC__RENDERER_UPLOAD_TEXTURE,
 };
 
-typedef struct nc__renderer_texture_file_data_t {
-    uint8_t* bytes;
-    VkFormat format;
-    uint32_t size;
-    int16_t width;
-    int16_t height;
-} nc__renderer_texture_file_data_t;
-
 typedef struct nc__renderer_upload_op_t {
     union {
         nc_renderer_buffer_t* buffer;
@@ -101,16 +87,6 @@ typedef struct nc__renderer_upload_op_t {
     uint32_t size;
     nc__renderer_upload_kind_t kind;
 } nc__renderer_upload_op_t;
-
-typedef struct nc__renderer_astc_header_t {
-    uint8_t magic[4];
-    uint8_t block_x;
-    uint8_t block_y;
-    uint8_t block_z;
-    uint8_t dim_x[3];
-    uint8_t dim_y[3];
-    uint8_t dim_z[3];
-} nc__renderer_astc_header_t;
 
 typedef struct nc__renderer_transfer_page_t {
     VkBuffer buffer;
@@ -137,12 +113,10 @@ typedef struct nc_renderer_texture_t {
     VkImage image;
     VmaAllocation allocation;
     VkImageView image_view;
-    VkFormat format;
     VkImageLayout layout;
-    int32_t width;
-    int32_t height;
+    int16_t width;
+    int16_t height;
     uint16_t layer_count;
-    bool is_array;
 } nc_renderer_texture_t;
 
 typedef struct nc_renderer_buffer_t {
@@ -498,11 +472,6 @@ static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* rend
             });
 }
 
-static void nc__renderer_free_texture_file_data(nc__renderer_texture_file_data_t* data) {
-    free(data->bytes);
-    *data = (nc__renderer_texture_file_data_t){ 0 };
-}
-
 static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
     if (!renderer->device) {
         return;
@@ -740,7 +709,7 @@ static bool nc__renderer_physical_device_supports_required_features(
 
     vkGetPhysicalDeviceFeatures2(physical_device, &features);
 
-#if NC__RENDERER_ASTC_TEXTURES
+#if ANDROID
     if (!features.features.textureCompressionASTC_LDR) {
         return false;
     }
@@ -961,7 +930,7 @@ static bool nc__renderer_create_device(
         .scalarBlockLayout = VK_TRUE,
     };
     enabled_features.pNext = &scalar_block_layout_features;
-#if NC__RENDERER_ASTC_TEXTURES
+#if ANDROID
     enabled_features.features.textureCompressionASTC_LDR = VK_TRUE;
 #endif
     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
@@ -996,7 +965,9 @@ static bool nc__renderer_create_device(
             NULL,
             &renderer->device));
     volkLoadDevice(renderer->device);
-    renderer->get_buffer_device_address = renderer->khr_get_buffer_device_address ? vkGetBufferDeviceAddressKHR : vkGetBufferDeviceAddressEXT;
+    renderer->get_buffer_device_address = renderer->khr_get_buffer_device_address
+            ? vkGetBufferDeviceAddressKHR
+            : vkGetBufferDeviceAddressEXT;
     if (!renderer->get_buffer_device_address) {
         // last attempt at getting this function pointer
         renderer->get_buffer_device_address = vkGetBufferDeviceAddress;
@@ -1932,36 +1903,39 @@ static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
     renderer->composite_descriptor_set_layout = VK_NULL_HANDLE;
 }
 
-static VkShaderModule nc__renderer_load_shader(const nc_renderer_t* renderer, const char* path) {
-    size_t code_size = 0;
-    void* code = SDL_LoadFile(path, &code_size);
-    NC_CHECK_SDL_RESULT(code);
-    NC_CHECK_RESULT(code_size % sizeof(uint32_t) == 0, "Shader bytecode size is not a multiple of 4: %s", path);
+static VkShaderModule nc__renderer_load_shader(
+    const nc_renderer_t* renderer,
+    nc_asset_manager_t* asset_manager,
+    const char* name,
+    const nc_shader_stage_t stage
+) {
+    nc_shader_baked_asset_t asset;
+    if (!nc_asset_manager_get_shader_baked_asset(asset_manager, "novacube", name, stage, &asset)) {
+        return VK_NULL_HANDLE;
+    }
 
-    VkShaderModule shader_module;
+    VkShaderModule shader_module = VK_NULL_HANDLE;
     NC__CHECK_VK_RESULT(vkCreateShaderModule(
             renderer->device,
             &(VkShaderModuleCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                .codeSize = code_size,
-                .pCode = code,
+                .codeSize = asset.code_size,
+                .pCode = asset.spirv_bytecode,
             },
             NULL,
             &shader_module));
 
-    SDL_free(code);
-    return shader_module;
-
 error:
-    SDL_free(code);
-    return VK_NULL_HANDLE;
+    nc_asset_manager_shader_baked_asset_fini(&asset);
+    return shader_module;
 }
 
 static bool nc__renderer_create_graphics_pipeline(
     const nc_renderer_t* renderer,
+    nc_asset_manager_t* asset_manager,
     const VkPipelineLayout pipeline_layout,
-    const char* vertex_shader_path,
-    const char* fragment_shader_path,
+    const char* vertex_shader_name,
+    const char* fragment_shader_name,
     const VkPrimitiveTopology topology,
     const VkPipelineVertexInputStateCreateInfo* vertex_input_state,
     const VkPipelineRasterizationStateCreateInfo* rasterization_state,
@@ -1971,9 +1945,26 @@ static bool nc__renderer_create_graphics_pipeline(
     const uint32_t subpass,
     VkPipeline* out_pipeline
 ) {
-    VkShaderModule vertex_shader = nc__renderer_load_shader(renderer, vertex_shader_path);
-    VkShaderModule fragment_shader = nc__renderer_load_shader(renderer, fragment_shader_path);
-    NC_CHECK_RESULT(vertex_shader && fragment_shader, "Failed to load Vulkan shaders.");
+    VkShaderModule vertex_shader = VK_NULL_HANDLE;
+    VkShaderModule fragment_shader = VK_NULL_HANDLE;
+
+    vertex_shader = nc__renderer_load_shader(
+            renderer,
+            asset_manager,
+            vertex_shader_name,
+            NC_SHADER_STAGE_VERTEX);
+    if (!vertex_shader) {
+        goto error;
+    }
+
+    fragment_shader = nc__renderer_load_shader(
+            renderer,
+            asset_manager,
+            fragment_shader_name,
+            NC_SHADER_STAGE_FRAGMENT);
+    if (!fragment_shader) {
+        goto error;
+    }
 
     NC__CHECK_VK_RESULT(vkCreateGraphicsPipelines(
             renderer->device,
@@ -2042,7 +2033,7 @@ error:
     return false;
 }
 
-static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
+static bool nc__renderer_create_pipelines(nc_renderer_t* renderer, nc_asset_manager_t* asset_manager) {
     const VkPipelineVertexInputStateCreateInfo no_vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
     };
@@ -2148,9 +2139,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-opaque-frag.spv",
+            "chunk",
+            "chunk_opaque",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_back_cull,
@@ -2164,9 +2156,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-transparent-frag.spv",
+            "chunk",
+            "chunk_transparent",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_no_cull,
@@ -2180,9 +2173,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->composite_pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/fullscreen-triangle-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/chunk-composite-frag.spv",
+            "fullscreen_triangle",
+            "chunk_composite",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_back_cull,
@@ -2196,9 +2190,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!   nc__renderer_create_graphics_pipeline(
                 renderer,
+                asset_manager,
                 renderer->pipeline_layout,
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-outline-frag.spv",
+                "block_highlight",
+                "block_highlight_outline",
                 VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                 &no_vertex_input,
                 &raster_back_cull,
@@ -2209,9 +2204,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
                 &renderer->outline_block_highlight_pipeline)
          || !nc__renderer_create_graphics_pipeline(
                 renderer,
+                asset_manager,
                 renderer->pipeline_layout,
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vignette-frag.spv",
+                "block_highlight",
+                "block_highlight_vignette",
                 VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                 &no_vertex_input,
                 &raster_back_cull,
@@ -2222,9 +2218,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
                 &renderer->vignette_block_highlight_pipeline)
          || !nc__renderer_create_graphics_pipeline(
                 renderer,
+                asset_manager,
                 renderer->pipeline_layout,
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-vert.spv",
-                NC__RENDERER_ASSETS_BASE_PATH "shaders/block-highlight-plasma-frag.spv",
+                "block_highlight",
+                "block_highlight_plasma",
                 VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                 &no_vertex_input,
                 &raster_back_cull,
@@ -2238,9 +2235,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-frag.spv",
+            "gui",
+            "gui",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             // Transfer pages already expose device addresses; vertex input would require a
             // second upload API that exposes each page's VkBuffer and byte offset.
@@ -2256,9 +2254,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/gui-image-frag.spv",
+            "gui",
+            "gui_image",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
             &no_vertex_input,
             &raster_no_cull,
@@ -2272,9 +2271,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/fullscreen-triangle-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-invert-frag.spv",
+            "fullscreen_triangle",
+            "procedural_overlay_invert",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
@@ -2288,9 +2288,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     if (!nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/procedural-overlay-stick-frag.spv",
+            "fullscreen_triangle",
+            "procedural_overlay_stick",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
@@ -2304,9 +2305,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer) {
 
     return nc__renderer_create_graphics_pipeline(
             renderer,
+            asset_manager,
             renderer->pipeline_layout,
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-vert.spv",
-            NC__RENDERER_ASSETS_BASE_PATH "shaders/sky-frag.spv",
+            "sky",
+            "sky",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             &no_vertex_input,
             &raster_back_cull,
@@ -2766,119 +2768,6 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     return true;
 }
 
-#if NC__RENDERER_ASTC_TEXTURES
-static uint32_t nc__renderer_read_u24(const uint8_t bytes[3]) {
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16);
-}
-
-static bool nc__renderer_load_texture_file(
-    const char* path,
-    const nc_renderer_texture_type_t type,
-    nc__renderer_texture_file_data_t* out_texture
-) {
-    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
-
-    size_t file_size = 0;
-    uint8_t* file_bytes = SDL_LoadFile(path, &file_size);
-    NC_CHECK_SDL_RESULT(file_bytes);
-
-    if (file_size <= sizeof(nc__renderer_astc_header_t)) {
-        NC_SET_ERROR("Invalid ASTC texture file (smaller than the header): %s", path);
-        goto error;
-    }
-
-    const nc__renderer_astc_header_t* header = (const nc__renderer_astc_header_t*)file_bytes;
-    uint32_t magic = 0;
-    memcpy(&magic, header->magic, sizeof(magic));
-    if (magic != 0x5ca1ab13u) {
-        NC_SET_ERROR("Invalid ASTC texture header (wrong magic): %s", path);
-        goto error;
-    }
-    if (header->block_x != 4 || header->block_y != 4 || header->block_z != 1) {
-        NC_SET_ERROR(
-                "Unsupported ASTC block size (%ux%ux%u, must be 4x4x1): %s",
-                header->block_x,
-                header->block_y,
-                header->block_z,
-                path);
-        goto error;
-    }
-    if (nc__renderer_read_u24(header->dim_z) != 1) {
-        NC_SET_ERROR("The ASTC depth is not 1: %s", path);
-        goto error;
-    }
-
-    const uint32_t x = nc__renderer_read_u24(header->dim_x);
-    const uint32_t y = nc__renderer_read_u24(header->dim_y);
-    if (x > INT16_MAX || y > INT16_MAX) {
-        NC_SET_ERROR("Texture %s is %ux%u, the max dimensions are %ix%i.", path, x, y, INT16_MAX, INT16_MAX);
-        goto error;
-    }
-
-    out_texture->size = (uint32_t)(file_size - sizeof(*header));
-    out_texture->bytes = malloc(out_texture->size);
-    memcpy(out_texture->bytes, file_bytes + sizeof(*header), out_texture->size);
-    out_texture->width = (int16_t)x;
-    out_texture->height = (int16_t)y;
-    out_texture->format = type == NC_RENDERER_TEXTURE_TYPE_COLOR
-            ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK
-            : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
-
-    SDL_free(file_bytes);
-    return true;
-
-error:
-    SDL_free(file_bytes);
-    return false;
-}
-#else
-static bool nc__renderer_load_texture_file(
-    const char* path,
-    const nc_renderer_texture_type_t type,
-    nc__renderer_texture_file_data_t* out_texture
-) {
-    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
-
-    SDL_Surface* surface = SDL_LoadPNG(path);
-    NC_CHECK_SDL_RESULT(surface);
-
-    if (surface->format != SDL_PIXELFORMAT_RGBA32) {
-        NC_SET_ERROR(
-                "Surface format is %s, expected SDL_PIXELFORMAT_RGBA32.",
-                SDL_GetPixelFormatName(surface->format));
-        goto error;
-    }
-
-    if (surface->w > INT16_MAX || surface->h > INT16_MAX) {
-        NC_SET_ERROR(
-                "Texture %s is %ix%i, the max dimensions are %ix%i.",
-                path,
-                surface->w,
-                surface->h,
-                INT16_MAX,
-                INT16_MAX);
-        goto error;
-    }
-
-    *out_texture = (nc__renderer_texture_file_data_t){
-        .size = (uint32_t)surface->w * (uint32_t)surface->h * 4,
-        .width = (int16_t)surface->w,
-        .height = (int16_t)surface->h,
-        .format = type == NC_RENDERER_TEXTURE_TYPE_COLOR
-                ? VK_FORMAT_R8G8B8A8_SRGB
-                : VK_FORMAT_R8G8B8A8_UNORM,
-    };
-    out_texture->bytes = memcpy(malloc(out_texture->size), surface->pixels, out_texture->size);
-
-    SDL_DestroySurface(surface);
-    return true;
-
-error:
-    SDL_DestroySurface(surface);
-    return false;
-}
-#endif
-
 static bool nc__renderer_queue_buffer_upload_internal(
     nc_renderer_t* renderer,
     nc_renderer_buffer_t* buffer,
@@ -2940,18 +2829,15 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
     const VkFormat format,
     const int16_t width,
     const int16_t height,
-    const uint16_t layer_count,
-    const bool is_array
+    const uint16_t layer_count
 ) {
     NC_ASSERT(width > 0);
     NC_ASSERT(height > 0);
 
     nc_renderer_texture_t* result = calloc(1, sizeof(*result));
-    result->format = format;
     result->width = width;
     result->height = height;
     result->layer_count = layer_count;
-    result->is_array = is_array;
     // TODO: Does this affect transaction elimination in ARM?
     result->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -2983,7 +2869,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
             &(VkImageViewCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                 .image = result->image,
-                .viewType = is_array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
+                .viewType = layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
                 .format = format,
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3113,7 +2999,7 @@ static bool nc__renderer_draw_chunk(
         return true;
     }
 
-    NC_ASSERT(draw->texture->is_array);
+    NC_ASSERT(draw->texture->layer_count > 1);
 
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = *view_projection,
@@ -3349,7 +3235,7 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         } else if (draw_command->type == NC_RENDERER_OVERLAY_COMMAND_IMAGE) {
             texture = draw_command->image.texture;
             instance_count = 1;
-            if (!texture || texture->is_array) {
+            if (!texture || texture->layer_count > 1) {
                 continue;
             }
 
@@ -3393,7 +3279,7 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
             continue;
         }
 
-        if (!texture || texture->is_array) {
+        if (!texture || texture->layer_count > 1) {
             continue;
         }
         if (texture != bound_texture &&
@@ -3490,7 +3376,9 @@ static bool nc__renderer_draw_procedural_overlay(
     return true;
 }
 
-nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
+nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_manager_t* asset_manager) {
+    nc_texture_baked_asset_t crosshair_texture_asset = { 0 };
+
     nc_renderer_t* result = calloc(1, sizeof(*result));
     result->foreground = true;
     result->queue_family_index = UINT32_MAX;
@@ -3520,20 +3408,32 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info) {
             || !nc__renderer_create_sampler(result, &result->chunk_sampler)
             || !nc__renderer_create_sampler(result, &result->gui_sampler)
             || !nc__renderer_create_swapchain(result)
-            || !nc__renderer_create_pipelines(result)) {
+            || !nc__renderer_create_pipelines(result, asset_manager)) {
         goto error;
     }
 
-    result->procedural_overlay_crosshair_texture = nc_renderer_create_texture_2d_from_file(
+    if (!nc_asset_manager_get_texture_baked_asset(
+            asset_manager,
+            "novacube",
+            "crosshair",
+            NC_TEXTURE_TYPE_GUI,
+            &crosshair_texture_asset)) {
+        goto error;
+    }
+    result->procedural_overlay_crosshair_texture = nc_renderer_create_texture_from_baked_assets(
             result,
-            NC_RENDERER_TEXTURE_TYPE_DATA,
-            nc__renderer_crosshair_texture_path);
+            &crosshair_texture_asset,
+            1,
+            true);
     NC_CHECK_RESULT(result->procedural_overlay_crosshair_texture, "Failed to load the procedural crosshair texture.");
+
+    nc_asset_manager_texture_baked_asset_fini(&crosshair_texture_asset);
 
     SDL_Log("Vulkan renderer initialized on %s.", result->physical_device_properties.deviceName);
     return result;
 
 error:
+    nc_asset_manager_texture_baked_asset_fini(&crosshair_texture_asset);
     nc_renderer_fini(result);
     return NULL;
 }
@@ -3840,20 +3740,17 @@ error:
 
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
     nc_renderer_t* renderer,
-    const nc_renderer_texture_type_t type,
+    const bool is_color_data,
     const int16_t width,
     const int16_t height,
     const void* pixels
 ) {
-    NC_ASSERT(type == NC_RENDERER_TEXTURE_TYPE_COLOR || type == NC_RENDERER_TEXTURE_TYPE_DATA);
-
     nc_renderer_texture_t* result = nc__renderer_create_texture_object(
             renderer,
-            type == NC_RENDERER_TEXTURE_TYPE_COLOR ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+            is_color_data ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
             width,
             height,
-            1,
-            false);
+            1);
     if (!result) {
         return NULL;
     }
@@ -3867,92 +3764,65 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
     return result;
 }
 
-nc_renderer_texture_t* nc_renderer_create_texture_2d_from_file(
+nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
     nc_renderer_t* renderer,
-    const nc_renderer_texture_type_t type,
-    const char* path
+    const nc_texture_baked_asset_t* assets,
+    const uint16_t asset_count,
+    const bool is_color_data
 ) {
-    nc__renderer_texture_file_data_t texture_data;
-    if (!nc__renderer_load_texture_file(path, type, &texture_data)) {
-        return NULL;
-    }
-
-    nc_renderer_texture_t* texture = nc__renderer_create_texture_object(
-            renderer,
-            texture_data.format,
-            texture_data.width,
-            texture_data.height,
-            1,
-            false);
-    if (!texture) {
-        nc__renderer_free_texture_file_data(&texture_data);
-        return NULL;
-    }
-
-    const bool upload_result = nc__renderer_queue_texture_upload(
-            renderer,
-            texture,
-            0,
-            texture_data.bytes,
-            texture_data.size);
-    nc__renderer_free_texture_file_data(&texture_data);
-    if (!upload_result) {
-        nc__renderer_destroy_or_retire_texture(renderer, texture);
-        return NULL;
-    }
-
-    return texture;
-}
-
-nc_renderer_texture_t* nc_renderer_create_texture_array_from_files(
-    nc_renderer_t* renderer,
-    const nc_renderer_texture_type_t type,
-    const char* const* paths,
-    const uint16_t path_count
-) {
-    nc__renderer_texture_file_data_t texture_data;
-    if (!nc__renderer_load_texture_file(paths[0], type, &texture_data)) {
+    NC_ASSERT(asset_count >= 1 && asset_count <= 2048);
+    if (assets[0].width <= 0 || assets[0].height <= 0) {
+        NC_SET_ERROR("The first texture has invalid dimensions %dx%d.", assets[0].width, assets[0].height);
         return NULL;
     }
 
     nc_renderer_texture_t* result = nc__renderer_create_texture_object(
             renderer,
-            texture_data.format,
-            texture_data.width,
-            texture_data.height,
-            path_count,
-            true);
+#ifdef ANDROID
+            is_color_data ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
+#else
+            is_color_data ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+#endif
+            assets[0].width,
+            assets[0].height,
+            asset_count);
     if (!result) {
-        nc__renderer_free_texture_file_data(&texture_data);
         return NULL;
     }
 
-    bool upload_result = nc__renderer_queue_texture_upload(renderer, result, 0, texture_data.bytes, texture_data.size);
-    nc__renderer_free_texture_file_data(&texture_data);
-    if (!upload_result) {
-        nc__renderer_destroy_or_retire_texture(renderer, result);
-        return NULL;
-    }
+    for (uint16_t i = 0; i < asset_count; i++) {
+        const nc_texture_baked_asset_t* asset = &assets[i];
 
-    for (uint16_t i = 1; i < path_count; i++) {
-        if (!nc__renderer_load_texture_file(paths[i], type, &texture_data)) {
+        if (asset->width <= 0 || asset->height <= 0) {
+            NC_SET_ERROR("Texture #%d has invalid dimensions %dx%d.", i, asset->width, asset->height);
+            nc__renderer_destroy_or_retire_texture(renderer, result);
+            return NULL;
+        }
+        if (asset->width != assets[0].width || asset->height != assets[0].height) {
+            NC_SET_ERROR(
+                    "Texture #%d is %dx%d while the first texture is %dx%d.",
+                    i,
+                    asset->width,
+                    asset->height,
+                    assets[0].width,
+                    assets[0].height);
             nc__renderer_destroy_or_retire_texture(renderer, result);
             return NULL;
         }
 
-        const bool compatible =
-                texture_data.format == result->format &&
-                texture_data.width == result->width &&
-                texture_data.height == result->height;
-        if (!compatible) {
-            NC_SET_ERROR("Texture array layer %u does not match the first layer.", i);
-            nc__renderer_free_texture_file_data(&texture_data);
-            nc__renderer_destroy_or_retire_texture(renderer, result);
-            return NULL;
-        }
-
-        upload_result = nc__renderer_queue_texture_upload(renderer, result, i, texture_data.bytes, texture_data.size);
-        nc__renderer_free_texture_file_data(&texture_data);
+        const size_t upload_size =
+#ifdef ANDROID
+                ((size_t)asset->width + 3) / 4 * (((size_t)asset->height + 3) / 4) * 16;
+#else
+                (size_t)asset->width * (size_t)asset->height * 4;
+#endif
+        NC_ASSERT(upload_size <= UINT32_MAX);
+        const bool upload_result = nc__renderer_queue_texture_upload(
+                renderer,
+                result,
+                i,
+                asset->pixels,
+                (uint32_t)upload_size);
         if (!upload_result) {
             nc__renderer_destroy_or_retire_texture(renderer, result);
             return NULL;
@@ -4029,7 +3899,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->opaque_chunk_draws); i++) {
         const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->opaque_chunk_draws, i);
         if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
-            NC_ASSERT(draw.texture->is_array);
+            NC_ASSERT(draw.texture->layer_count > 1);
             if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
                 return false;
             }
@@ -4064,7 +3934,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->transparent_chunk_draws); i++) {
         const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->transparent_chunk_draws, i);
         if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
-            NC_ASSERT(draw.texture->is_array);
+            NC_ASSERT(draw.texture->layer_count > 1);
             if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
                 return false;
             }

@@ -20,23 +20,14 @@ NC_IGNORE_ALL_WARNINGS_END
 #include <novacube/terrain.h>
 #include <novacube/terrain_generation.h>
 
-#ifdef ANDROID
-#define NC__TERRAIN_ASSETS_BASE_PATH ""
-#define NC__TERRAIN_TEXTURE_EXTENSION ".astc"
-#else
-#define NC__TERRAIN_ASSETS_BASE_PATH "assets/"
-#define NC__TERRAIN_TEXTURE_EXTENSION ".png"
-#endif
-
-#define NC__TERRAIN_BLOCK_LIGHT_MASK 0x0f
-#define NC__TERRAIN_SKY_LIGHT_SHIFT 4
-
 #define TDS_TYPE light_node_queue
 #define TDS_BIT_COUNT NC_BLOCKS_PER_CHUNK
 #include <tds/bitset.h>
 
-#define NC__TERRAIN_LIGHT_MASK 0x0f
-#define NC__TERRAIN_LIGHT_CHANNEL_SHIFT 4
+enum {
+    NC__TERRAIN_LIGHT_MASK = 0x0f,
+    NC__TERRAIN_LIGHT_CHANNEL_SHIFT = 4,
+};
 
 typedef uint8_t nc__terrain_chunk_flags_t;
 enum {
@@ -208,15 +199,15 @@ static void nc__terrain_update_dirty_chunk_column(
             (void*)terrain);
 }
 
-static const char* nc__terrain_texture_paths[] = {
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/stone" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/dirt" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/grass" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/torch" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/torch-top" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/testbox" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/water" NC__TERRAIN_TEXTURE_EXTENSION,
-    NC__TERRAIN_ASSETS_BASE_PATH "textures/sand" NC__TERRAIN_TEXTURE_EXTENSION,
+static const char* nc__terrain_textures[] = {
+    "stone",
+    "dirt",
+    "grass",
+    "torch",
+    "torch_top",
+    "testbox",
+    "water",
+    "sand",
 };
 
 static void nc__terrain_mark_chunk_dirty(nc_terrain_t* terrain, nc_chunk_t* chunk) {
@@ -434,7 +425,7 @@ static void nc__terrain_queue_chunk_boundary_light_removal(nc_terrain_t* terrain
 }
 
 static void nc__terrain_seed_chunk_light(nc_terrain_t* terrain, nc_chunk_t* chunk) {
-    for (uint16_t index = 0; index < NC_BLOCKS_PER_CHUNK; index++) {
+    for (uint16_t index = 0; index < (uint16_t)NC_BLOCKS_PER_CHUNK; index++) {
         const nc_block_t* block = nc_block_registry_get(
                 terrain->block_registry,
                 (nc_block_type_t)chunk->blocks[index]);
@@ -798,7 +789,8 @@ static bool nc__terrain_remove_light(nc_terrain_t* terrain, const uint64_t deadl
                 continue;
             }
 
-            const uint8_t neighbor_light_level = nc__terrain_get_block_light(neighbor.chunk->light_levels[neighbor.index]);
+            const uint8_t neighbor_light_level = nc__terrain_get_block_light(
+                    neighbor.chunk->light_levels[neighbor.index]);
             if (!neighbor_light_level) {
                 continue;
             }
@@ -1472,14 +1464,28 @@ void nc_terrain_get_timing_stats(const nc_terrain_t* terrain, nc_terrain_timing_
     *stats = terrain->timing_stats;
 }
 
-nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
+nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer, nc_asset_manager_t* asset_manager) {
+    nc_texture_baked_asset_t terrain_texture_assets[NC_COUNTOF(nc__terrain_textures)] = { 0 };
+
     nc_terrain_t* result = calloc(1, sizeof(*result));
 
-    if (!((result->texture_array = nc_renderer_create_texture_array_from_files(
+    for (unsigned i = 0; i < NC_COUNTOF(terrain_texture_assets); i++) {
+        if (!nc_asset_manager_get_texture_baked_asset(
+                asset_manager,
+                "novacube",
+                nc__terrain_textures[i],
+                NC_TEXTURE_TYPE_BLOCK,
+                &terrain_texture_assets[i])) {
+            goto error;
+        }
+    }
+
+    result->texture_array = nc_renderer_create_texture_from_baked_assets(
             renderer,
-            NC_RENDERER_TEXTURE_TYPE_COLOR,
-            nc__terrain_texture_paths,
-            NC_COUNTOF(nc__terrain_texture_paths))))) {
+            terrain_texture_assets,
+            NC_COUNTOF(terrain_texture_assets),
+            true);
+    if (!result->texture_array) {
         goto error;
     }
 
@@ -1491,9 +1497,15 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer) {
     result->generator.noise_state.octaves = 3;
     result->generator.noise_state.fractal_type = FNL_FRACTAL_FBM;
 
+    for (unsigned i = 0; i < NC_COUNTOF(terrain_texture_assets); i++) {
+        nc_asset_manager_texture_baked_asset_fini(&terrain_texture_assets[i]);
+    }
     return result;
 
 error:
+    for (unsigned i = 0; i < NC_COUNTOF(terrain_texture_assets); i++) {
+        nc_asset_manager_texture_baked_asset_fini(&terrain_texture_assets[i]);
+    }
     nc_terrain_fini(result, renderer);
     return NULL;
 }

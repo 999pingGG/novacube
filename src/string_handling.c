@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 #include <novacube/standard_functions.h>
-#include <novacube/string_builder.h>
+#include <novacube/string_handling.h>
 
 void nc_string_builder_init(nc_string_builder_t* string_builder) {
     *string_builder = (nc_string_builder_t){ 0 };
@@ -46,4 +46,24 @@ void nc_string_builder_clear(nc_string_builder_t* string_builder) {
 void nc_string_builder_fini(nc_string_builder_t* string_builder) {
     free(string_builder->data);
     *string_builder = (nc_string_builder_t){ 0 };
+}
+
+bool nc_string_slice_equals_string(const nc_string_slice_t* slice, const char* string) {
+    const size_t length = strlen(string);
+    return slice->length == length && strncmp(slice->start, string, length) == 0;
+}
+
+void nc_scan_identifier(const char** current_position, nc_string_slice_t* slice) {
+    *slice = (nc_string_slice_t){
+        .start = *current_position,
+        .length = 0,
+    };
+
+    while (**current_position == '_'
+        || (**current_position >= 'A' && **current_position <= 'Z')
+        || (**current_position >= 'a' && **current_position <= 'z')
+        || (slice->length > 0 && (**current_position >= '0' && **current_position <= '9'))) {
+        slice->length++;
+        (*current_position)++;
+    }
 }

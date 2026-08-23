@@ -10,7 +10,7 @@
 #include <novacube/error_handling.h>
 #include <novacube/macros.h>
 #include <novacube/standard_functions.h>
-#include <novacube/string_builder.h>
+#include <novacube/string_handling.h>
 
 #define NC__CONFIGURATION_FILE "config.ini"
 #define NC__DOUBLE_DECIMAL_PLACES 13
@@ -41,14 +41,9 @@ NC_IGNORE_ALL_WARNINGS_END
 
 #define NC_DEFAULT_CONFIG_FILE_CONTENTS NC_CVAR_TABLE(NC__DEFAULT_CONFIG_FILE)
 
-typedef struct nc__string_slice_t {
-    const char* start;
-    size_t length;
-} nc__string_slice_t;
-
 typedef struct nc__config_key_value_t {
-    nc__string_slice_t key;
-    nc__string_slice_t value;
+    nc_string_slice_t key;
+    nc_string_slice_t value;
 } nc__config_key_value_t;
 
 typedef struct nc__enum_entry_t {
@@ -95,17 +90,12 @@ static void nc__skip_whitespace(const char** current_position) {
     }
 }
 
-static bool nc__string_slice_equals_string(const nc__string_slice_t* slice, const char* string) {
-    const size_t length = strlen(string);
-    return slice->length == length && strncmp(slice->start, string, length) == 0;
-}
-
-static void nc__skip_char_slice(nc__string_slice_t* slice) {
+static void nc__skip_char_slice(nc_string_slice_t* slice) {
     slice->start++;
     slice->length--;
 }
 
-static void nc__skip_whitespace_slice(nc__string_slice_t* slice) {
+static void nc__skip_whitespace_slice(nc_string_slice_t* slice) {
     while (slice->length && nc__is_whitespace_no_line_breaks(*slice->start)) {
         nc__skip_char_slice(slice);
     }
@@ -142,23 +132,8 @@ static void nc__skip_junk(const char** current_position) {
     }
 }
 
-static void nc__scan_identifier(const char** current_position, nc__string_slice_t* slice) {
-    *slice = (nc__string_slice_t){
-        .start = *current_position,
-        .length = 0,
-    };
-
-    while (     **current_position == '_'
-            || (**current_position >= 'A' && **current_position <= 'Z')
-            || (**current_position >= 'a' && **current_position <= 'z')
-            || (slice->length > 0 && (**current_position >= '0' && **current_position <= '9'))) {
-        slice->length++;
-        (*current_position)++;
-    }
-}
-
-static void nc__scan_configuration_value(const char** current_position, nc__string_slice_t* slice) {
-    *slice = (nc__string_slice_t){
+static void nc__scan_configuration_value(const char** current_position, nc_string_slice_t* slice) {
+    *slice = (nc_string_slice_t){
         .start = *current_position,
         .length = 0,
     };
@@ -172,7 +147,7 @@ static void nc__scan_configuration_value(const char** current_position, nc__stri
     }
 }
 
-static void nc__right_trim_slice(nc__string_slice_t* slice) {
+static void nc__right_trim_slice(nc_string_slice_t* slice) {
     const char* end = slice->start + slice->length;
     nc__skip_whitespace_and_line_breaks_inverse(slice->start, &end);
     slice->length = end - slice->start;
@@ -186,7 +161,7 @@ static bool nc__scan_configuration_line(const char** current_position, nc__confi
             return false;
         }
 
-        nc__scan_identifier(current_position, &key_value->key);
+        nc_scan_identifier(current_position, &key_value->key);
         if (key_value->key.length == 0) {
             // Failed to read a valid identifier, carry on to the next line.
             nc__skip_line(current_position);
@@ -213,7 +188,7 @@ static bool nc__scan_configuration_line(const char** current_position, nc__confi
     }
 }
 
-static bool nc__parse_int(nc__string_slice_t* slice, int* result) {
+static bool nc__parse_int(nc_string_slice_t* slice, int* result) {
     if (slice->length == 0) {
         return false;
     }
@@ -251,7 +226,7 @@ static bool nc__parse_int(nc__string_slice_t* slice, int* result) {
     return has_digit;
 }
 
-static bool nc__parse_uint8(nc__string_slice_t* slice, uint8_t* result) {
+static bool nc__parse_uint8(nc_string_slice_t* slice, uint8_t* result) {
     int n;
     if (!nc__parse_int(slice, &n) || n < 0 || n > UINT8_MAX) {
         return false;
@@ -261,7 +236,7 @@ static bool nc__parse_uint8(nc__string_slice_t* slice, uint8_t* result) {
     return true;
 }
 
-static bool nc__parse_uint16(nc__string_slice_t* slice, uint16_t* result) {
+static bool nc__parse_uint16(nc_string_slice_t* slice, uint16_t* result) {
     int n;
     if (!nc__parse_int(slice, &n) || n < 0 || n > UINT16_MAX) {
         return false;
@@ -271,7 +246,7 @@ static bool nc__parse_uint16(nc__string_slice_t* slice, uint16_t* result) {
     return true;
 }
 
-static bool nc__parse_usvec2(nc__string_slice_t* slice, vkm_usvec2* result) {
+static bool nc__parse_usvec2(nc_string_slice_t* slice, vkm_usvec2* result) {
     if (!nc__parse_uint16(slice, &result->x)) {
         return false;
     }
@@ -295,7 +270,7 @@ static bool nc__parse_usvec2(nc__string_slice_t* slice, vkm_usvec2* result) {
     return slice->length == 0;
 }
 
-static bool nc__parse_ubvec4(nc__string_slice_t* slice, vkm_ubvec4* result) {
+static bool nc__parse_ubvec4(nc_string_slice_t* slice, vkm_ubvec4* result) {
     if (!nc__parse_uint8(slice, &result->x)) {
         return false;
     }
@@ -341,7 +316,7 @@ static bool nc__parse_ubvec4(nc__string_slice_t* slice, vkm_ubvec4* result) {
     return slice->length == 0;
 }
 
-static bool nc__parse_double(nc__string_slice_t* slice, double* result) {
+static bool nc__parse_double(nc_string_slice_t* slice, double* result) {
     if (slice->length == 0) {
         return false;
     }
@@ -404,7 +379,7 @@ static bool nc__parse_double(nc__string_slice_t* slice, double* result) {
     return has_digit;
 }
 
-static bool nc__parse_enum(nc__string_slice_t* slice, const nc__enum_entry_t* entries, int* result) {
+static bool nc__parse_enum(nc_string_slice_t* slice, const nc__enum_entry_t* entries, int* result) {
     nc__right_trim_slice(slice);
 
     while (entries->string) {
@@ -467,41 +442,41 @@ static const nc__enum_entry_t nc__block_highlight_effect_entries[] = {
     { 0 },
 };
 
-static bool nc__parse_video_mode(nc__string_slice_t* slice, nc_video_mode_t* result) {
+static bool nc__parse_video_mode(nc_string_slice_t* slice, nc_video_mode_t* result) {
     return nc__parse_enum(slice, nc__video_mode_entries, (int*)result);
 }
 
-static bool nc__parse_gpu_memory_preference(nc__string_slice_t* slice, nc_gpu_memory_preference_t* result) {
+static bool nc__parse_gpu_memory_preference(nc_string_slice_t* slice, nc_gpu_memory_preference_t* result) {
     return nc__parse_enum(slice, nc__gpu_memory_preference_entries, (int*)result);
 }
 
-static bool nc__parse_touch_movement_mode(nc__string_slice_t* slice, nc_touch_movement_mode_t* result) {
+static bool nc__parse_touch_movement_mode(nc_string_slice_t* slice, nc_touch_movement_mode_t* result) {
     return nc__parse_enum(slice, nc__touch_movement_mode_entries, (int*)result);
 }
 
-static bool nc__parse_touch_camera_mode(nc__string_slice_t* slice, nc_touch_camera_mode_t* result) {
+static bool nc__parse_touch_camera_mode(nc_string_slice_t* slice, nc_touch_camera_mode_t* result) {
     return nc__parse_enum(slice, nc__touch_camera_mode_entries, (int*)result);
 }
 
-static bool nc__parse_block_highlight_effect(nc__string_slice_t* slice, nc_block_highlight_effect_t* result) {
+static bool nc__parse_block_highlight_effect(nc_string_slice_t* slice, nc_block_highlight_effect_t* result) {
     return nc__parse_enum(slice, nc__block_highlight_effect_entries, (int*)result);
 }
 
-static bool nc__parse_bool(nc__string_slice_t* slice, bool* result) {
+static bool nc__parse_bool(nc_string_slice_t* slice, bool* result) {
     nc__right_trim_slice(slice);
 
-    if (       nc__string_slice_equals_string(slice, "true")
-            || nc__string_slice_equals_string(slice, "1")
-            || nc__string_slice_equals_string(slice, "yes")
-            || nc__string_slice_equals_string(slice, "please")
-            || nc__string_slice_equals_string(slice, "ofc")) {
+    if (       nc_string_slice_equals_string(slice, "true")
+            || nc_string_slice_equals_string(slice, "1")
+            || nc_string_slice_equals_string(slice, "yes")
+            || nc_string_slice_equals_string(slice, "please")
+            || nc_string_slice_equals_string(slice, "ofc")) {
         *result = true;
         return true;
-    } else if (nc__string_slice_equals_string(slice, "false")
-            || nc__string_slice_equals_string(slice, "0")
-            || nc__string_slice_equals_string(slice, "no")
-            || nc__string_slice_equals_string(slice, "nope")
-            || nc__string_slice_equals_string(slice, "nah")) {
+    } else if (nc_string_slice_equals_string(slice, "false")
+            || nc_string_slice_equals_string(slice, "0")
+            || nc_string_slice_equals_string(slice, "no")
+            || nc_string_slice_equals_string(slice, "nope")
+            || nc_string_slice_equals_string(slice, "nah")) {
         *result = false;
         return true;
     }
@@ -646,7 +621,7 @@ static void nc__write_configuration_value(
     nc_string_builder_t* string_builder
 ) {
 #define X(type, name, _1, _2, _3, print_function, ...) \
-    if (nc__string_slice_equals_string(&key_value->key, #name)) { \
+    if (nc_string_slice_equals_string(&key_value->key, #name)) { \
         print_function(string_builder, nc_cvar_get_##name()); \
         return; \
     } else
@@ -693,9 +668,9 @@ bool nc_configuration_load(void) {
         nc__config_key_value_t key_value;
         while (nc__scan_configuration_line(&current_position, &key_value)) {
 #define NC__CONFIG_CASE(type, name, _1, _2, parse_function, ...) \
-    if (nc__string_slice_equals_string(&key_value.key, #name)) { \
+    if (nc_string_slice_equals_string(&key_value.key, #name)) { \
         type parsed_value; \
-        nc__string_slice_t value = key_value.value; \
+        nc_string_slice_t value = key_value.value; \
         if (parse_function(&value, &parsed_value)) { \
             nc__##name = parsed_value; \
         } \

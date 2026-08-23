@@ -10,7 +10,7 @@
 
 typedef struct nc_gui_context_t nc_gui_context_t;
 
-nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer);
+nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer, nc_asset_manager_t* asset_manager);
 // Refreshes and returns the framebuffer dimensions and safe area shared with player input.
 const nc_gui_view_t* nc_gui_get_view(nc_gui_context_t* context);
 // Updates Clay pointer state and returns whether the GUI captured the event.

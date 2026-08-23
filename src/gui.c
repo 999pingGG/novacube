@@ -10,13 +10,14 @@ NC_IGNORE_ALL_WARNINGS_BEGIN
 NC_IGNORE_ALL_WARNINGS_END
 #include <SDL3/SDL.h>
 
+#include <novacube/asset_manager.h>
 #include <novacube/cvar.h>
 #include <novacube/cvkm.h>
 #include <novacube/gui.h>
 #include <novacube/player_input.h>
 #include <novacube/renderer.h>
 #include <novacube/standard_functions.h>
-#include <novacube/string_builder.h>
+#include <novacube/string_handling.h>
 
 // Spleen 5x8, packed one bit per pixel into a 64x64 atlas. Character 127 is a diamond fallback.
 static const uint8_t nc__spleen_font_bits[512] = {
@@ -53,14 +54,6 @@ static const uint8_t nc__spleen_font_bits[512] = {
     0x22, 0xa5, 0x67, 0x12, 0x19, 0x84, 0xb5, 0x0f,   0x22, 0x99, 0x97, 0x9c, 0x10, 0x84, 0x00, 0x07,
     0xcc, 0x99, 0x94, 0xd0, 0x13, 0x84, 0x00, 0x07,   0x00, 0x00, 0x00, 0x0e, 0x60, 0x64, 0x00, 0x02,
 };
-
-#ifdef ANDROID
-#define NC__GUI_ASSETS_BASE_PATH ""
-#define NC__GUI_TEXTURE_EXTENSION ".astc"
-#else
-#define NC__GUI_ASSETS_BASE_PATH "assets/"
-#define NC__GUI_TEXTURE_EXTENSION ".png"
-#endif
 
 #define NC__GUI_FONT_WIDTH 5
 #define NC__GUI_FONT_HEIGHT 8
@@ -101,15 +94,15 @@ typedef struct nc_gui_context_t {
     uint64_t last_custom_warning;
 } nc_gui_context_t;
 
-static const char* nc__gui_control_texture_paths[NC_PLAYER_INPUT_CONTROL_COUNT] = {
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/left"        NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/right"       NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/up"          NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/down"        NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/up"          NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/down"        NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/place"       NC__GUI_TEXTURE_EXTENSION,
-    NC__GUI_ASSETS_BASE_PATH "textures/gui/remove"      NC__GUI_TEXTURE_EXTENSION,
+static const char* nc__gui_control_textures[NC_PLAYER_INPUT_CONTROL_COUNT] = {
+    "left",
+    "right",
+    "up",
+    "down",
+    "up",
+    "down",
+    "place",
+    "remove",
 };
 
 // GUI colors are treated as linear values in Clay's conventional 0..255 range. The sRGB
@@ -551,7 +544,7 @@ static void nc__gui_build_hud(nc_gui_context_t* context, const nc_player_input_o
     }
 }
 
-nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
+nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer, nc_asset_manager_t* asset_manager) {
     nc_gui_context_t* context = calloc(1, sizeof(*context));
     context->renderer = renderer;
     nc__gui_update_view(context);
@@ -579,7 +572,7 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     }
     context->font_texture = nc_renderer_create_rgba_texture_2d(
             renderer,
-            NC_RENDERER_TEXTURE_TYPE_DATA,
+            false,
             64,
             64,
             pixels);
@@ -588,10 +581,21 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer) {
     }
 
     for (uint32_t i = 0; i < NC_PLAYER_INPUT_CONTROL_COUNT; i++) {
-        context->control_textures[i] = nc_renderer_create_texture_2d_from_file(
+        nc_texture_baked_asset_t texture_asset;
+        if (!nc_asset_manager_get_texture_baked_asset(
+                asset_manager,
+                "novacube",
+                nc__gui_control_textures[i],
+                NC_TEXTURE_TYPE_GUI,
+                &texture_asset)) {
+            goto error;
+        }
+        context->control_textures[i] = nc_renderer_create_texture_from_baked_assets(
                 renderer,
-                NC_RENDERER_TEXTURE_TYPE_COLOR,
-                nc__gui_control_texture_paths[i]);
+                &texture_asset,
+                1,
+                true);
+        nc_asset_manager_texture_baked_asset_fini(&texture_asset);
         if (!context->control_textures[i]) {
             goto error;
         }
