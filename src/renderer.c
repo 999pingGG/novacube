@@ -835,10 +835,11 @@ static bool nc__renderer_select_physical_device(
     for (uint32_t i = 0; i < physical_device_count; i++) {
         uint32_t queue_family_index;
         bool khr_get_buffer_device_address = false;
+        const char* candidate_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
 
         if (!nc__renderer_find_required_extensions(
                 physical_devices[i],
-                enabled_device_extensions,
+                candidate_device_extensions,
                 &khr_get_buffer_device_address)
             || !nc__renderer_physical_device_supports_required_features(
                     physical_devices[i],
@@ -857,6 +858,7 @@ static bool nc__renderer_select_physical_device(
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
             renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
+            memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             break;
         }
 
@@ -889,6 +891,7 @@ static bool nc__renderer_select_physical_device(
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
             renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
+            memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             best_memory = nc__renderer_get_vram_size(physical_devices[i]);
         } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
             const VkDeviceSize current_memory = nc__renderer_get_vram_size(physical_devices[i]);
@@ -903,6 +906,7 @@ static bool nc__renderer_select_physical_device(
                 renderer->queue_family_index = queue_family_index;
                 renderer->physical_device_properties = physical_device_properties;
                 renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
+                memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
                 best_memory = current_memory;
             }
         }
