@@ -594,6 +594,7 @@ nc_gui_context_t* nc_gui_init(nc_renderer_t* renderer, nc_asset_manager_t* asset
                 renderer,
                 &texture_asset,
                 1,
+                NC_TEXTURE_TYPE_GUI,
                 true);
         nc_asset_manager_texture_baked_asset_fini(&texture_asset);
         if (!context->control_textures[i]) {

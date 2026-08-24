@@ -1484,6 +1484,7 @@ nc_terrain_t* nc_terrain_init(nc_renderer_t* renderer, nc_asset_manager_t* asset
             renderer,
             terrain_texture_assets,
             NC_COUNTOF(terrain_texture_assets),
+            NC_TEXTURE_TYPE_BLOCK,
             true);
     if (!result->texture_array) {
         goto error;

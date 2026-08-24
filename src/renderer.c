@@ -50,6 +50,8 @@ enum {
 // Need testing on more devices.
 #define NC__RENDERER_QUAD_EXPANSION_PIXELS 0.1f
 #define NC__RENDERER_DEPTH_FORMAT VK_FORMAT_D16_UNORM
+// Asset texture dimensions are limited to INT16_MAX, which can produce at most 15 mip levels.
+#define NC__RENDERER_MAX_TEXTURE_MIP_LEVELS 15
 
 #define NC__CHECK_VK_RESULT(result) do { \
     const VkResult nc__vk_result = (result); \
@@ -66,6 +68,31 @@ static float nc__renderer_srgb_to_linear(const float srgb) {
     }
 
     return powf((srgb + 0.055f) * (1.0f / 1.055f), 2.4f);
+}
+
+static uint8_t nc__renderer_mip_level_count(uint32_t width, uint32_t height) {
+    uint32_t largest_dimension = width > height ? width : height;
+    uint8_t result = 1;
+    while (largest_dimension > 1) {
+        largest_dimension >>= 1;
+        result++;
+    }
+    NC_ASSERT(result <= NC__RENDERER_MAX_TEXTURE_MIP_LEVELS);
+    return result;
+}
+
+static size_t nc__renderer_block_compressed_mip_chain_size(
+    uint32_t width,
+    uint32_t height,
+    const uint8_t mip_level_count
+) {
+    size_t result = 0;
+    for (uint8_t mip_level = 0; mip_level < mip_level_count; mip_level++) {
+        result += ((size_t)width + 3) / 4 * (((size_t)height + 3) / 4) * 16;
+        width = width > 1 ? width >> 1 : 1;
+        height = height > 1 ? height >> 1 : 1;
+    }
+    return result;
 }
 
 typedef uint8_t nc__renderer_upload_kind_t;
@@ -117,6 +144,7 @@ typedef struct nc_renderer_texture_t {
     int16_t width;
     int16_t height;
     uint16_t layer_count;
+    uint8_t mip_level_count;
 } nc_renderer_texture_t;
 
 typedef struct nc_renderer_buffer_t {
@@ -2351,14 +2379,18 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
     renderer->outline_block_highlight_pipeline = VK_NULL_HANDLE;
 }
 
-static bool nc__renderer_create_sampler(const nc_renderer_t* renderer, VkSampler* sampler) {
+static bool nc__renderer_create_sampler(
+    const nc_renderer_t* renderer,
+    const VkSamplerMipmapMode mipmap_mode,
+    VkSampler* sampler
+) {
     NC__CHECK_VK_RESULT(vkCreateSampler(
             renderer->device,
             &(VkSamplerCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                 .magFilter = VK_FILTER_NEAREST,
                 .minFilter = VK_FILTER_NEAREST,
-                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                .mipmapMode = mipmap_mode,
                 .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -2665,7 +2697,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             .image = texture->image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .levelCount = 1,
+                .levelCount = texture->mip_level_count,
                 .layerCount = texture->layer_count,
             },
         };
@@ -2719,22 +2751,39 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             }
         } else {
             nc_renderer_texture_t* texture = op.texture.texture;
+            // The upload operation owns one contiguous chain. Vulkan needs one region per mip, but copies every
+            // region with this single command instead of queueing and staging each level independently.
+            VkBufferImageCopy regions[NC__RENDERER_MAX_TEXTURE_MIP_LEVELS];
+            VkDeviceSize mip_offset = op.source_offset;
+            uint32_t mip_width = (uint32_t)texture->width;
+            uint32_t mip_height = (uint32_t)texture->height;
+            for (uint8_t mip_level = 0; mip_level < texture->mip_level_count; mip_level++) {
+                regions[mip_level] = (VkBufferImageCopy){
+                    .bufferOffset = mip_offset,
+                    .imageSubresource = {
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .mipLevel = mip_level,
+                        .baseArrayLayer = op.texture.layer,
+                        .layerCount = 1,
+                    },
+                    .imageExtent = { mip_width, mip_height, 1 },
+                };
+
+                const size_t mip_size = texture->mip_level_count > 1
+                        ? ((size_t)mip_width + 3) / 4 * (((size_t)mip_height + 3) / 4) * 16
+                        : op.size;
+                mip_offset += mip_size;
+                mip_width = mip_width > 1 ? mip_width >> 1 : 1;
+                mip_height = mip_height > 1 ? mip_height >> 1 : 1;
+            }
+            NC_ASSERT(mip_offset == (VkDeviceSize)op.source_offset + op.size);
             vkCmdCopyBufferToImage(
                     renderer->frame_command_buffer,
                     source_page->buffer,
                     texture->image,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    1,
-                    &(VkBufferImageCopy){
-                        .bufferOffset = op.source_offset,
-                        .imageSubresource = {
-                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                            .mipLevel = 0,
-                            .baseArrayLayer = op.texture.layer,
-                            .layerCount = 1,
-                        },
-                        .imageExtent = { (uint32_t)texture->width, (uint32_t)texture->height, 1 },
-                    });
+                    texture->mip_level_count,
+                    regions);
         }
     }
 
@@ -2835,15 +2884,18 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
     const VkFormat format,
     const int16_t width,
     const int16_t height,
-    const uint16_t layer_count
+    const uint16_t layer_count,
+    const uint8_t mip_level_count
 ) {
     NC_ASSERT(width > 0);
     NC_ASSERT(height > 0);
+    NC_ASSERT(mip_level_count > 0 && mip_level_count <= NC__RENDERER_MAX_TEXTURE_MIP_LEVELS);
 
     nc_renderer_texture_t* result = calloc(1, sizeof(*result));
     result->width = width;
     result->height = height;
     result->layer_count = layer_count;
+    result->mip_level_count = mip_level_count;
     // TODO: Does this affect transaction elimination in ARM?
     result->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -2854,7 +2906,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
                 .imageType = VK_IMAGE_TYPE_2D,
                 .format = format,
                 .extent = { (uint32_t)width, (uint32_t)height, 1 },
-                .mipLevels = 1,
+                .mipLevels = mip_level_count,
                 .arrayLayers = layer_count,
                 .samples = VK_SAMPLE_COUNT_1_BIT,
                 .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -2879,7 +2931,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
                 .format = format,
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .levelCount = 1,
+                    .levelCount = mip_level_count,
                     .layerCount = layer_count,
                 },
             },
@@ -3411,8 +3463,8 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
             || !nc__renderer_create_descriptor_pool(result)
             || !nc__renderer_create_frame_resources(result)
             || !nc__renderer_initialize_transfer_pages(result)
-            || !nc__renderer_create_sampler(result, &result->chunk_sampler)
-            || !nc__renderer_create_sampler(result, &result->gui_sampler)
+            || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_LINEAR, &result->chunk_sampler)
+            || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_NEAREST, &result->gui_sampler)
             || !nc__renderer_create_swapchain(result)
             || !nc__renderer_create_pipelines(result, asset_manager)) {
         goto error;
@@ -3430,6 +3482,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
             result,
             &crosshair_texture_asset,
             1,
+            NC_TEXTURE_TYPE_GUI,
             true);
     NC_CHECK_RESULT(result->procedural_overlay_crosshair_texture, "Failed to load the procedural crosshair texture.");
 
@@ -3756,6 +3809,7 @@ nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
             is_color_data ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
             width,
             height,
+            1,
             1);
     if (!result) {
         return NULL;
@@ -3774,14 +3828,16 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
     nc_renderer_t* renderer,
     const nc_texture_baked_asset_t* assets,
     const uint16_t asset_count,
+    const nc_texture_type_t texture_type,
     const bool is_color_data
 ) {
     NC_ASSERT(asset_count >= 1 && asset_count <= 2048);
-    if (assets[0].width <= 0 || assets[0].height <= 0) {
-        NC_SET_ERROR("The first texture has invalid dimensions %dx%d.", assets[0].width, assets[0].height);
-        return NULL;
-    }
+    NC_ASSERT(texture_type == NC_TEXTURE_TYPE_BLOCK || texture_type == NC_TEXTURE_TYPE_GUI);
+    NC_ASSERT(assets[0].width > 0 && assets[0].height > 0);
 
+    const uint8_t mip_level_count = texture_type == NC_TEXTURE_TYPE_BLOCK
+            ? nc__renderer_mip_level_count((uint32_t)assets[0].width, (uint32_t)assets[0].height)
+            : 1;
     nc_renderer_texture_t* result = nc__renderer_create_texture_object(
             renderer,
 #ifdef ANDROID
@@ -3791,7 +3847,8 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
 #endif
             assets[0].width,
             assets[0].height,
-            asset_count);
+            asset_count,
+            mip_level_count);
     if (!result) {
         return NULL;
     }
@@ -3816,8 +3873,10 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
             return NULL;
         }
 
-        const size_t upload_size =
-                ((size_t)asset->width + 3) / 4 * (((size_t)asset->height + 3) / 4) * 16;
+        const size_t upload_size = nc__renderer_block_compressed_mip_chain_size(
+                (uint32_t)asset->width,
+                (uint32_t)asset->height,
+                mip_level_count);
         NC_ASSERT(upload_size <= UINT32_MAX);
         const bool upload_result = nc__renderer_queue_texture_upload(
                 renderer,

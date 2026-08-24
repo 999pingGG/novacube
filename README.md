@@ -11,11 +11,11 @@ Install these prerequisites first:
 - SDL3 installed with its CMake package configuration.
 - The Vulkan SDK, including `glslc` on `PATH`.
 
-Texture compressors are optional and platform-specific; you only need the compressor for the asset platform you want
-to bake:
+Texture compressors are optional unless you bake textures. Install the tools required by the target asset platform:
 
 - Desktop: make `texconv` available on `PATH`, or pass its executable path with `--texconv`.
-- Mobile: make `astcenc-avx2` available on `PATH`, or pass any astcenc executable path with `--astcenc`.
+- Android: make both `texconv` and `astcenc-avx2` available on `PATH`, or pass their executable paths with `--texconv`
+  and `--astcenc`. Texconv downsizes the block texture mip levels and astcenc compresses them to ASTC.
 
 Then do a standard CMake build, for example:
 
@@ -62,9 +62,9 @@ novacube --build-assets <source-directory> [changed-asset ...]
 
 With no arguments, the executable runs the game. Omitting changed asset paths performs a full rebuild; otherwise each
 path is relative to the source directory. `-o` defaults to `assets.db`, and `--platform` defaults to `desktop`.
-Desktop baking uses texconv and mobile baking uses astcenc; the compressor for the other platform is not needed. By
-default, the baker resolves `texconv` or `astcenc-avx2` through `PATH`. Use `--texconv <executable>` or
-`--astcenc <executable>` to provide its path directly instead.
+Desktop baking uses texconv. Mobile baking requires both texconv and astcenc: texconv downsizes block texture mip
+inputs and astcenc compresses them. By default, the baker resolves `texconv` and `astcenc-avx2` through `PATH`. Use
+`--texconv <executable>` or `--astcenc <executable>` to provide their paths directly instead.
 
 `--debug` compiles shaders with debug information and disables optimization. `--strip-png-metadata` puts source PNGs on
 a diet by removing unnecessary metadata, including EXIF data, to preserve your privacy and debloat them. Automatic

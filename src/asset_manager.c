@@ -26,6 +26,8 @@ enum {
 #define NC__ASSET_MANAGER_IN_DATABASE_TEXTURE_FORMAT "2"
 #endif
 
+#define NC__ASSET_MANAGER_TEMPORARY_TEXTURE_PREFIX "novacube-tmp-"
+
 #define NC__CHECK_SQLITE_RESULT(database, expression) do { \
     const int nc__sqlite_result = (expression); \
     if (nc__sqlite_result != SQLITE_OK) { \
@@ -501,6 +503,30 @@ static size_t nc__asset_manager_block_compressed_payload_size(const uint32_t wid
     return ((size_t)width + 3) / 4 * (((size_t)height + 3) / 4) * 16;
 }
 
+static uint32_t nc__asset_manager_mip_level_count(uint32_t width, uint32_t height) {
+    uint32_t largest_dimension = width > height ? width : height;
+    uint32_t result = 1;
+    while (largest_dimension > 1) {
+        largest_dimension >>= 1;
+        result++;
+    }
+    return result;
+}
+
+static size_t nc__asset_manager_block_compressed_mip_chain_size(
+    uint32_t width,
+    uint32_t height,
+    const uint32_t mip_level_count
+) {
+    size_t result = 0;
+    for (uint32_t mip_level = 0; mip_level < mip_level_count; mip_level++) {
+        result += nc__asset_manager_block_compressed_payload_size(width, height);
+        width = width > 1 ? width >> 1 : 1;
+        height = height > 1 ? height >> 1 : 1;
+    }
+    return result;
+}
+
 static bool nc__asset_manager_validate_astc_output(
     const nc__asset_manager_source_asset_info_t* asset_info,
     const void* output,
@@ -569,11 +595,11 @@ static bool nc__asset_manager_validate_astc_output(
     return true;
 }
 
-static bool nc__asset_manager_build_texconv_output_paths(
+static bool nc__asset_manager_build_temporary_texture_paths(
     const nc__asset_manager_source_asset_info_t* asset_info,
     char output_directory[FILENAME_MAX],
-    char output_prefix[FILENAME_MAX],
-    char temporary_file[FILENAME_MAX]
+    char temporary_resized_file[FILENAME_MAX],
+    char temporary_compressed_file[FILENAME_MAX]
 ) {
     const char* database_file_name = asset_info->output_database_file;
     for (const char* character = asset_info->output_database_file; *character; character++) {
@@ -594,29 +620,24 @@ static bool nc__asset_manager_build_texconv_output_paths(
         output_directory[directory_length] = '\0';
     }
 
-    const int prefix_length = snprintf(
-            output_prefix,
+    const int resized_length = snprintf(
+            temporary_resized_file,
             FILENAME_MAX,
-            "%s.%.*s.%d.",
-            database_file_name,
-            (int)asset_info->mod_namespace.length,
-            asset_info->mod_namespace.start,
-            asset_info->texture_type);
-    if (prefix_length < 0 || prefix_length >= FILENAME_MAX) {
-        NC_SET_ERROR("The texconv output prefix is too long for %s.", asset_info->file_path);
-        return false;
-    }
-
-    const int temporary_file_length = snprintf(
-            temporary_file,
-            FILENAME_MAX,
-            "%s%s%.*s.tmp.dds",
+            "%s" NC__ASSET_MANAGER_TEMPORARY_TEXTURE_PREFIX "%.*s.png",
             output_directory,
-            output_prefix,
             (int)asset_info->asset_name.length,
             asset_info->asset_name.start);
-    if (temporary_file_length < 0 || temporary_file_length >= FILENAME_MAX) {
-        NC_SET_ERROR("The temporary DDS file path is too long for %s.", asset_info->file_path);
+    const int compressed_length = snprintf(
+            temporary_compressed_file,
+            FILENAME_MAX,
+            "%s" NC__ASSET_MANAGER_TEMPORARY_TEXTURE_PREFIX "%.*s.%s",
+            output_directory,
+            (int)asset_info->asset_name.length,
+            asset_info->asset_name.start,
+            asset_info->mobile ? "astc" : "dds");
+    if (resized_length < 0 || resized_length >= FILENAME_MAX
+            || compressed_length < 0 || compressed_length >= FILENAME_MAX) {
+        NC_SET_ERROR("A temporary texture path is too long for %s.", asset_info->file_path);
         return false;
     }
     return true;
@@ -628,6 +649,7 @@ static bool nc__asset_manager_validate_dds_output(
     const size_t output_size,
     const uint32_t source_width,
     const uint32_t source_height,
+    const uint32_t expected_mip_level_count,
     const void** pixels,
     size_t* pixels_size
 ) {
@@ -677,8 +699,11 @@ static bool nc__asset_manager_validate_dds_output(
             || misc_flags != 0
             || caps2 != 0
             || array_size != 1
-            || mip_count != 1) {
-        NC_SET_ERROR("Texconv did not produce one 2D image with one mip level for %s.", asset_info->file_path);
+            || mip_count != expected_mip_level_count) {
+        NC_SET_ERROR(
+                "Texconv did not produce one 2D image with %u mip level(s) for %s.",
+                expected_mip_level_count,
+                asset_info->file_path);
         return false;
     }
     if (width == 0 || height == 0 || width != source_width || height != source_height) {
@@ -692,7 +717,10 @@ static bool nc__asset_manager_validate_dds_output(
         return false;
     }
 
-    const size_t expected_pixels_size = nc__asset_manager_block_compressed_payload_size(width, height);
+    const size_t expected_pixels_size = nc__asset_manager_block_compressed_mip_chain_size(
+            width,
+            height,
+            expected_mip_level_count);
     if (output_size != NC__DDS_FILE_HEADER_SIZE + expected_pixels_size) {
         NC_SET_ERROR(
                 "Texconv produced an invalid payload size for %s: expected %zu bytes, got %zu.",
@@ -710,9 +738,13 @@ static bool nc__asset_manager_validate_dds_output(
 static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_asset_info_t* asset_info) {
     bool success = false;
     void* compressor_output = NULL;
+    void* mip_chain = NULL;
     void* compressed_pixels = NULL;
+    char output_directory[FILENAME_MAX];
     char temporary_file[FILENAME_MAX];
+    char temporary_resized_file[FILENAME_MAX];
     temporary_file[0] = '\0';
+    temporary_resized_file[0] = '\0';
 
     if (asset_info->strip_png_metadata && !nc__asset_manager_strip_png_metadata(asset_info->file_path)) {
         goto error;
@@ -733,66 +765,117 @@ static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_
                 INT16_MAX);
         goto error;
     }
+    if (!nc__asset_manager_build_temporary_texture_paths(
+            asset_info,
+            output_directory,
+            temporary_resized_file,
+            temporary_file)) {
+        goto error;
+    }
 
     const void* pixels = NULL;
     size_t pixels_size = 0;
     size_t compressor_output_size = 0;
+    const uint32_t mip_level_count = asset_info->texture_type == NC_TEXTURE_TYPE_BLOCK
+            ? nc__asset_manager_mip_level_count(width, height)
+            : 1;
     if (asset_info->mobile) {
-        const int temporary_file_length = snprintf(
+        // ASTC files contain one image, so concatenate their headerless payloads into the same mip-major layout used
+        // by DDS. Runtime loading can then decompress and copy the complete chain as one allocation.
+        pixels_size = nc__asset_manager_block_compressed_mip_chain_size(width, height, mip_level_count);
+        mip_chain = malloc(pixels_size);
+        size_t mip_chain_offset = 0;
+        uint32_t mip_width = width;
+        uint32_t mip_height = height;
+
+        for (uint32_t mip_level = 0; mip_level < mip_level_count; mip_level++) {
+            const char* mip_source_file = asset_info->file_path;
+            if (mip_level > 0) {
+                if (SDL_GetPathInfo(temporary_resized_file, NULL)) {
+                    NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_resized_file));
+                } else {
+                    SDL_ClearError();
+                }
+
+                char mip_width_string[16];
+                char mip_height_string[16];
+                snprintf(mip_width_string, sizeof(mip_width_string), "%u", mip_width);
+                snprintf(mip_height_string, sizeof(mip_height_string), "%u", mip_height);
+                const char* texconv_parameters[] = {
+                    asset_info->texconv_executable,
+                    "-nologo",
+                    "-y",
+                    "-w", mip_width_string,
+                    "-h", mip_height_string,
+                    "-m", "1",
+                    "-if", "BOX",
+                    "-srgb",
+                    "-f", "R8G8B8A8_UNORM_SRGB",
+                    "-ft", "PNG",
+                    "-o", output_directory,
+                    "-px", NC__ASSET_MANAGER_TEMPORARY_TEXTURE_PREFIX,
+                    "--",
+                    asset_info->file_path,
+                    NULL,
+                };
+                if (!nc__asset_manager_execute_process(texconv_parameters)) {
+                    goto error;
+                }
+                mip_source_file = temporary_resized_file;
+            }
+
+            if (SDL_GetPathInfo(temporary_file, NULL)) {
+                NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_file));
+            } else {
+                SDL_ClearError();
+            }
+
+            const char* astcenc_parameters[] = {
+                asset_info->astcenc_executable,
+                "-cs",  // sRGB, for linear use -cl
+                mip_source_file,
                 temporary_file,
-                sizeof(temporary_file),
-                "%s.%.*s.%d.%.*s.tmp.astc",
-                asset_info->output_database_file,
-                (int)asset_info->mod_namespace.length,
-                asset_info->mod_namespace.start,
-                asset_info->texture_type,
-                (int)asset_info->asset_name.length,
-                asset_info->asset_name.start);
-        if (temporary_file_length < 0 || temporary_file_length >= (int)sizeof(temporary_file)) {
-            NC_SET_ERROR("The temporary ASTC file path is too long for %s.", asset_info->file_path);
-            goto error;
-        }
-        const char* parameters[] = {
-            asset_info->astcenc_executable,
-            "-cs",  // sRGB, for linear use -cl
-            asset_info->file_path,
-            temporary_file,
-            "4x4",
-            "-exhaustive",
-            NULL,
-        };
-        if (SDL_GetPathInfo(temporary_file, NULL)) {
+                "4x4",
+                "-exhaustive",
+                "-decode_unorm8",
+                NULL,
+            };
+            if (!nc__asset_manager_execute_process(astcenc_parameters)) {
+                goto error;
+            }
+            if (mip_level > 0) {
+                NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_resized_file));
+            }
+
+            compressor_output = SDL_LoadFile(temporary_file, &compressor_output_size);
+            NC_CHECK_SDL_RESULT(compressor_output);
             NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_file));
-        } else {
-            SDL_ClearError();
+
+            const void* mip_pixels;
+            size_t mip_pixels_size;
+            if (!nc__asset_manager_validate_astc_output(
+                    asset_info,
+                    compressor_output,
+                    compressor_output_size,
+                    mip_width,
+                    mip_height,
+                    &mip_pixels,
+                    &mip_pixels_size)) {
+                goto error;
+            }
+            NC_ASSERT(mip_chain_offset + mip_pixels_size <= pixels_size);
+            memcpy((uint8_t*)mip_chain + mip_chain_offset, mip_pixels, mip_pixels_size);
+            mip_chain_offset += mip_pixels_size;
+            SDL_free(compressor_output);
+            compressor_output = NULL;
+
+            mip_width = mip_width > 1 ? mip_width >> 1 : 1;
+            mip_height = mip_height > 1 ? mip_height >> 1 : 1;
         }
-        if (!nc__asset_manager_execute_process(parameters)) {
-            goto error;
-        }
-        compressor_output = SDL_LoadFile(temporary_file, &compressor_output_size);
-        NC_CHECK_SDL_RESULT(compressor_output);
-        NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_file));
-        temporary_file[0] = '\0';
-        if (!nc__asset_manager_validate_astc_output(
-                asset_info,
-                compressor_output,
-                compressor_output_size,
-                width,
-                height,
-                &pixels,
-                &pixels_size)) {
-            goto error;
-        }
+
+        NC_ASSERT(mip_chain_offset == pixels_size);
+        pixels = mip_chain;
     } else {
-        char output_directory[FILENAME_MAX];
-        char output_prefix[FILENAME_MAX];
-        if (!nc__asset_manager_build_texconv_output_paths(
-                asset_info,
-                output_directory,
-                output_prefix,
-                temporary_file)) {
-            goto error;
-        }
         if (SDL_GetPathInfo(temporary_file, NULL)) {
             NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_file));
         } else {
@@ -802,15 +885,15 @@ static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_
             asset_info->texconv_executable,
             "-nologo",
             "-y",
-            "-m", "1",
+            "-m", asset_info->texture_type == NC_TEXTURE_TYPE_BLOCK ? "0" : "1",
+            "-if", "BOX",
             "-srgbi",
             "-f", "BC7_UNORM_SRGB",
             "-bc", "x",
             "-dx10",
             "-ft", "DDS",
             "-o", output_directory,
-            "-px", output_prefix,
-            "-sx", ".tmp",
+            "-px", NC__ASSET_MANAGER_TEMPORARY_TEXTURE_PREFIX,
             "--",
             asset_info->file_path,
             NULL,
@@ -821,13 +904,13 @@ static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_
         compressor_output = SDL_LoadFile(temporary_file, &compressor_output_size);
         NC_CHECK_SDL_RESULT(compressor_output);
         NC_CHECK_SDL_RESULT(SDL_RemovePath(temporary_file));
-        temporary_file[0] = '\0';
         if (!nc__asset_manager_validate_dds_output(
                 asset_info,
                 compressor_output,
                 compressor_output_size,
                 width,
                 height,
+                mip_level_count,
                 &pixels,
                 &pixels_size)) {
             goto error;
@@ -905,10 +988,14 @@ static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_
     success = true;
 
 error:
+    if (temporary_resized_file[0]) {
+        nc__asset_manager_remove_temporary_file_preserving_error(temporary_resized_file);
+    }
     if (temporary_file[0]) {
         nc__asset_manager_remove_temporary_file_preserving_error(temporary_file);
     }
     SDL_free(compressor_output);
+    free(mip_chain);
     free(compressed_pixels);
     return success;
 }
@@ -1775,7 +1862,13 @@ bool nc_asset_manager_get_texture_baked_asset(
                         INT16_MAX,
                         INT16_MAX);
             } else {
-                const size_t expected_size = nc__asset_manager_block_compressed_payload_size(width, height);
+                const uint32_t mip_level_count = type == NC_TEXTURE_TYPE_BLOCK
+                        ? nc__asset_manager_mip_level_count((uint32_t)width, (uint32_t)height)
+                        : 1;
+                const size_t expected_size = nc__asset_manager_block_compressed_mip_chain_size(
+                        (uint32_t)width,
+                        (uint32_t)height,
+                        mip_level_count);
                 if (expected_size != uncompressed_data_size) {
                     NC_SET_ERROR(
                             "Texture %s:%s has mismatched data size: expected %zu bytes, got %zu.",

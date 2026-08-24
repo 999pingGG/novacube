@@ -171,6 +171,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
         nc_renderer_t* renderer,
         const nc_texture_baked_asset_t* assets,
         uint16_t asset_count,
+        nc_texture_type_t texture_type,
         const bool is_color_data);
 void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture);
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame);
