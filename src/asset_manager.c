@@ -803,6 +803,7 @@ static bool nc__asset_manager_bake_texture_asset(const nc__asset_manager_source_
             "-nologo",
             "-y",
             "-m", "1",
+            "-srgbi",
             "-f", "BC7_UNORM_SRGB",
             "-bc", "x",
             "-dx10",
