@@ -663,6 +663,34 @@ static bool nc__renderer_extension_list_contains(
     return false;
 }
 
+static bool nc__renderer_format_supports_optimal_features(
+    VkPhysicalDevice physical_device,
+    const VkFormat format,
+    const VkFormatFeatureFlags required_features
+) {
+    VkFormatProperties properties;
+    vkGetPhysicalDeviceFormatProperties(physical_device, format, &properties);
+    return (properties.optimalTilingFeatures & required_features) == required_features;
+}
+
+static VkCompositeAlphaFlagBitsKHR nc__renderer_choose_composite_alpha(const VkCompositeAlphaFlagsKHR supported) {
+    static const VkCompositeAlphaFlagBitsKHR preferences[] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+    };
+    for (uint32_t i = 0; i < NC_COUNTOF(preferences); i++) {
+        if (supported & preferences[i]) {
+            return preferences[i];
+        }
+    }
+
+    // This must never happen per the spec.
+    NC_ASSERT(false);
+    return (VkCompositeAlphaFlagBitsKHR)0;
+}
+
 static bool nc__renderer_find_required_extensions(
     VkPhysicalDevice physical_device,
     const char** out_enabled_extensions,
@@ -713,9 +741,15 @@ error:
 }
 
 static bool nc__renderer_physical_device_supports_required_features(
+    const nc_renderer_t* renderer,
     VkPhysicalDevice physical_device,
+    const VkPhysicalDeviceProperties* properties,
     const bool khr_get_buffer_device_address
 ) {
+    if (properties->apiVersion < NC__RENDERER_VK_API_VERSION) {
+        return false;
+    }
+
     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
     };
@@ -736,6 +770,38 @@ static bool nc__renderer_physical_device_supports_required_features(
     }
 
     vkGetPhysicalDeviceFeatures2(physical_device, &features);
+
+    VkSurfaceCapabilitiesKHR surface_capabilities;
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            physical_device,
+            renderer->surface,
+            &surface_capabilities) != VK_SUCCESS) {
+        return false;
+    }
+
+    if (       !features.features.independentBlend
+            || !(surface_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+            || !nc__renderer_choose_composite_alpha(surface_capabilities.supportedCompositeAlpha)) {
+        return false;
+    }
+
+    const VkFormatFeatureFlags oit_format_features =
+              VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+            | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+    if (!nc__renderer_format_supports_optimal_features(
+                physical_device,
+                NC__RENDERER_DEPTH_FORMAT,
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            || !nc__renderer_format_supports_optimal_features(
+                    physical_device,
+                    VK_FORMAT_R16G16B16A16_SFLOAT,
+                    oit_format_features)
+            || !nc__renderer_format_supports_optimal_features(
+                    physical_device,
+                    VK_FORMAT_R16_SFLOAT,
+                    oit_format_features)) {
+        return false;
+    }
 
 #ifdef ANDROID
     if (!features.features.textureCompressionASTC_LDR) {
@@ -837,19 +903,21 @@ static bool nc__renderer_select_physical_device(
         bool khr_get_buffer_device_address = false;
         const char* candidate_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
 
+        VkPhysicalDeviceProperties physical_device_properties;
+        vkGetPhysicalDeviceProperties(physical_devices[i], &physical_device_properties);
+
         if (!nc__renderer_find_required_extensions(
                 physical_devices[i],
                 candidate_device_extensions,
                 &khr_get_buffer_device_address)
             || !nc__renderer_physical_device_supports_required_features(
+                    renderer,
                     physical_devices[i],
+                    &physical_device_properties,
                     khr_get_buffer_device_address)
             || !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
             continue;
         }
-
-        VkPhysicalDeviceProperties physical_device_properties;
-        vkGetPhysicalDeviceProperties(physical_devices[i], &physical_device_properties);
 
         if (selected_gpu == (int)i) {
             // Insuperable GPU.
@@ -1669,6 +1737,8 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
             &capabilities));
     renderer->surface_transform = capabilities.currentTransform;
 
+    NC_ASSERT(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+
     uint32_t format_count = 0;
     NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(
             renderer->physical_device,
@@ -1686,6 +1756,10 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
     if (!nc__renderer_choose_swapchain_format(formats, format_count, &chosen_format)) {
         goto error;
     }
+    NC_ASSERT(nc__renderer_format_supports_optimal_features(
+            renderer->physical_device,
+            chosen_format.format,
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT));
 
     VkExtent2D extent;
     if (!nc__renderer_get_swapchain_extent(renderer, &capabilities, &extent)) {
@@ -1702,6 +1776,9 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
         goto error;
     }
 
+    const VkCompositeAlphaFlagBitsKHR composite_alpha = nc__renderer_choose_composite_alpha(
+            capabilities.supportedCompositeAlpha);
+    NC_ASSERT(composite_alpha);
     // The spec states that a max image count of 0 means unlimited. We only want 3.
     const uint32_t max_image_count = capabilities.maxImageCount ? capabilities.maxImageCount : 3;
     // Ask for triple buffering.
@@ -1720,7 +1797,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
                 .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                 .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
                 .preTransform = renderer->surface_transform,
-                .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                .compositeAlpha = composite_alpha,
                 .presentMode = VK_PRESENT_MODE_FIFO_KHR,
                 .clipped = VK_TRUE,
                 .oldSwapchain = old_swapchain,
@@ -2893,6 +2970,7 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
 ) {
     NC_ASSERT(width > 0);
     NC_ASSERT(height > 0);
+    NC_ASSERT(layer_count > 0);
     NC_ASSERT(mip_level_count > 0 && mip_level_count <= NC__RENDERER_MAX_TEXTURE_MIP_LEVELS);
 
     nc_renderer_texture_t* result = calloc(1, sizeof(*result));
