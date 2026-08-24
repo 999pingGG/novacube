@@ -71,6 +71,22 @@ bool nc_argument_parser_parse(char** argv, nc_arguments_t* result) {
             }
 
             argument++;
+        } else if (strcmp(*argument, "--texconv") == 0) {
+            argument++;
+            if (NC__ARGUMENT_VALUE_IS_MISSING(argument)) {
+                NC_SET_ERROR("Missing the executable path for --texconv");
+                return false;
+            }
+            result->texconv_executable = *argument;
+            argument++;
+        } else if (strcmp(*argument, "--astcenc") == 0) {
+            argument++;
+            if (NC__ARGUMENT_VALUE_IS_MISSING(argument)) {
+                NC_SET_ERROR("Missing the executable path for --astcenc");
+                return false;
+            }
+            result->astcenc_executable = *argument;
+            argument++;
         } else if (strcmp(*argument, "--strip-png-metadata") == 0) {
             result->strip_png_metadata = true;
             argument++;

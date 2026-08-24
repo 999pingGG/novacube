@@ -709,8 +709,12 @@ static bool nc__renderer_physical_device_supports_required_features(
 
     vkGetPhysicalDeviceFeatures2(physical_device, &features);
 
-#if ANDROID
+#ifdef ANDROID
     if (!features.features.textureCompressionASTC_LDR) {
+        return false;
+    }
+#else
+    if (!features.features.textureCompressionBC) {
         return false;
     }
 #endif
@@ -930,8 +934,10 @@ static bool nc__renderer_create_device(
         .scalarBlockLayout = VK_TRUE,
     };
     enabled_features.pNext = &scalar_block_layout_features;
-#if ANDROID
+#ifdef ANDROID
     enabled_features.features.textureCompressionASTC_LDR = VK_TRUE;
+#else
+    enabled_features.features.textureCompressionBC = VK_TRUE;
 #endif
     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
@@ -3781,7 +3787,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
 #ifdef ANDROID
             is_color_data ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
 #else
-            is_color_data ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+            is_color_data ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK,
 #endif
             assets[0].width,
             assets[0].height,
@@ -3811,11 +3817,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
         }
 
         const size_t upload_size =
-#ifdef ANDROID
                 ((size_t)asset->width + 3) / 4 * (((size_t)asset->height + 3) / 4) * 16;
-#else
-                (size_t)asset->width * (size_t)asset->height * 4;
-#endif
         NC_ASSERT(upload_size <= UINT32_MAX);
         const bool upload_result = nc__renderer_queue_texture_upload(
                 renderer,

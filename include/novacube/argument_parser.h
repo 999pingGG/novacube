@@ -19,6 +19,8 @@ typedef enum nc_argument_action_t {
 typedef struct nc_arguments_t {
     char* source_assets_directory;
     char* output_database_file;
+    char* texconv_executable;
+    char* astcenc_executable;
     char** assets_to_build;
     int assets_to_build_count;
     nc_argument_action_t action;
