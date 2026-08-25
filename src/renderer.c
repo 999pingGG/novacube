@@ -136,6 +136,12 @@ typedef struct nc__renderer_retired_texture_t {
     VmaAllocation allocation;
 } nc__renderer_retired_texture_t;
 
+typedef struct nc__renderer_retired_swapchain_t {
+    VkSwapchainKHR swapchain;
+    VkSemaphore* present_semaphores;
+    uint32_t present_semaphore_count;
+} nc__renderer_retired_swapchain_t;
+
 typedef struct nc_renderer_texture_t {
     VkImage image;
     VmaAllocation allocation;
@@ -227,6 +233,10 @@ typedef struct nc__renderer_address_push_constants_t {
 #define TDS_VALUE_T nc__renderer_retired_texture_t
 #include <tds/vector.h>
 
+#define TDS_TYPE nc__renderer_retired_swapchain_vec
+#define TDS_VALUE_T nc__renderer_retired_swapchain_t
+#include <tds/vector.h>
+
 typedef struct nc__renderer_image_t {
     VkImage image;
     VmaAllocation allocation;
@@ -298,13 +308,26 @@ typedef struct nc_renderer_t {
     bool frame_in_progress;
     bool frame_fence_pending;
     bool frame_has_swapchain_image;
+    // Extension-free present retirement follows the acquire-based proof described by Khronos:
+    // https://docs.vulkan.org/samples/latest/samples/api/swapchain_recreation/README.html
+    // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
+    // This frame reacquired the replacement image chosen below; its submit waits on that acquisition.
+    bool frame_completes_present_retirement;
+    // The proof submit is pending; its frame fence must complete before retired swapchains are destroyed.
+    bool retired_swapchains_pending_destruction;
+    // A replacement image has been presented and selected as the retirement proof.
+    bool swapchain_retirement_probe_presented;
     uint32_t frame_swapchain_image_index;
+    // Image selected by the first successful presentation on the replacement swapchain.
+    uint32_t swapchain_retirement_probe_image_index;
 
     nc__renderer_transfer_page_vec transfer_pages;
 
     nc__renderer_upload_op_vec upload_ops;
     nc__renderer_retired_buffer_vec retired_buffers;
     nc__renderer_retired_texture_vec retired_textures;
+    // Every old generation waiting on the current replacement's acquire-based retirement proof.
+    nc__renderer_retired_swapchain_vec retired_swapchains;
     bool uploads_dirty;
 
     uint64_t frame_id;
@@ -1664,14 +1687,59 @@ error:
     return false;
 }
 
-static void nc__renderer_destroy_present_semaphores(nc_renderer_t* renderer) {
-    if (renderer->render_finished_semaphores) {
-        for (uint32_t i = 0; i < renderer->swapchain_image_count; i++) {
-            vkDestroySemaphore(renderer->device, renderer->render_finished_semaphores[i], NULL);
-        }
-        free((void*)renderer->render_finished_semaphores);
-        renderer->render_finished_semaphores = NULL;
+static void nc__renderer_destroy_present_semaphore_array(
+    const nc_renderer_t* renderer,
+    VkSemaphore* semaphores,
+    const uint32_t semaphore_count
+) {
+    if (!semaphores) {
+        return;
     }
+
+    for (uint32_t i = 0; i < semaphore_count; i++) {
+        vkDestroySemaphore(renderer->device, semaphores[i], NULL);
+    }
+    free(semaphores);
+}
+
+static void nc__renderer_destroy_present_semaphores(nc_renderer_t* renderer) {
+    nc__renderer_destroy_present_semaphore_array(
+            renderer,
+            renderer->render_finished_semaphores,
+            renderer->swapchain_image_count);
+    renderer->render_finished_semaphores = NULL;
+}
+
+static void nc__renderer_destroy_retired_swapchains(nc_renderer_t* renderer) {
+    for (uint32_t i = 0; i < nc__renderer_retired_swapchain_vec_count(&renderer->retired_swapchains); i++) {
+        const nc__renderer_retired_swapchain_t retired = nc__renderer_retired_swapchain_vec_get(
+                &renderer->retired_swapchains,
+                i);
+        nc__renderer_destroy_present_semaphore_array(
+                renderer,
+                retired.present_semaphores,
+                retired.present_semaphore_count);
+        vkDestroySwapchainKHR(renderer->device, retired.swapchain, NULL);
+    }
+    nc__renderer_retired_swapchain_vec_clear(&renderer->retired_swapchains);
+}
+
+static VkSwapchainKHR nc__renderer_retire_swapchain(nc_renderer_t* renderer) {
+    const VkSwapchainKHR swapchain = renderer->swapchain;
+    if (!swapchain) {
+        return VK_NULL_HANDLE;
+    }
+
+    nc__renderer_retired_swapchain_vec_append(
+            &renderer->retired_swapchains,
+            (nc__renderer_retired_swapchain_t){
+                .swapchain = swapchain,
+                .present_semaphores = renderer->render_finished_semaphores,
+                .present_semaphore_count = renderer->swapchain_image_count,
+            });
+    renderer->swapchain = VK_NULL_HANDLE;
+    renderer->render_finished_semaphores = NULL;
+    return swapchain;
 }
 
 static bool nc__renderer_create_present_semaphores(nc_renderer_t* renderer) {
@@ -1717,7 +1785,7 @@ static void nc__renderer_destroy_swapchain_images(nc_renderer_t* renderer) {
     renderer->swapchain_image_count = 0;
 }
 
-static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
+static void nc__renderer_destroy_current_swapchain(nc_renderer_t* renderer) {
     nc__renderer_destroy_swapchain_images(renderer);
 
     if (renderer->swapchain) {
@@ -1726,9 +1794,16 @@ static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
     }
 }
 
-static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
+static void nc__renderer_destroy_swapchain(nc_renderer_t* renderer) {
+    nc__renderer_destroy_current_swapchain(renderer);
+    nc__renderer_destroy_retired_swapchains(renderer);
+    renderer->frame_completes_present_retirement = false;
+    renderer->retired_swapchains_pending_destruction = false;
+    renderer->swapchain_retirement_probe_presented = false;
+}
+
+static bool nc__renderer_create_swapchain(nc_renderer_t* renderer, const VkSwapchainKHR old_swapchain) {
     VkSurfaceFormatKHR* formats = NULL;
-    VkSwapchainKHR old_swapchain = renderer->swapchain;
     VkSwapchainKHR new_swapchain = VK_NULL_HANDLE;
     VkSurfaceCapabilitiesKHR capabilities;
     NC__CHECK_VK_RESULT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
@@ -1763,10 +1838,6 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
 
     VkExtent2D extent;
     if (!nc__renderer_get_swapchain_extent(renderer, &capabilities, &extent)) {
-        if (old_swapchain) {
-            vkDestroySwapchainKHR(renderer->device, old_swapchain, NULL);
-            renderer->swapchain = VK_NULL_HANDLE;
-        }
         free(formats);
         return true;
     }
@@ -1804,13 +1875,10 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
             },
             NULL,
             &new_swapchain);
-    if (old_swapchain) {
-        vkDestroySwapchainKHR(renderer->device, old_swapchain, NULL);
-        renderer->swapchain = VK_NULL_HANDLE;
-    }
     NC__CHECK_VK_RESULT(create_result);
 
     renderer->swapchain = new_swapchain;
+    renderer->swapchain_retirement_probe_presented = false;
     renderer->swapchain_format = chosen_format.format;
     renderer->swapchain_extent.x = (uint16_t)extent.width;
     renderer->swapchain_extent.y = (uint16_t)extent.height;
@@ -1881,23 +1949,31 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer) {
 
 error:
     free(formats);
-    nc__renderer_destroy_swapchain(renderer);
+    // This replacement was never presented, so it is safe to destroy. Older generations still need their acquire
+    // proof and must remain in retired_swapchains.
+    nc__renderer_destroy_current_swapchain(renderer);
     return false;
 }
 
 static bool nc__renderer_recreate_swapchain(nc_renderer_t* renderer) {
-    nc__renderer_wait_idle(renderer);
+    // begin_frame has waited for our sole submission fence, so framebuffers, attachment images, and image views are
+    // no longer in use. Presentation is not covered by that fence; its swapchain and semaphores are retired below.
+    NC_ASSERT(!renderer->frame_fence_pending);
 
     if (renderer->surface_dirty) {
+        // Core Vulkan has no strict completion primitive for presentation on a lost surface. As at shutdown, device
+        // idle is the pragmatic extension-free fallback before destroying the old surface and its swapchains.
+        nc__renderer_wait_idle(renderer);
         nc__renderer_destroy_swapchain(renderer);
         if (!nc__renderer_create_surface(renderer)) {
             return false;
         }
-    } else {
-        nc__renderer_destroy_swapchain_images(renderer);
+        return nc__renderer_create_swapchain(renderer, VK_NULL_HANDLE);
     }
 
-    return nc__renderer_create_swapchain(renderer);
+    const VkSwapchainKHR old_swapchain = nc__renderer_retire_swapchain(renderer);
+    nc__renderer_destroy_swapchain_images(renderer);
+    return nc__renderer_create_swapchain(renderer, old_swapchain);
 }
 
 static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
@@ -3547,7 +3623,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
             || !nc__renderer_initialize_transfer_pages(result)
             || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_LINEAR, &result->chunk_sampler)
             || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_NEAREST, &result->gui_sampler)
-            || !nc__renderer_create_swapchain(result)
+            || !nc__renderer_create_swapchain(result, VK_NULL_HANDLE)
             || !nc__renderer_create_pipelines(result, asset_manager)) {
         goto error;
     }
@@ -3623,6 +3699,12 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     renderer->frame_fence_pending = false;
 
     nc__renderer_destroy_retired_resources(renderer);
+    if (renderer->retired_swapchains_pending_destruction) {
+        // The completed submission waited on the acquisition of an image previously presented by the replacement
+        // swapchain. Presentation of that image, and therefore every older swapchain, has finished.
+        nc__renderer_destroy_retired_swapchains(renderer);
+        renderer->retired_swapchains_pending_destruction = false;
+    }
 
     if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         nc__renderer_reset_and_trim_transfer_pages(renderer);
@@ -3644,6 +3726,7 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
     renderer->frame_in_progress = true;
 
     renderer->frame_has_swapchain_image = false;
+    renderer->frame_completes_present_retirement = false;
     renderer->frame_swapchain_image_index = 0;
     if (!renderer->foreground ||
             renderer->swapchain == VK_NULL_HANDLE ||
@@ -3682,6 +3765,10 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
 #endif
 
     renderer->frame_has_swapchain_image = true;
+    renderer->frame_completes_present_retirement =
+            renderer->swapchain_retirement_probe_presented
+            && renderer->frame_swapchain_image_index == renderer->swapchain_retirement_probe_image_index
+            && nc__renderer_retired_swapchain_vec_count(&renderer->retired_swapchains) > 0;
     return true;
 
 error:
@@ -3720,6 +3807,10 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
             },
             renderer->frame_fence));
     renderer->frame_fence_pending = true;
+    if (renderer->frame_completes_present_retirement) {
+        // Destruction waits until the next begin-frame fence wait, which proves the acquire semaphore wait completed.
+        renderer->retired_swapchains_pending_destruction = true;
+    }
 
     if (renderer->frame_has_swapchain_image) {
         const VkResult present_result = vkQueuePresentKHR(
@@ -3732,6 +3823,12 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
                     .pSwapchains = &renderer->swapchain,
                     .pImageIndices = &renderer->frame_swapchain_image_index,
                 });
+        if (!renderer->swapchain_retirement_probe_presented
+                && nc__renderer_retired_swapchain_vec_count(&renderer->retired_swapchains) > 0
+                && (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)) {
+            renderer->swapchain_retirement_probe_presented = true;
+            renderer->swapchain_retirement_probe_image_index = renderer->frame_swapchain_image_index;
+        }
         if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
             renderer->surface_dirty = true;
             renderer->swapchain_dirty = true;
@@ -3744,10 +3841,12 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
 
     renderer->frame_in_progress = false;
     renderer->frame_has_swapchain_image = false;
+    renderer->frame_completes_present_retirement = false;
     return true;
 
 error:
     renderer->frame_in_progress = false;
+    renderer->frame_completes_present_retirement = false;
     return false;
 }
 
@@ -4174,6 +4273,7 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
     nc__renderer_retired_buffer_vec_fini(&renderer->retired_buffers);
     nc__renderer_retired_texture_vec_fini(&renderer->retired_textures);
+    nc__renderer_retired_swapchain_vec_fini(&renderer->retired_swapchains);
     if (renderer->window) {
         SDL_DestroyWindow(renderer->window);
     }
