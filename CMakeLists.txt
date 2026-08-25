@@ -34,7 +34,9 @@ set(NC_SOURCES
         vendor/sqlite3/sqlite3.c
         vendor/zstd/zstd.c)
 if(NOT ANDROID)
-    list(APPEND NC_SOURCES src/argument_parser.c)
+    list(APPEND NC_SOURCES
+            src/argument_parser.c
+            src/asset_baker.c)
 endif()
 
 set(NC_IGNORED_WARNINGS_FILES

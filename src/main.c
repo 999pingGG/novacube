@@ -9,6 +9,7 @@
 
 #ifndef ANDROID
 #include <novacube/argument_parser.h>
+#include <novacube/asset_baker.h>
 #endif
 #include <novacube/asset_manager.h>
 #include <novacube/build_info.h>
@@ -196,7 +197,20 @@ SDL_AppResult SDL_AppInit(void** app_state, const int argc, char** argv) {
 
 #ifndef ANDROID
     if (arguments.action == NC_ARGUMENT_ACTION_BUILD_ASSETS) {
-        const bool result = nc_asset_manager_bake_assets(&arguments);
+        const nc_asset_baker_options_t options = {
+            .source_assets_directory = arguments.source_assets_directory,
+            .output_database_file = arguments.output_database_file,
+            .texconv_executable = arguments.texconv_executable,
+            .astcenc_executable = arguments.astcenc_executable,
+            .assets_to_build = arguments.assets_to_build,
+            .assets_to_build_count = arguments.assets_to_build_count,
+            .platform = arguments.platform == NC_ARGUMENT_PLATFORM_MOBILE
+                    ? NC_ASSET_BAKER_PLATFORM_MOBILE
+                    : NC_ASSET_BAKER_PLATFORM_DESKTOP,
+            .debug = arguments.debug,
+            .strip_png_metadata = arguments.strip_png_metadata,
+        };
+        const bool result = nc_asset_baker_bake_assets(&options);
         if (!result) {
             SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "%s", SDL_GetError());
             return SDL_APP_FAILURE;
