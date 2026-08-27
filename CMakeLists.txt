@@ -35,10 +35,16 @@ set(NC_SQLITE_COMPILE_DEFINITIONS
         SQLITE_OMIT_UTF16)
 
 set(NC_COMMON_SOURCES
+        include/novacube/error_handling.h
+        include/novacube/standard_functions.h
+        include/novacube/string_handling.h
         src/error_handling.c
         src/string_handling.c
         vendor/sqlite3/sqlite3.c
-        vendor/zstd/zstd.c)
+        vendor/sqlite3/sqlite3.h
+        vendor/zstd/zstd.c
+        vendor/zstd/zstd.h
+        vendor/zstd/zstd_errors.h)
 set(NC_COMMON_INCLUDE_DIRECTORIES
         include
         vendor/sqlite3
@@ -89,6 +95,9 @@ if(NC_BUILD_ASSET_BAKER_ONLY)
     endif()
 
     add_executable(novacube_asset_baker
+            include/novacube/argument_parser.h
+            include/novacube/asset_baker.h
+            include/novacube/asset_types.h
             src/argument_parser.c
             src/asset_baker.c
             src/asset_baker_main.c
@@ -102,6 +111,24 @@ if(NC_BUILD_ASSET_BAKER_ONLY)
 endif()
 
 set(NC_SOURCES
+        include/novacube/asset_manager.h
+        include/novacube/asset_types.h
+        include/novacube/block.h
+        include/novacube/build_info.h
+        include/novacube/camera.h
+        include/novacube/chunk.h
+        include/novacube/cvar.h
+        include/novacube/cvkm.h
+        include/novacube/entity_command.h
+        include/novacube/gui.h
+        include/novacube/gui_view.h
+        include/novacube/intrinsics.h
+        include/novacube/macros.h
+        include/novacube/mesher.h
+        include/novacube/player_input.h
+        include/novacube/renderer.h
+        include/novacube/terrain.h
+        include/novacube/terrain_generation.h
         src/asset_manager.c
         src/block.c
         src/block_meshing.c
@@ -118,12 +145,21 @@ set(NC_SOURCES
         src/terrain.c
         src/terrain_generation.c
         src/vma_implementation.cpp
+        vendor/clay/clay.h
+        vendor/cvkm/cvkm.h
+        vendor/FastNoiseLite/FastNoiseLite.h
+        vendor/rapidhash/rapidhash.h
+        vendor/vma/vk_mem_alloc.h
+        vendor/volk/volk.h
         ${NC_COMMON_SOURCES})
 if(ANDROID)
     list(APPEND NC_SOURCES
+            include/novacube/android_asset_vfs.h
             src/android_asset_vfs.c)
 else()
     list(APPEND NC_SOURCES
+            include/novacube/argument_parser.h
+            include/novacube/asset_baker.h
             src/argument_parser.c
             src/asset_baker.c)
 endif()
