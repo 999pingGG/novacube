@@ -507,7 +507,7 @@ bool nc_player_input_handle_event(
         case SDL_EVENT_KEY_DOWN:
             if (event->key.scancode >= SDL_SCANCODE_MODE) {
                 // Ignore multimedia and mobile scancodes. Notably, the back button in mobile devices.
-                return false;
+                return true;
             }
 
             switch (event->key.scancode) {
