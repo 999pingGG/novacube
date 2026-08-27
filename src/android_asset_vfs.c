@@ -43,6 +43,7 @@ static int nc__android_asset_close(sqlite3_file* sqlite_file) {
     nc__android_asset_file_t* file = (nc__android_asset_file_t*)sqlite_file;
     if (file->mapping) {
         const int unmap_result = munmap(file->mapping, file->mapping_size);
+        (void)unmap_result;
         NC_ASSERT(unmap_result == 0);
     }
     *file = (nc__android_asset_file_t){ 0 };
