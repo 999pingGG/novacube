@@ -44,6 +44,7 @@ enum {
     NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS = 256,
     NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT = 16,
     NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET = 0,
+    NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET = 8,
     NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET = 16,
 };
 // TODO: Maybe this value could be tuned down for devices with a `subPixelPrecisionBits` property higher than 4.
@@ -3569,7 +3570,6 @@ static bool nc__renderer_draw_procedural_overlay(
         return false;
     }
 
-    nc__renderer_set_viewport_and_scissor(renderer, NULL);
     vkCmdPushConstants(
             renderer->frame_command_buffer,
             renderer->pipeline_layout,
@@ -3578,17 +3578,97 @@ static bool nc__renderer_draw_procedural_overlay(
             sizeof(push_constants),
             &push_constants);
 
+    const vkm_usvec2 framebuffer_size = nc_renderer_get_framebuffer_size(renderer);
     vkCmdBindPipeline(
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->procedural_overlay_invert_pipeline);
-    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+
+    // Draw each active ring inside its bounding-box scissor.
+    for (uint32_t i = 0; i < 2; i++) {
+        if (!draw->analog_sticks_active[i] ||
+                draw->analog_stick_ring_radius <= 0.0f || draw->analog_stick_ring_thickness <= 0.0f) {
+            continue;
+        }
+
+        const float outer_radius = draw->analog_stick_ring_radius + draw->analog_stick_ring_thickness * 0.5f;
+        const vkm_vec2 position = draw->analog_stick_ring_positions[i];
+        const SDL_Rect scissor = nc__renderer_gui_scissor(
+                (SDL_FRect){
+                    .x = position.x - outer_radius,
+                    .y = position.y - outer_radius,
+                    .w = outer_radius * 2.0f,
+                    .h = outer_radius * 2.0f,
+                },
+                framebuffer_size);
+        if (scissor.w <= 0 || scissor.h <= 0) {
+            continue;
+        }
+
+        nc__renderer_set_viewport_and_scissor(renderer, &scissor);
+        vkCmdPushConstants(
+                renderer->frame_command_buffer,
+                renderer->pipeline_layout,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
+                sizeof(i),
+                &i);
+        vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    }
+
+    // Ditto for the crosshair.
+    const SDL_FRect crosshair_bounds = {
+        .x = ((float)framebuffer_size.x - draw->crosshair_size) * 0.5f,
+        .y = ((float)framebuffer_size.y - draw->crosshair_size) * 0.5f,
+        .w = draw->crosshair_size,
+        .h = draw->crosshair_size,
+    };
+    const SDL_Rect crosshair_scissor = nc__renderer_gui_scissor(crosshair_bounds, framebuffer_size);
+    if (crosshair_scissor.w > 0 && crosshair_scissor.h > 0) {
+        const uint32_t crosshair_element = 2;
+        nc__renderer_set_viewport_and_scissor(renderer, &crosshair_scissor);
+        vkCmdPushConstants(
+                renderer->frame_command_buffer,
+                renderer->pipeline_layout,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
+                sizeof(crosshair_element),
+                &crosshair_element);
+        vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    }
 
     vkCmdBindPipeline(
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->procedural_overlay_stick_pipeline);
-    vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    for (uint32_t i = 0; i < 2; i++) {
+        if (!draw->analog_sticks_active[i] || draw->analog_stick_radius <= 0.0f) {
+            continue;
+        }
+
+        const vkm_vec2 position = draw->analog_stick_positions[i];
+        const SDL_Rect scissor = nc__renderer_gui_scissor(
+                (SDL_FRect){
+                    .x = position.x - draw->analog_stick_radius,
+                    .y = position.y - draw->analog_stick_radius,
+                    .w = draw->analog_stick_radius * 2.0f,
+                    .h = draw->analog_stick_radius * 2.0f,
+                },
+                framebuffer_size);
+        if (scissor.w <= 0 || scissor.h <= 0) {
+            continue;
+        }
+
+        nc__renderer_set_viewport_and_scissor(renderer, &scissor);
+        vkCmdPushConstants(
+                renderer->frame_command_buffer,
+                renderer->pipeline_layout,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
+                sizeof(i),
+                &i);
+        vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
+    }
     return true;
 }
 

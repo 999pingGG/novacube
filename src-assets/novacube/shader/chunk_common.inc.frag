@@ -29,14 +29,31 @@ layout(push_constant) uniform push_constants {
 
 const float ambient_intensity = 0.01;
 const float ambient_occlusion_curve[4] = float[4](1.0, 0.7, 0.45, 0.2);
+// pow(float(level) / 15.0, 2.2)
+const float direct_light_curve[16] = float[16](
+        0,
+        0.00258582559623417,
+        0.0118813344348137,
+        0.0289911865471078,
+        0.0545922772817603,
+        0.0891935068622478,
+        0.1332085131843,
+        0.186988508758844,
+        0.2508402364364,
+        0.325036962521076,
+        0.409825738436323,
+        0.505432468828216,
+        0.612065599865624,
+        0.729918893352071,
+        0.859173569658532,
+        1);
 
 float ambient_occlusion_intensity(uint occlusion) {
     return ambient_occlusion_curve[occlusion];
 }
 
 float direct_light_level_intensity(uint level) {
-    float normalized_level = float(level) * (1.0 / 15.0);
-    return pow(normalized_level, 2.2);
+    return direct_light_curve[level];
 }
 
 float combined_light_intensity(uint block_level, uint sky_level) {

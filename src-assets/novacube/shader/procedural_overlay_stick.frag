@@ -9,6 +9,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly 
 };
 
 layout(push_constant) uniform push_constants {
+    layout(offset = 8) uint element;
     layout(offset = 16) procedural_overlay_uniforms uniforms;
 } pc;
 
@@ -31,8 +32,7 @@ bool in_stick(vec2 position, vec4 stick) {
 
 void main() {
     vec2 position = gl_FragCoord.xy;
-    if (       !in_stick(position, pc.uniforms.sticks[0])
-            && !in_stick(position, pc.uniforms.sticks[1])) {
+    if (!in_stick(position, pc.uniforms.sticks[pc.element])) {
         discard;
     }
 

@@ -11,6 +11,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly 
 };
 
 layout(push_constant) uniform push_constants {
+    layout(offset = 8) uint element;
     layout(offset = 16) procedural_overlay_uniforms uniforms;
 } pc;
 
@@ -40,10 +41,19 @@ bool in_crosshair(vec2 position) {
 
 void main() {
     vec2 position = gl_FragCoord.xy;
-    if (       !in_ring(position, pc.uniforms.rings[0])
-            && !in_ring(position, pc.uniforms.rings[1])
-            && !in_crosshair(position)) {
-        discard;
+    if (pc.element == 2) {
+        if (!in_crosshair(position)) {
+            discard;
+        }
+    } else {
+        if (!in_ring(position, pc.uniforms.rings[pc.element])) {
+            discard;
+        }
+
+        // Separate scissored draws must still invert the union of the shapes only once where they overlap.
+        if (in_crosshair(position) || (pc.element == 1 && in_ring(position, pc.uniforms.rings[0]))) {
+            discard;
+        }
     }
 
     out_color = vec4(1.0);
