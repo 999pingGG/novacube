@@ -1,11 +1,12 @@
-# This script runs on every default desktop build after the game executable is available. It keeps a compact snapshot
-# of src-assets and invokes the game in asset-compiling mode only when that snapshot changes. CMake variables are used
-# for all paths so the same script works with single-configuration generators such as Ninja and multi-configuration
-# generators such as Visual Studio.
+# This script runs from the desktop asset target or an Android Gradle bake task after a compatible host asset compiler
+# is available. It keeps a compact snapshot of src-assets and invokes that compiler only when the snapshot changes.
+# CMake variables keep the scanner independent of the caller and generator. Repository paths are derived from this
+# script's location so callers only provide values that actually vary between build contexts.
+
+get_filename_component(NC_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(NC_SOURCE_ASSET_DIR "${NC_SOURCE_DIR}/src-assets")
 
 foreach(required_variable IN ITEMS
-        NC_SOURCE_DIR
-        NC_SOURCE_ASSET_DIR
         NC_ASSET_STATE_FILE
         NC_ASSET_COMPILER
         NC_OUTPUT_ASSET_DATABASE)
@@ -13,6 +14,19 @@ foreach(required_variable IN ITEMS
         message(FATAL_ERROR "${required_variable} must be defined.")
     endif()
 endforeach()
+
+if(NOT DEFINED NC_ASSET_PLATFORM)
+    set(NC_ASSET_PLATFORM desktop)
+endif()
+if(NOT NC_ASSET_PLATFORM STREQUAL "desktop" AND NOT NC_ASSET_PLATFORM STREQUAL "mobile")
+    message(FATAL_ERROR "NC_ASSET_PLATFORM must be desktop or mobile.")
+endif()
+if(NC_DEBUG)
+    set(asset_debug_signature 1)
+else()
+    set(asset_debug_signature 0)
+endif()
+set(asset_build_signature "platform=${NC_ASSET_PLATFORM};debug=${asset_debug_signature}")
 
 # Discovering the files at build time, rather than CMake configuration time, makes additions and deletions visible
 # without regenerating the CMake project. The scan is repeated after baking because PNG metadata stripping can rewrite
@@ -27,7 +41,7 @@ macro(nc_collect_source_asset_state)
     # Each state line is: <whole-second modification time> <size in bytes> <relative path>. This avoids reading asset
     # contents on every build for hashing and comparison. The size also catches most changes that happen too quickly to
     # produce a new timestamp.
-    set(current_state "")
+    set(current_state "signature ${asset_build_signature}\n")
     foreach(asset IN LISTS source_assets)
         file(TIMESTAMP "${NC_SOURCE_ASSET_DIR}/${asset}" asset_timestamp "%s" UTC)
         file(SIZE "${NC_SOURCE_ASSET_DIR}/${asset}" asset_size)
@@ -47,13 +61,13 @@ set(rebuild_all FALSE)
 set(changed_assets "")
 
 # No previous state means this is the first asset build for the current build configuration. Passing the source root
-# without any changed paths signals that the game should rebuild everything.
+# without any changed paths signals that the asset compiler should rebuild everything.
 if(NOT EXISTS "${NC_ASSET_STATE_FILE}" OR NOT EXISTS "${NC_OUTPUT_ASSET_DATABASE}")
     set(rebuild_all TRUE)
 else()
     file(READ "${NC_ASSET_STATE_FILE}" previous_state)
 
-    # The common case ends here after one metadata scan and a string comparison; the game is not started.
+    # The common case ends here after one metadata scan and a string comparison; the asset compiler is not started.
     if(previous_state STREQUAL current_state)
         return()
     endif()
@@ -61,8 +75,18 @@ else()
     # Parse the previous snapshot into a lookup table. A malformed or obsolete state format cannot be compared safely,
     # so fall back to a full rebuild instead of risking stale output.
     file(STRINGS "${NC_ASSET_STATE_FILE}" previous_state_lines)
+    if(NOT previous_state_lines)
+        set(rebuild_all TRUE)
+    else()
+        list(POP_FRONT previous_state_lines previous_signature)
+        if(NOT previous_signature STREQUAL "signature ${asset_build_signature}")
+            set(rebuild_all TRUE)
+        endif()
+    endif()
     foreach(line IN LISTS previous_state_lines)
-        if(NOT line MATCHES "^([0-9]+) ([0-9]+) (.*)$")
+        if(rebuild_all)
+            break()
+        elseif(NOT line MATCHES "^([0-9]+) ([0-9]+) (.*)$")
             set(rebuild_all TRUE)
             break()
         endif()
@@ -134,6 +158,7 @@ set(COMPILER_COMMAND
         "${NC_ASSET_COMPILER}"
         --build-assets "${NC_SOURCE_ASSET_DIR}" ${asset_arguments}
         -o "${NC_OUTPUT_ASSET_DATABASE}"
+        --platform "${NC_ASSET_PLATFORM}"
         --strip-png-metadata)
 if(NC_DEBUG)
     list(APPEND COMPILER_COMMAND --debug)

@@ -166,7 +166,7 @@ static void nc__asset_baker_remove_temporary_file_preserving_error(const char* f
     } else {
         SDL_ClearError();
     }
-    SDL_free(original_error);
+    free(original_error);
 }
 
 static bool nc__asset_baker_compress(
@@ -195,6 +195,7 @@ static bool nc__asset_baker_compress(
 
     if (!success) {
         free(*compressed_data);
+        *compressed_data = NULL;
     }
     return success;
 }
@@ -275,6 +276,11 @@ static bool nc__asset_baker_bake_shader_asset(const nc__asset_baker_source_asset
     success = true;
 
 error:
+    if (!success) {
+        // SQLITE_STATIC bindings must be released before their backing allocations or borrowed slices expire.
+        sqlite3_reset(asset_info->database_context.insert_shader_asset);
+        sqlite3_clear_bindings(asset_info->database_context.insert_shader_asset);
+    }
     free(compressed);
     SDL_free(compiler_output);
     return success;
@@ -942,6 +948,11 @@ static bool nc__asset_baker_bake_texture_asset(const nc__asset_baker_source_asse
     success = true;
 
 error:
+    if (!success) {
+        // SQLITE_STATIC bindings must be released before their backing allocations or borrowed slices expire.
+        sqlite3_reset(asset_info->database_context.insert_texture_asset);
+        sqlite3_clear_bindings(asset_info->database_context.insert_texture_asset);
+    }
     if (temporary_resized_file[0]) {
         nc__asset_baker_remove_temporary_file_preserving_error(temporary_resized_file);
     }

@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+def novacubeCmakeVersion = '4.1.2'
+
 def getProjectVersionFromCMake() {
     def cmakeFile = file('../../CMakeLists.txt')
     assert cmakeFile.exists()
@@ -40,11 +42,14 @@ android {
     externalNativeBuild {
         cmake {
             path file('../../CMakeLists.txt')
-            version '4.1.2'
+            version novacubeCmakeVersion
         }
     }
     buildFeatures {
         prefab true
+    }
+    androidResources {
+        noCompress += ['db']
     }
 
     splits {
@@ -73,7 +78,85 @@ dependencies {
 ext.abiCodes = ['arm64-v8a': 1, 'x86_64': 2]
 
 androidComponents {
+    def androidSdkDirectory = sdkComponents.sdkDirectory
+    def sourceDirectory = file('../..')
+    def androidProjectDirectory = file('..')
+    def hostBuildDirectory = new File(androidProjectDirectory, 'build/novacube-asset-baker')
+    def hostIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+    def hostAssetBaker = new File(
+            hostBuildDirectory,
+            "bin/novacube_asset_baker${hostIsWindows ? '.exe' : ''}")
+    def cmakeExecutableName = hostIsWindows ? 'cmake.exe' : 'cmake'
+    def cmakeExecutable = providers.provider {
+        new File(androidSdkDirectory.get().asFile, "cmake/${novacubeCmakeVersion}/bin/${cmakeExecutableName}")
+    }
+
+    def configureHostAssetBaker = tasks.register('configureHostAssetBaker', Exec) {
+        group = 'build'
+        description = 'Configures the Novacube host asset baker with the host toolchain.'
+        inputs.file(new File(sourceDirectory, 'CMakeLists.txt'))
+        inputs.property('cmakeVersion', novacubeCmakeVersion)
+        outputs.file(new File(hostBuildDirectory, 'CMakeCache.txt'))
+        workingDir sourceDirectory
+        doFirst {
+            def configureArguments = [
+                    cmakeExecutable.get(),
+                    '-S', sourceDirectory,
+                    '-B', hostBuildDirectory,
+                    '-DNC_BUILD_ASSET_BAKER_ONLY=ON'
+            ]
+            if (!hostIsWindows) {
+                // Visual Studio selects Release at build time; single-config host generators select it here.
+                configureArguments.add('-DCMAKE_BUILD_TYPE=Release')
+            }
+            commandLine configureArguments
+        }
+    }
+
+    def buildHostAssetBaker = tasks.register('buildHostAssetBaker', Exec) {
+        group = 'build'
+        description = 'Builds the Novacube host asset baker in Release mode.'
+        dependsOn(configureHostAssetBaker)
+        workingDir sourceDirectory
+        doFirst {
+            // --config selects Release for multi-config generators; CMAKE_BUILD_TYPE does the same for single-config
+            // generators. The Android variant controls baked shader settings, never the host executable build type.
+            commandLine cmakeExecutable.get(),
+                    '--build', hostBuildDirectory,
+                    '--config', 'Release',
+                    '--target', 'novacube_asset_baker'
+        }
+    }
+
     onVariants(selector().all()) { variant ->
+        def variantTaskName = variant.name.substring(0, 1).toUpperCase() + variant.name.substring(1)
+        def assetDirectory = new File(projectDir, "src/${variant.name}/assets")
+        def assetDatabase = new File(assetDirectory, 'assets.db')
+        def assetState = new File(androidProjectDirectory, "build/novacube-android-assets-${variant.name}.state")
+        def bakeTask = tasks.register("bake${variantTaskName}NovacubeAssets", Exec) {
+            group = 'build'
+            description = "Bakes ${variant.name} Novacube assets with the host tool."
+            dependsOn(buildHostAssetBaker)
+            workingDir sourceDirectory
+            doFirst {
+                assetDirectory.mkdirs()
+                commandLine cmakeExecutable.get(),
+                        "-DNC_ASSET_STATE_FILE=${assetState.absolutePath}",
+                        "-DNC_ASSET_COMPILER=${hostAssetBaker.absolutePath}",
+                        "-DNC_OUTPUT_ASSET_DATABASE=${assetDatabase.absolutePath}",
+                        '-DNC_ASSET_PLATFORM=mobile',
+                        "-DNC_DEBUG=${variant.buildType == 'debug' ? 1 : 0}",
+                        '-P',
+                        new File(sourceDirectory, 'cmake/check_assets.cmake').absolutePath
+            }
+        }
+
+        tasks.configureEach { task ->
+            if (task.name == "merge${variantTaskName}Assets") {
+                task.dependsOn(bakeTask)
+            }
+        }
+
         variant.outputs.each { output ->
             def abi = output.filters.find { it.filterType.name() == 'ABI' }?.identifier
             def baseAbiCode = project.ext.abiCodes.get(abi)

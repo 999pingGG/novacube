@@ -12,43 +12,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(NC_SOURCES
-        src/asset_manager.c
-        src/block.c
-        src/block_meshing.c
-        src/camera.c
-        src/chunk.c
-        src/chunk_meshing.c
-        src/cvar.c
-        src/error_handling.c
-        src/fast_noise_lite_implementation.c
-        src/gui.c
-        src/main.c
-        src/mesher.c
-        src/player_input.c
-        src/renderer.c
-        src/string_handling.c
-        src/terrain.c
-        src/terrain_generation.c
-        src/vma_implementation.cpp
-        vendor/sqlite3/sqlite3.c
-        vendor/zstd/zstd.c)
-if(NOT ANDROID)
-    list(APPEND NC_SOURCES
-            src/argument_parser.c
-            src/asset_baker.c)
-endif()
+option(NC_BUILD_ASSET_BAKER_ONLY "Build only the host-runnable asset baker." OFF)
 
-set(NC_IGNORED_WARNINGS_FILES
-        vendor/sqlite3/sqlite3.c)
-
-if(ANDROID)
-    add_library(novacube SHARED ${NC_SOURCES})
-else()
-    add_executable(novacube ${NC_SOURCES})
-endif()
-
-target_compile_definitions(novacube PRIVATE
+set(NC_SQLITE_COMPILE_DEFINITIONS
         SQLITE_DEFAULT_MEMSTATUS=0
         SQLITE_DQS=0
         SQLITE_LIKE_DOESNT_MATCH_BLOBS
@@ -68,13 +34,115 @@ target_compile_definitions(novacube PRIVATE
         SQLITE_OMIT_TRACE
         SQLITE_OMIT_UTF16)
 
-find_library(MATH_LIBRARY m)
-if(MATH_LIBRARY)
-    target_link_libraries(novacube PRIVATE ${MATH_LIBRARY})
-endif()
+set(NC_COMMON_SOURCES
+        src/error_handling.c
+        src/string_handling.c
+        vendor/sqlite3/sqlite3.c
+        vendor/zstd/zstd.c)
+set(NC_COMMON_INCLUDE_DIRECTORIES
+        include
+        vendor/sqlite3
+        vendor/zstd)
 
 find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
-target_link_libraries(novacube PRIVATE SDL3::SDL3)
+find_library(MATH_LIBRARY m)
+
+if(MSVC)
+    set(NC_COMMON_COMPILE_DEFINITIONS _CRT_SECURE_NO_WARNINGS)
+    set(NC_COMMON_COMPILE_OPTIONS /W4 /WX /Zc:preprocessor)
+    set_source_files_properties(vendor/sqlite3/sqlite3.c PROPERTIES COMPILE_FLAGS /W0)
+else()
+    set(NC_COMMON_COMPILE_OPTIONS
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+            -Wno-gnu-zero-variadic-macro-arguments)
+    set_source_files_properties(vendor/sqlite3/sqlite3.c PROPERTIES COMPILE_FLAGS -w)
+endif()
+
+function(nc_configure_common_target target)
+    target_compile_definitions(${target} PRIVATE
+            ${NC_SQLITE_COMPILE_DEFINITIONS}
+            ${NC_COMMON_COMPILE_DEFINITIONS})
+    target_compile_options(${target} PRIVATE
+            ${NC_COMMON_COMPILE_OPTIONS})
+    target_include_directories(${target} PRIVATE
+            ${NC_COMMON_INCLUDE_DIRECTORIES})
+    target_link_libraries(${target} PRIVATE SDL3::SDL3)
+    if(MATH_LIBRARY)
+        target_link_libraries(${target} PRIVATE ${MATH_LIBRARY})
+    endif()
+    if(WIN32)
+        add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_FILE:SDL3::SDL3>
+                        $<TARGET_FILE_DIR:${target}>
+                COMMENT "Copying the SDL3 runtime for ${target}."
+                VERBATIM)
+    endif()
+endfunction()
+
+if(NC_BUILD_ASSET_BAKER_ONLY)
+    if(ANDROID)
+        message(FATAL_ERROR "The standalone asset baker must be compiled with a host toolchain.")
+    endif()
+
+    add_executable(novacube_asset_baker
+            src/argument_parser.c
+            src/asset_baker.c
+            src/asset_baker_main.c
+            ${NC_COMMON_SOURCES})
+    nc_configure_common_target(novacube_asset_baker)
+
+    # Gradle always configures and builds this target as Release.
+    set_target_properties(novacube_asset_baker PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin")
+    return()
+endif()
+
+set(NC_SOURCES
+        src/asset_manager.c
+        src/block.c
+        src/block_meshing.c
+        src/camera.c
+        src/chunk.c
+        src/chunk_meshing.c
+        src/cvar.c
+        src/fast_noise_lite_implementation.c
+        src/gui.c
+        src/main.c
+        src/mesher.c
+        src/player_input.c
+        src/renderer.c
+        src/terrain.c
+        src/terrain_generation.c
+        src/vma_implementation.cpp
+        ${NC_COMMON_SOURCES})
+if(ANDROID)
+    list(APPEND NC_SOURCES
+            src/android_asset_vfs.c)
+else()
+    list(APPEND NC_SOURCES
+            src/argument_parser.c
+            src/asset_baker.c)
+endif()
+
+if(ANDROID)
+    add_library(novacube SHARED ${NC_SOURCES})
+else()
+    add_executable(novacube ${NC_SOURCES})
+endif()
+
+nc_configure_common_target(novacube)
+if(ANDROID)
+    find_library(ANDROID_LIBRARY android)
+    find_library(LOG_LIBRARY log)
+    if((NOT ANDROID_LIBRARY) OR (NOT LOG_LIBRARY))
+        message(FATAL_ERROR "The Android NDK libraries were not found.")
+    endif()
+    target_link_libraries(novacube PRIVATE ${ANDROID_LIBRARY} ${LOG_LIBRARY})
+endif()
 
 find_package(Vulkan REQUIRED COMPONENTS glslc)
 target_include_directories(novacube PRIVATE ${Vulkan_INCLUDE_DIRS})
@@ -92,22 +160,14 @@ else()
 endif()
 
 if(MSVC)
-    target_compile_definitions(novacube PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_options(novacube PRIVATE /W4 /WX /Zc:preprocessor)
     if(TARGET_X86)
         target_compile_options(novacube PRIVATE /arch:AVX2)
     elseif(TARGET_ARM)
         target_compile_options(novacube PRIVATE /arch:VFPv4)
     endif()
-    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS /W0)
 else()
     set_source_files_properties(src/vma_implementation.cpp PROPERTIES COMPILE_OPTIONS -w)
     target_compile_options(novacube PRIVATE
-            -Wall
-            -Wextra
-            -Wpedantic
-            -Werror
-            -Wno-gnu-zero-variadic-macro-arguments
             $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
             $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
@@ -115,20 +175,16 @@ else()
         target_compile_options(novacube PRIVATE -march=haswell)
     endif()
     target_link_options(novacube PRIVATE -nostdlib++)
-    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS -w)
 endif()
 
 target_include_directories(novacube PRIVATE
-        include
         vendor/clay
         vendor/cvkm
         vendor/FastNoiseLite
         vendor/rapidhash
-        vendor/sqlite3
         vendor/tds/include
         vendor/vma
-        vendor/volk
-        vendor/zstd)
+        vendor/volk)
 
 set(NC_BUILD_INFO_TEMPLATE "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h.in")
 set(NC_BUILD_INFO_HEADER "${CMAKE_SOURCE_DIR}/include/novacube/build_info.h")
@@ -154,8 +210,6 @@ if(NOT ANDROID)
     # asset compiler is the game executable, so this target must wait until novacube exists before checking assets.
     add_custom_target(novacube_assets ALL
             COMMAND ${CMAKE_COMMAND}
-                    "-DNC_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
-                    "-DNC_SOURCE_ASSET_DIR=${CMAKE_SOURCE_DIR}/src-assets"
                     "-DNC_ASSET_STATE_FILE=${CMAKE_CURRENT_BINARY_DIR}/novacube-assets-$<CONFIG>.state"
                     "-DNC_ASSET_COMPILER=$<TARGET_FILE:novacube>"
                     "-DNC_OUTPUT_ASSET_DATABASE=$<TARGET_FILE_DIR:novacube>/assets.db"

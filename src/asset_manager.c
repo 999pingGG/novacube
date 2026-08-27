@@ -9,12 +9,17 @@
 #include <zstd.h>
 
 #include <novacube/asset_manager.h>
+#ifdef ANDROID
+#include <novacube/android_asset_vfs.h>
+#endif
 #include <novacube/error_handling.h>
 #include <novacube/standard_functions.h>
 
 #ifdef ANDROID
 // mobile (ASTC) format
 #define NC__ASSET_MANAGER_IN_DATABASE_TEXTURE_FORMAT "1"
+#define NC__ASSET_MANAGER_STRINGIFY_VALUE(value) #value
+#define NC__ASSET_MANAGER_STRINGIFY(value) NC__ASSET_MANAGER_STRINGIFY_VALUE(value)
 #else
 // desktop (BC7) format
 #define NC__ASSET_MANAGER_IN_DATABASE_TEXTURE_FORMAT "2"
@@ -104,6 +109,13 @@ nc_asset_manager_t* nc_asset_manager_init(void) {
     nc_asset_manager_t* result = calloc(1, sizeof(*result));
     result->zstd_decompression_context = ZSTD_createDCtx();
 
+#ifdef ANDROID
+    if (!nc_android_asset_vfs_register()) {
+        goto error;
+    }
+    const char* database_path = "assets.db";
+    const char* database_vfs = NC_ANDROID_ASSET_VFS_NAME;
+#else
     const char* base_path = SDL_GetBasePath();
     NC_CHECK_SDL_RESULT(base_path);
     char database_path[FILENAME_MAX];
@@ -111,12 +123,22 @@ nc_asset_manager_t* nc_asset_manager_init(void) {
     NC_CHECK_RESULT(
             database_path_length >= 0 && database_path_length < (int)sizeof(database_path),
             "The runtime asset database path is too long.");
+    const char* database_vfs = NULL;
+#endif
 
     NC__CHECK_SQLITE_RESULT(result->database, sqlite3_open_v2(
             database_path,
             &result->database,
             SQLITE_OPEN_READONLY,
+            database_vfs));
+#ifdef ANDROID
+    NC__CHECK_SQLITE_RESULT(result->database, sqlite3_exec(
+            result->database,
+            "PRAGMA mmap_size = " NC__ASSET_MANAGER_STRINGIFY(NC_ANDROID_ASSET_MMAP_SIZE),
+            NULL,
+            NULL,
             NULL));
+#endif
 
     NC__CHECK_SQLITE_RESULT(result->database, sqlite3_prepare_v2(
             result->database,
