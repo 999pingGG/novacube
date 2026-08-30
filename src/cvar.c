@@ -13,7 +13,9 @@
 #include <novacube/string_handling.h>
 
 #define NC__CONFIGURATION_FILE "config.ini"
-#define NC__DOUBLE_DECIMAL_PLACES 13
+enum {
+    NC__DOUBLE_DECIMAL_PLACES = 13,
+};
 #define NC__DOUBLE_ROUNDING_UNIT 0.0000000000001
 
 // meh, just to relinquish "suggest braces around initialization of subobject"
