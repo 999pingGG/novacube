@@ -1657,7 +1657,7 @@ void nc_terrain_get_chunk_draws(
     const vkm_mat4* view_projection,
     nc_renderer_chunk_draw_vec* opaque,
     nc_renderer_chunk_draw_vec* transparent,
-    nc_terrain_frustum_culling_stats_t* stats
+    nc_terrain_rendering_stats_t* stats
 ) {
     const nc__terrain_frustum_plane_t planes[6] = {
         nc__terrain_make_frustum_plane(
@@ -1693,7 +1693,7 @@ void nc_terrain_get_chunk_draws(
     };
 
     // Keep this struct in cache by using a local variable.
-    nc_terrain_frustum_culling_stats_t culling_stats = { 0 };
+    nc_terrain_rendering_stats_t culling_stats = { 0 };
     nc__terrain_chunk_map_iter_t it = nc__terrain_chunk_map_iter(&terrain->chunks);
     while (nc__terrain_chunk_map_next(&it)) {
         const nc_chunk_t* chunk = *it.value;
@@ -1715,8 +1715,12 @@ void nc_terrain_get_chunk_draws(
             (float)block_coords.z + half_chunk_size,
         } };
 
+        culling_stats.total_opaque_quads_count += chunk->opaque_quad_count;
+        culling_stats.total_transparent_quads_count += chunk->transparent_quad_count;
         if (nc__terrain_chunk_is_outside_frustum(planes, &center)) {
             culling_stats.culled_chunk_count++;
+            culling_stats.culled_opaque_quads_count += chunk->opaque_quad_count;
+            culling_stats.culled_transparent_quads_count += chunk->transparent_quad_count;
             continue;
         }
 
@@ -1725,7 +1729,6 @@ void nc_terrain_get_chunk_draws(
                 .chunk_buffer = chunk->opaque_quad_buffer,
                 .quad_count = chunk->opaque_quad_count,
                 .face_data_buffer = chunk->opaque_face_data_buffer,
-                .texture = terrain->texture_array,
                 .position = { {
                     .x = (float)block_coords.x,
                     .y = (float)block_coords.y,
@@ -1740,7 +1743,6 @@ void nc_terrain_get_chunk_draws(
                 .chunk_buffer = chunk->transparent_quad_buffer,
                 .quad_count = chunk->transparent_quad_count,
                 .face_data_buffer = chunk->transparent_face_data_buffer,
-                .texture = terrain->texture_array,
                 .position = { {
                     .x = (float)block_coords.x,
                     .y = (float)block_coords.y,
@@ -1752,6 +1754,10 @@ void nc_terrain_get_chunk_draws(
     }
 
     *stats = culling_stats;
+}
+
+nc_renderer_texture_t* nc_terrain_get_textures(const nc_terrain_t* terrain) {
+    return terrain->texture_array;
 }
 
 static float nc__terrain_initial_t_max(

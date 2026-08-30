@@ -77,7 +77,6 @@ typedef struct nc_renderer_chunk_draw_t {
     nc_renderer_buffer_t* chunk_buffer;
     // SSBO containing an array of nc_mesh_face_data_t.
     nc_renderer_buffer_t* face_data_buffer;
-    const nc_renderer_texture_t* texture;
     vkm_vec3 position;
     uint32_t quad_count;
 } nc_renderer_chunk_draw_t;
@@ -132,6 +131,7 @@ typedef struct nc_renderer_frame_t {
     const nc_renderer_sky_draw_t* sky_draw;
     const nc_renderer_chunk_draw_vec* opaque_chunk_draws;
     const nc_renderer_chunk_draw_vec* transparent_chunk_draws;
+    const nc_renderer_texture_t* terrain_texture_array;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;
     const nc_renderer_procedural_overlay_draw_t* procedural_overlay_draw;
@@ -163,7 +163,7 @@ bool nc_renderer_queue_buffer_upload(
 // ownership of every input buffer.
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
         nc_renderer_t* renderer,
-        const bool is_color_data,
+        bool is_color_data,
         int16_t width,
         int16_t height,
         const void* pixels);
@@ -172,7 +172,7 @@ nc_renderer_texture_t* nc_renderer_create_texture_from_baked_assets(
         const nc_texture_baked_asset_t* assets,
         uint16_t asset_count,
         nc_texture_type_t texture_type,
-        const bool is_color_data);
+        bool is_color_data);
 void nc_renderer_destroy_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture);
 bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame);
 void nc_renderer_fini(nc_renderer_t* renderer);

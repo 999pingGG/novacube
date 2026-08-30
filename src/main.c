@@ -1,6 +1,8 @@
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <clay.h>
 #include <SDL3/SDL.h>
@@ -296,33 +298,33 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
             &player_command);
     nc__app_apply_player_command(app, &player_command, (float)delta_time);
 
-    char debug_buffer[100];
+    char debug_buffer[1024];
 
     if (nc_cvar_get_show_fps()) {
-        const int printed = snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
-        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+        snprintf(debug_buffer, sizeof(debug_buffer), "%f FPS\n", 1.0 / delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
     if (nc_cvar_get_show_frame_time()) {
-        const int printed = snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
-        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+        snprintf(debug_buffer, sizeof(debug_buffer), "%f ms\n", delta_time);
+        nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
     if (nc_cvar_get_show_player_coords()) {
-        const int printed = snprintf(
+        snprintf(
                 debug_buffer,
                 sizeof(debug_buffer),
                 "Player: (%.3f, %.3f, %.3f)\n",
                 app->camera.position.x,
                 app->camera.position.y,
                 app->camera.position.z);
-        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+        nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
     if (nc_cvar_get_show_target_block_debug_details()) {
         nc_terrain_raycast_hit_t hit;
         if (nc_terrain_raycast(app->terrain, &app->camera, NC_TERRAIN_MAX_BLOCK_MODIFICATION_DISTANCE, &hit)) {
-            const int printed = snprintf(
+            snprintf(
                     debug_buffer,
                     sizeof(debug_buffer),
                     "Block: (%d, %d, %d), distance: %f, top light blocking: %d\n",
@@ -336,7 +338,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                                 hit.block_position.x,
                                 hit.block_position.z,
                             } }));
-            nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+            nc_gui_append_debug_text(app->gui, debug_buffer, 0);
         }
     }
 
@@ -368,7 +370,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
     if (nc_cvar_get_show_terrain_timings()) {
         nc_terrain_timing_stats_t terrain_timings;
         nc_terrain_get_timing_stats(app->terrain, &terrain_timings);
-        const int printed = snprintf(
+        snprintf(
                 debug_buffer,
                 sizeof(debug_buffer),
                 "Terrain residency: %.3f ms, load: %.3f, unload: %.3f, lighting: %.3f, meshing: %.3f\n",
@@ -377,27 +379,34 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
                 terrain_timings.unloading_ms,
                 terrain_timings.lighting_ms,
                 terrain_timings.meshing_ms);
-        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+        nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
-    nc_terrain_frustum_culling_stats_t frustum_culling_stats;
+    nc_terrain_rendering_stats_t terrain_rendering_stats;
     nc_terrain_get_chunk_draws(
             app->terrain,
             &view_projection,
             &app->opaque_chunk_draws,
             &app->transparent_chunk_draws,
-            &frustum_culling_stats);
-    if (nc_cvar_get_show_chunk_frustum_culling_stats()) {
-        const int printed = snprintf(
+            &terrain_rendering_stats);
+    if (nc_cvar_get_show_terrain_rendering_stats()) {
+        snprintf(
                 debug_buffer,
                 sizeof(debug_buffer),
-                "Chunks: %u loaded, %u empty, %u culled, %u opaque, %u transparent\n",
-                frustum_culling_stats.loaded_chunk_count,
-                frustum_culling_stats.empty_chunk_count,
-                frustum_culling_stats.culled_chunk_count,
-                frustum_culling_stats.opaque_drawn_chunk_count,
-                frustum_culling_stats.transparent_drawn_chunk_count);
-        nc_gui_append_debug_text(app->gui, debug_buffer, printed);
+                "Chunks: %u loaded, %u empty, %u culled, %u opaque, %u transparent\n"
+                "Terrain quads: %u opaque, %u drawn, %u culled; %u transparent, %u drawn, %u culled",
+                terrain_rendering_stats.loaded_chunk_count,
+                terrain_rendering_stats.empty_chunk_count,
+                terrain_rendering_stats.culled_chunk_count,
+                terrain_rendering_stats.opaque_drawn_chunk_count,
+                terrain_rendering_stats.transparent_drawn_chunk_count,
+                terrain_rendering_stats.total_opaque_quads_count,
+                terrain_rendering_stats.total_opaque_quads_count - terrain_rendering_stats.culled_opaque_quads_count,
+                terrain_rendering_stats.culled_opaque_quads_count,
+                terrain_rendering_stats.total_transparent_quads_count,
+                terrain_rendering_stats.total_transparent_quads_count - terrain_rendering_stats.culled_transparent_quads_count,
+                terrain_rendering_stats.culled_transparent_quads_count);
+        nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
     nc_player_input_overlay_t player_input_overlay;
@@ -469,6 +478,7 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .sky_draw = &sky_draw,
         .opaque_chunk_draws = &app->opaque_chunk_draws,
         .transparent_chunk_draws = &app->transparent_chunk_draws,
+        .terrain_texture_array = nc_terrain_get_textures(app->terrain),
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,
         .procedural_overlay_draw = &procedural_overlay_draw,

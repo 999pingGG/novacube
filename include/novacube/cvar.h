@@ -120,7 +120,7 @@ typedef enum nc_block_highlight_effect_t {
     X(bool, show_fps, NO,, nc__parse_bool, nc__print_bool,, false) \
     X(bool, show_frame_time, NO,, nc__parse_bool, nc__print_bool,, false) \
     X(bool, show_player_coords, YES,, nc__parse_bool, nc__print_bool,, false) \
-    X(bool, show_chunk_frustum_culling_stats, NO,, nc__parse_bool, nc__print_bool,, false) \
+    X(bool, show_terrain_rendering_stats, NO,, nc__parse_bool, nc__print_bool,, false) \
     X(bool, show_terrain_timings, NO,, nc__parse_bool, nc__print_bool,, false) \
     X(uint16_t, terrain_load_radius_xz, YES, "\n; Number of chunks to keep loaded around every player.\n", nc__parse_uint16, nc__print_int, "10", 10) \
     X(uint16_t, terrain_load_radius_y, YES, "\n; Number of chunks to keep loaded up and down every player.\n", nc__parse_uint16, nc__print_int, "4", 4) \

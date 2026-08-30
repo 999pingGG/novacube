@@ -3216,8 +3216,6 @@ static bool nc__renderer_draw_chunk(
         return true;
     }
 
-    NC_ASSERT(draw->texture->layer_count > 1);
-
     const nc__renderer_chunk_uniforms_t uniforms = {
         .view_projection = *view_projection,
         .position = draw->position,
@@ -4211,7 +4209,9 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         (float)renderer->swapchain_extent.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
     } };
 
-    const nc_renderer_texture_t* bound_chunk_texture = NULL;
+    if (!nc__renderer_bind_texture_descriptor_set(renderer, frame->terrain_texture_array, renderer->chunk_sampler)) {
+        return false;
+    }
 
 #pragma region Opaque pass
     vkCmdBindPipeline(
@@ -4220,14 +4220,6 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             renderer->opaque_chunk_pipeline);
     for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->opaque_chunk_draws); i++) {
         const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->opaque_chunk_draws, i);
-        if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
-            NC_ASSERT(draw.texture->layer_count > 1);
-            if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
-                return false;
-            }
-            bound_chunk_texture = draw.texture;
-        }
-
         if (!nc__renderer_draw_chunk(
                 renderer,
                 &draw,
@@ -4255,14 +4247,6 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             renderer->transparent_chunk_pipeline);
     for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->transparent_chunk_draws); i++) {
         const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->transparent_chunk_draws, i);
-        if (draw.quad_count > 0 && draw.texture != bound_chunk_texture) {
-            NC_ASSERT(draw.texture->layer_count > 1);
-            if (!nc__renderer_bind_texture_descriptor_set(renderer, draw.texture, renderer->chunk_sampler)) {
-                return false;
-            }
-            bound_chunk_texture = draw.texture;
-        }
-
         if (!nc__renderer_draw_chunk(
                 renderer,
                 &draw,
