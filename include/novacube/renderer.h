@@ -12,7 +12,8 @@
 #include <novacube/cvkm.h>
 
 typedef struct nc_renderer_texture_t nc_renderer_texture_t;
-typedef struct nc_renderer_buffer_t nc_renderer_buffer_t;
+// High-level renderer-owned chunk geometry. Its paging allocation and Vulkan address stay private.
+typedef struct nc_renderer_chunk_mesh_t nc_renderer_chunk_mesh_t;
 
 typedef struct nc_renderer_t nc_renderer_t;
 
@@ -24,14 +25,6 @@ typedef struct nc_renderer_create_info_t {
     nc_video_mode_t video_mode;
     bool prefer_low_power;
 } nc_renderer_create_info_t;
-
-typedef enum nc_renderer_buffer_usage_t {
-    NC_RENDERER_BUFFER_USAGE_VERTEX = 1,
-    NC_RENDERER_BUFFER_USAGE_INDEX,
-    NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-
-    NC_RENDERER_BUFFER_USAGE_COUNT = NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-} nc_renderer_buffer_usage_t;
 
 // Tags the union in nc_renderer_overlay_draw_command_t. Rectangle commands reference a batch;
 // image commands carry one texture because changing textures breaks a rectangle batch.
@@ -73,13 +66,19 @@ typedef struct nc_renderer_overlay_draw_command_t {
 } nc_renderer_overlay_draw_command_t;
 
 typedef struct nc_renderer_chunk_draw_t {
-    // SSBO containing an array of nc_mesh_quad_t.
-    nc_renderer_buffer_t* chunk_buffer;
-    // SSBO containing an array of nc_mesh_face_data_t.
-    nc_renderer_buffer_t* face_data_buffer;
+    // The frame list selects the opaque or transparent pass; the mesh stores that pass's packed offset and count.
+    const nc_renderer_chunk_mesh_t* mesh;
     vkm_vec3 position;
-    uint32_t quad_count;
 } nc_renderer_chunk_draw_t;
+
+// CPU data for one opaque or transparent chunk pass. The renderer packs both passes into one device allocation;
+// callers retain ownership of the arrays and may release them as soon as nc_renderer_upload_chunk_mesh returns.
+typedef struct nc_renderer_chunk_mesh_data_t {
+    const void* quads;
+    const void* face_data;
+    uint32_t quad_count;
+    uint32_t face_data_count;
+} nc_renderer_chunk_mesh_data_t;
 
 #define TDS_DECLARE
 #define TDS_VALUE_T nc_renderer_chunk_draw_t
@@ -149,16 +148,14 @@ vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer);
 // Returns actual framebuffer pixels in the current display orientation, not SDL window units.
 vkm_usvec2 nc_renderer_get_framebuffer_size(const nc_renderer_t* renderer);
 void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect);
-nc_renderer_buffer_t* nc_renderer_create_buffer(
+// Treat *mesh as an optional renderer-owned resource: initialize it to NULL and keep passing the same slot on remesh.
+// Shrinks retain capacity, growth replaces it, and empty opaque and transparent data releases it.
+bool nc_renderer_upload_chunk_mesh(
         nc_renderer_t* renderer,
-        nc_renderer_buffer_usage_t usage,
-        uint32_t initial_size);
-void nc_renderer_destroy_buffer(nc_renderer_t* renderer, nc_renderer_buffer_t* buffer);
-bool nc_renderer_queue_buffer_upload(
-        nc_renderer_t* renderer,
-        nc_renderer_buffer_t* buffer,
-        const void* data,
-        uint32_t size);
+        nc_renderer_chunk_mesh_t** mesh,
+        const nc_renderer_chunk_mesh_data_t* opaque,
+        const nc_renderer_chunk_mesh_data_t* transparent);
+void nc_renderer_destroy_chunk_mesh(nc_renderer_t* renderer, nc_renderer_chunk_mesh_t* mesh);
 // The texture creation functions below copy pixels into renderer-owned upload storage before returning; callers retain
 // ownership of every input buffer.
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(

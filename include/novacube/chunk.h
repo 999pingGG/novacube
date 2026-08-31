@@ -56,10 +56,8 @@ typedef struct nc_chunk_t {
     // Owned by terrain lighting. Kept opaque here to avoid leaking its private queue-bitset implementation.
     void* queued_light_nodes[2];
     // TODO: Keep all the following fields private.
-    nc_renderer_buffer_t* opaque_quad_buffer;
-    nc_renderer_buffer_t* transparent_quad_buffer;
-    nc_renderer_buffer_t* opaque_face_data_buffer;
-    nc_renderer_buffer_t* transparent_face_data_buffer;
+    // One renderer-owned packed allocation backs both opaque and transparent mesh passes.
+    nc_renderer_chunk_mesh_t* mesh;
     uint32_t opaque_quad_count;
     uint32_t transparent_quad_count;
     nc_chunk_flags_t flags;
@@ -77,7 +75,6 @@ struct nc_block_registry_t;
 typedef nc_chunk_t* (*nc_chunk_lookup_fn)(void* context, const vkm_ivec3* coords);
 
 nc_chunk_t* nc_chunk_init(
-        nc_renderer_t* renderer,
         const vkm_ivec3* coords,
         const uint16_t blocks[NC_BLOCKS_PER_CHUNK]);
 void nc_chunk_replace_blocks(nc_chunk_t* chunk, const uint16_t blocks[NC_BLOCKS_PER_CHUNK]);

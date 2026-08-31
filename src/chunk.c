@@ -56,25 +56,12 @@ bool nc_chunk_offset_block_index(
 }
 
 nc_chunk_t* nc_chunk_init(
-    nc_renderer_t* renderer,
     const vkm_ivec3* coords,
     const uint16_t blocks[NC_BLOCKS_PER_CHUNK]
 ) {
     nc_chunk_t* result = calloc(1, sizeof(*result));
     result->coords = *coords;
     nc_chunk_replace_blocks(result, blocks);
-    result->opaque_quad_buffer = nc_renderer_create_buffer(NULL, NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ, 0);
-    result->transparent_quad_buffer = nc_renderer_create_buffer(
-            NULL,
-            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-            0);
-    result->opaque_face_data_buffer = nc_renderer_create_buffer(NULL,
-            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-            0);
-    result->transparent_face_data_buffer = nc_renderer_create_buffer(NULL,
-            NC_RENDERER_BUFFER_USAGE_GRAPHICS_STORAGE_READ,
-            0);
-    (void)renderer;
     return result;
 }
 
@@ -90,10 +77,7 @@ void nc_chunk_fini(nc_renderer_t* renderer, nc_chunk_t* chunk) {
     if (!chunk) {
         return;
     }
-    nc_renderer_destroy_buffer(renderer, chunk->opaque_face_data_buffer);
-    nc_renderer_destroy_buffer(renderer, chunk->transparent_face_data_buffer);
-    nc_renderer_destroy_buffer(renderer, chunk->opaque_quad_buffer);
-    nc_renderer_destroy_buffer(renderer, chunk->transparent_quad_buffer);
+    nc_renderer_destroy_chunk_mesh(renderer, chunk->mesh);
     free(chunk->queued_light_nodes[0]);
     free(chunk->queued_light_nodes[1]);
     free(chunk);

@@ -17,6 +17,9 @@
 #define NC__MESHER_BLOCK_LIGHT_SHIFT 0
 #define NC__MESHER_SKY_LIGHT_SHIFT 4
 
+static_assert(sizeof(nc_mesh_quad_t) == 8, "Packed chunk allocation requires 8-byte quads");
+static_assert(sizeof(nc_mesh_face_data_t) == 8, "Packed chunk allocation requires 8-byte face data");
+
 static bool nc__chunk_block_is_full_for_pass(
     const nc_block_registry_t* block_registry,
     const uint16_t block_type,
@@ -713,34 +716,22 @@ bool nc_mesher_upload_chunk(
             &transparent_face_data,
             true);
 
-    bool result = true;
-
-    chunk->opaque_quad_count = opaque_quads.count;
-    if (chunk->opaque_quad_count) {
-        result = nc_renderer_queue_buffer_upload(
-                renderer,
-                chunk->opaque_quad_buffer,
-                opaque_quads.array,
-                sizeof(*opaque_quads.array) * opaque_quads.count);
-        result &= nc_renderer_queue_buffer_upload(
-                renderer,
-                chunk->opaque_face_data_buffer,
-                opaque_face_data.array,
-                sizeof(*opaque_face_data.array) * nc_mesh_face_data_vec_count(&opaque_face_data));
-    }
-
-    chunk->transparent_quad_count = transparent_quads.count;
-    if (chunk->transparent_quad_count) {
-        result &= nc_renderer_queue_buffer_upload(
-                renderer,
-                chunk->transparent_quad_buffer,
-                transparent_quads.array,
-                sizeof(*transparent_quads.array) * transparent_quads.count);
-        result &= nc_renderer_queue_buffer_upload(
-            renderer,
-            chunk->transparent_face_data_buffer,
-            transparent_face_data.array,
-            sizeof(*transparent_face_data.array) * nc_mesh_face_data_vec_count(&transparent_face_data));
+    const nc_renderer_chunk_mesh_data_t opaque = {
+        .quads = opaque_quads.array,
+        .face_data = opaque_face_data.array,
+        .quad_count = opaque_quads.count,
+        .face_data_count = opaque_face_data.count,
+    };
+    const nc_renderer_chunk_mesh_data_t transparent = {
+        .quads = transparent_quads.array,
+        .face_data = transparent_face_data.array,
+        .quad_count = transparent_quads.count,
+        .face_data_count = transparent_face_data.count,
+    };
+    const bool result = nc_renderer_upload_chunk_mesh(renderer, &chunk->mesh, &opaque, &transparent);
+    if (result) {
+        chunk->opaque_quad_count = opaque_quads.count;
+        chunk->transparent_quad_count = transparent_quads.count;
     }
 
     nc_mesh_face_data_vec_fini(&opaque_face_data);

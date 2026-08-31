@@ -1126,7 +1126,7 @@ static void nc__terrain_load_or_replace_chunk(
         return;
     }
 
-    chunk = nc_chunk_init(NULL, coords, blocks);
+    chunk = nc_chunk_init(coords, blocks);
 
     const int chunk_was_added = nc__terrain_chunk_map_set(&terrain->chunks, *coords, chunk);
     NC_ASSERT(chunk_was_added);
@@ -1726,9 +1726,7 @@ void nc_terrain_get_chunk_draws(
 
         if (chunk->opaque_quad_count) {
             nc_renderer_chunk_draw_vec_append(opaque, (nc_renderer_chunk_draw_t){
-                .chunk_buffer = chunk->opaque_quad_buffer,
-                .quad_count = chunk->opaque_quad_count,
-                .face_data_buffer = chunk->opaque_face_data_buffer,
+                .mesh = chunk->mesh,
                 .position = { {
                     .x = (float)block_coords.x,
                     .y = (float)block_coords.y,
@@ -1740,9 +1738,7 @@ void nc_terrain_get_chunk_draws(
 
         if (chunk->transparent_quad_count) {
             nc_renderer_chunk_draw_vec_append(transparent, (nc_renderer_chunk_draw_t){
-                .chunk_buffer = chunk->transparent_quad_buffer,
-                .quad_count = chunk->transparent_quad_count,
-                .face_data_buffer = chunk->transparent_face_data_buffer,
+                .mesh = chunk->mesh,
                 .position = { {
                     .x = (float)block_coords.x,
                     .y = (float)block_coords.y,
