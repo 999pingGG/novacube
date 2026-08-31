@@ -39,7 +39,8 @@ NC_IGNORE_ALL_WARNINGS_END
 
 #define NC__RENDERER_VK_API_VERSION VK_API_VERSION_1_1
 enum {
-    NC__RENDERER_BUFFER_PAGE_CAPACITY = 1024 * 1024,
+    NC__RENDERER_STAGING_PAGE_CAPACITY = 1024 * 1024,
+    NC__RENDERER_CHUNK_PAGE_CAPACITY = 16 * 1024 * 1024,
     NC__RENDERER_BUFFER_PAGE_RETENTION_FRAMES = 60,
     NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY = 128,
     NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE = 8,
@@ -3826,7 +3827,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
             || !nc__renderer_initialize_buffer_allocator(
                     result,
                     &result->transfer_allocator,
-                    NC__RENDERER_BUFFER_PAGE_CAPACITY,
+                    NC__RENDERER_STAGING_PAGE_CAPACITY,
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                     VMA_MEMORY_USAGE_AUTO,
                     VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
@@ -3834,7 +3835,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
             || !nc__renderer_initialize_buffer_allocator(
                     result,
                     &result->chunk_allocator,
-                    NC__RENDERER_BUFFER_PAGE_CAPACITY,
+                    NC__RENDERER_CHUNK_PAGE_CAPACITY,
                     VK_BUFFER_USAGE_TRANSFER_DST_BIT
                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
