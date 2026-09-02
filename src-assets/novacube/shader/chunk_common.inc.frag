@@ -1,4 +1,3 @@
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 layout(early_fragment_tests) in;
 
@@ -9,12 +8,7 @@ layout(location = 3) flat in uvec2 face_data_size;
 
 layout(set = 0, binding = 0) uniform sampler2DArray terrain_textures;
 
-layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer face_data_array {
-    // This should be an array of nc_mesh_face_data_t, but we're working around driver bugs here.
-    uvec2 faces[];
-};
-
-layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
+struct chunk_uniforms {
     mat4 view_projection;
     vec3 position;
     // Only this value is used by the fragment shader.
@@ -22,9 +16,19 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly 
     vec4 quad_expansion;
 };
 
+layout(set = 1, binding = 0, scalar) restrict readonly buffer chunk_uniform_buffer {
+    chunk_uniforms values[];
+} frame_data;
+
+layout(set = 2, binding = 0, scalar) restrict readonly buffer chunk_mesh_buffer {
+    // This should be an array of nc_mesh_face_data_t, but we're working around driver bugs here.
+    uvec2 values[];
+} mesh_data;
+
 layout(push_constant) uniform push_constants {
-    layout(offset = 8) chunk_uniforms uniforms;
-    layout(offset = 16) face_data_array face_data;
+    uint uniforms;
+    uint quads;
+    uint face_data;
 } pc;
 
 const float ambient_intensity = 0.01;
@@ -58,7 +62,8 @@ float direct_light_level_intensity(uint level) {
 
 float combined_light_intensity(uint block_level, uint sky_level) {
     float block_intensity = direct_light_level_intensity(block_level);
-    float sky_intensity = direct_light_level_intensity(sky_level) * pc.uniforms.sunlight_intensity;
+    float sky_intensity = direct_light_level_intensity(sky_level)
+            * frame_data.values[pc.uniforms].sunlight_intensity;
     return mix(ambient_intensity, 1.0, max(block_intensity, sky_intensity));
 }
 
@@ -71,7 +76,7 @@ vec4 compute_color() {
     // discrete lookup so those fragments cannot read past the face-data array through the device address.
     uvec2 face_data_coord = min(uvec2(floor(face_data_uv)), face_data_size - uvec2(1));
     uint face_index = face_data_coord.y * face_data_size.x + face_data_coord.x;
-    uvec2 packed_data = pc.face_data.faces[face_data_offset + face_index];
+    uvec2 packed_data = mesh_data.values[pc.face_data + face_data_offset + face_index];
 
     // unpack data
     uint texture_array_layer = packed_data.x & 0x7ffu;

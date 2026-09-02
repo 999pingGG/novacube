@@ -1,5 +1,4 @@
 #version 450
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
 struct gui_rectangle {
@@ -11,18 +10,22 @@ struct gui_rectangle {
     uint character;
 };
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer gui_uniforms {
+struct gui_uniforms {
     mat4 transform;
     vec2 gui_to_ndc_scale;
 };
 
-layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer gui_rectangles {
+layout(set = 1, binding = 0, scalar) restrict readonly buffer gui_uniform_buffer {
+    gui_uniforms values[];
+} frame_data;
+
+layout(set = 2, binding = 0, scalar) restrict readonly buffer gui_rectangle_buffer {
     gui_rectangle values[];
-};
+} rectangle_data;
 
 layout(push_constant) uniform push_constants {
-    gui_uniforms uniforms;
-    gui_rectangles rectangles;
+    uint uniforms;
+    uint rectangles;
 } pc;
 
 layout(location = 0) out vec2 out_local_position;
@@ -40,11 +43,12 @@ const vec2 corners[4] = vec2[](
     vec2(1.0, 1.0));
 
 void main() {
-    gui_rectangle rectangle = pc.rectangles.values[gl_InstanceIndex];
+    gui_uniforms uniforms = frame_data.values[pc.uniforms];
+    gui_rectangle rectangle = rectangle_data.values[pc.rectangles + gl_InstanceIndex];
     vec2 corner = corners[gl_VertexIndex];
     vec2 gui_position = rectangle.rectangle.xy + rectangle.rectangle.zw * corner;
-    vec2 clip_position = gui_position * pc.uniforms.gui_to_ndc_scale - 1.0;
-    gl_Position = pc.uniforms.transform * vec4(clip_position, 0.0, 1.0);
+    vec2 clip_position = gui_position * uniforms.gui_to_ndc_scale - 1.0;
+    gl_Position = uniforms.transform * vec4(clip_position, 0.0, 1.0);
 
     out_local_position = rectangle.rectangle.zw * corner;
     out_size = rectangle.rectangle.zw;
