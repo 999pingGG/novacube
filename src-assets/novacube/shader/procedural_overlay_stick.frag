@@ -1,16 +1,19 @@
 #version 450
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer procedural_overlay_uniforms {
+struct procedural_overlay_uniforms {
     vec4 rings[2];
     vec4 sticks[2];
     vec4 crosshair;
 };
 
+layout(set = 1, binding = 0, scalar) restrict readonly buffer procedural_overlay_uniform_buffer {
+    procedural_overlay_uniforms values[];
+} frame_data;
+
 layout(push_constant) uniform push_constants {
-    layout(offset = 8) uint element;
-    layout(offset = 16) procedural_overlay_uniforms uniforms;
+    uint uniforms;
+    uint element;
 } pc;
 
 layout(location = 0) out vec4 out_color;
@@ -31,8 +34,9 @@ bool in_stick(vec2 position, vec4 stick) {
 }
 
 void main() {
+    procedural_overlay_uniforms uniforms = frame_data.values[pc.uniforms];
     vec2 position = gl_FragCoord.xy;
-    if (!in_stick(position, pc.uniforms.sticks[pc.element])) {
+    if (!in_stick(position, uniforms.sticks[pc.element])) {
         discard;
     }
 

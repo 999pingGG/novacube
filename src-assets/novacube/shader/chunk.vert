@@ -1,14 +1,7 @@
 #version 450
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
-layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer quad_buffer {
-    // This data should be nc_mesh_quad_t instead of uvec2,
-    // but this works around a driver bug I've encountered in Adreno 610.
-    uvec2 data[];
-};
-
-layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer chunk_uniforms {
+struct chunk_uniforms {
     mat4 view_projection;
     vec3 position;
     // Used by the fragment shader.
@@ -17,9 +10,20 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly 
     vec4 quad_expansion;
 };
 
+layout(set = 1, binding = 0, scalar) restrict readonly buffer chunk_uniform_buffer {
+    chunk_uniforms values[];
+} frame_data;
+
+layout(set = 2, binding = 0, scalar) restrict readonly buffer chunk_mesh_buffer {
+    // This data should be nc_mesh_quad_t instead of uvec2,
+    // but this works around a driver bug I've encountered in Adreno 610.
+    uvec2 values[];
+} mesh_data;
+
 layout(push_constant) uniform push_constants {
-    quad_buffer quads;
-    chunk_uniforms uniforms;
+    uint uniforms;
+    uint quads;
+    uint face_data;
 } pc;
 
 // Do not use `mediump` here, it causes severe rendering corruption in PowerVR Rogue GPUs.
@@ -102,7 +106,8 @@ vec2 texture_uv_from_face_position(uint direction, vec2 face_position) {
 }
 
 void main() {
-    uvec2 data = pc.quads.data[gl_InstanceIndex];
+    chunk_uniforms uniforms = frame_data.values[pc.uniforms];
+    uvec2 data = mesh_data.values[pc.quads + gl_InstanceIndex];
 
     // Unpack data
     uint greedy_quad = data.x;
@@ -125,7 +130,7 @@ void main() {
     face_data_uv = quad_size * INVERSE_MODEL_SIZE * vertex_offset;
 
     vec3 translation = face_to_world_coords(direction, float(plane), vertex_position);
-    vec4 clip_position = pc.uniforms.view_projection * vec4(translation * INVERSE_MODEL_SIZE + pc.uniforms.position, 1.0);
+    vec4 clip_position = uniforms.view_projection * vec4(translation * INVERSE_MODEL_SIZE + uniforms.position, 1.0);
 
     // The chunk of code below is an AI-generated fix for the terrain getting plagued by lots of unrasterized pixels,
     // especially on mobiles.
@@ -134,19 +139,19 @@ void main() {
     // A voxel face's two axes are always world X/Y/Z, so their clip-space directions are matrix columns. Project both
     // directions at this vertex without another matrix multiply; the common perspective divisor is unnecessary.
     vec3 clip_u = direction >= 2 && direction < 4
-            ? pc.uniforms.view_projection[2].xyw
-            : pc.uniforms.view_projection[0].xyw;
+            ? uniforms.view_projection[2].xyw
+            : uniforms.view_projection[0].xyw;
     vec3 clip_v = direction < 2
-            ? pc.uniforms.view_projection[2].xyw
-            : pc.uniforms.view_projection[1].xyw;
+            ? uniforms.view_projection[2].xyw
+            : uniforms.view_projection[1].xyw;
     vec2 tangent_u = clip_u.xy * clip_position.w - clip_position.xy * clip_u.z;
     vec2 tangent_v = clip_v.xy * clip_position.w - clip_position.xy * clip_v.z;
 
     // Offset both edges incident to this corner against an axis-aligned screen-space rectangle. Solving in the quad's
     // projected U/V basis guarantees that every edge moves outward; simply moving away from the center does not.
     float projected_area = abs(tangent_u.x * tangent_v.y - tangent_u.y * tangent_v.x);
-    float u_edge_expansion = dot(abs(tangent_v.yx), pc.uniforms.quad_expansion.xy);
-    float v_edge_expansion = dot(abs(tangent_u.yx), pc.uniforms.quad_expansion.xy);
+    float u_edge_expansion = dot(abs(tangent_v.yx), uniforms.quad_expansion.xy);
+    float v_edge_expansion = dot(abs(tangent_u.yx), uniforms.quad_expansion.xy);
     vec2 corner_direction = vertex_offset * 2.0 - 1.0;
     vec2 raw_offset =
               tangent_u * (corner_direction.x * u_edge_expansion)
@@ -157,8 +162,8 @@ void main() {
     float bounded_area = max(
             projected_area,
             max(
-                    abs(raw_offset.x) * pc.uniforms.quad_expansion.z,
-                    abs(raw_offset.y) * pc.uniforms.quad_expansion.w));
+                    abs(raw_offset.x) * uniforms.quad_expansion.z,
+                    abs(raw_offset.y) * uniforms.quad_expansion.w));
     float valid_area = step(1e-12, projected_area);
     float inverse_bounded_area = valid_area / max(bounded_area, 1e-12);
     clip_position.xy += raw_offset * (clip_position.w * inverse_bounded_area);

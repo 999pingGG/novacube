@@ -44,11 +44,8 @@ enum {
     NC__RENDERER_BUFFER_PAGE_RETENTION_FRAMES = 60,
     NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY = 128,
     NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE = 8,
-    NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS = 256,
-    NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT = 16,
-    NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET = 0,
-    NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET = 8,
-    NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET = 16,
+    NC__RENDERER_MAX_DESCRIPTOR_SETS = 256,
+    NC__RENDERER_MAX_PUSH_CONSTANT_SIZE = 3 * sizeof(uint32_t),
 };
 // TODO: Maybe this value could be tuned down for devices with a `subPixelPrecisionBits` property higher than 4.
 // Need testing on more devices.
@@ -116,9 +113,9 @@ typedef struct nc__renderer_buffer_range_t {
 
 typedef struct nc__renderer_buffer_page_t {
     VkBuffer buffer;
-    VkDeviceAddress address;
+    VkDescriptorSet descriptor_set;
     VmaAllocation allocation;
-    // Transfer pages stay mapped for their entire lifetime. Device-local pages leave this NULL.
+    // Host-visible pages stay mapped for their entire lifetime. Device-local pages leave this NULL.
     void* mapping;
     nc__renderer_buffer_range_vec free_ranges;
     struct nc__renderer_buffer_page_t* next;
@@ -135,7 +132,7 @@ typedef struct nc__renderer_buffer_slice_t {
 
 typedef struct nc__renderer_buffer_allocator_t {
     // Page creation settings live here because this allocator may grow long after renderer initialization.
-    // A linked list keeps page addresses stable while slices and pending uploads point into them.
+    // A linked list keeps page objects stable while slices and pending uploads point into them.
     nc__renderer_buffer_page_t* pages;
     VkBufferUsageFlags buffer_usage;
     VmaMemoryUsage memory_usage;
@@ -150,7 +147,7 @@ typedef struct nc_renderer_chunk_mesh_t {
     // leave it NULL. This avoids allocating a separate retirement-list node for every destroyed or replaced mesh.
     struct nc_renderer_chunk_mesh_t* next_retired_mesh;
     // Packed order is opaque quads/faces followed by transparent quads/faces. Equal 8-byte element strides let each
-    // draw derive its face-data address from one pass address plus its quad count.
+    // draw derive its face-data index from one pass index plus its quad count.
     uint32_t opaque_quad_count;
     uint32_t transparent_quad_count;
     uint32_t transparent_offset;
@@ -172,12 +169,6 @@ typedef struct nc__renderer_upload_op_t {
     nc__renderer_upload_kind_t kind;
 } nc__renderer_upload_op_t;
 
-typedef struct nc__renderer_retired_texture_t {
-    VkImage image;
-    VkImageView image_view;
-    VmaAllocation allocation;
-} nc__renderer_retired_texture_t;
-
 typedef struct nc__renderer_retired_swapchain_t {
     VkSwapchainKHR swapchain;
     VkSemaphore* present_semaphores;
@@ -188,12 +179,13 @@ typedef struct nc_renderer_texture_t {
     VkImage image;
     VmaAllocation allocation;
     VkImageView image_view;
-    VkImageLayout layout;
+    VkDescriptorSet descriptor_set;
     int16_t width;
     int16_t height;
     uint16_t layer_count;
     uint8_t mip_level_count;
 } nc_renderer_texture_t;
+typedef nc_renderer_texture_t* nc__renderer_texture_ptr_t;
 
 typedef struct nc__renderer_procedural_overlay_uniforms_t {
     float rings[2][4];
@@ -206,10 +198,9 @@ typedef struct nc__renderer_gui_uniforms_t {
     vkm_vec2 gui_to_ndc_scale;
 } nc__renderer_gui_uniforms_t;
 
-// The transform is constant for the frame; the rectangle address advances between ordered batches.
 typedef struct nc__renderer_gui_push_constants_t {
-    VkDeviceAddress uniforms;
-    VkDeviceAddress rectangles;
+    uint32_t uniforms;
+    uint32_t rectangles;
 } nc__renderer_gui_push_constants_t;
 
 static_assert(sizeof(nc_renderer_overlay_rectangle_t) == 84, "GUI rectangle must match its scalar GLSL layout");
@@ -217,15 +208,12 @@ static_assert(
         offsetof(nc_renderer_overlay_rectangle_t, character) == 80,
         "GUI rectangle character offset must match GLSL");
 
-typedef struct nc__renderer_block_highlight_vertex_uniforms_t {
+typedef struct nc__renderer_block_highlight_uniforms_t {
     vkm_mat4 view_projection;
     vkm_vec4 block_position_and_scale;
-} nc__renderer_block_highlight_vertex_uniforms_t;
-
-typedef struct nc__renderer_block_highlight_fragment_uniforms_t {
     vkm_vec4 color;
     float time;
-} nc__renderer_block_highlight_fragment_uniforms_t;
+} nc__renderer_block_highlight_uniforms_t;
 
 typedef struct nc__renderer_chunk_uniforms_t {
     vkm_mat4 view_projection;
@@ -242,21 +230,28 @@ typedef struct nc__renderer_sky_uniforms_t {
 } nc__renderer_sky_uniforms_t;
 
 typedef struct nc__renderer_chunk_push_constants_t {
-    VkDeviceAddress quad_buffer;
-    VkDeviceAddress uniforms;
-    VkDeviceAddress face_data_buffer;
+    uint32_t uniforms;
+    uint32_t quads;
+    uint32_t face_data;
 } nc__renderer_chunk_push_constants_t;
 
-typedef struct nc__renderer_address_push_constants_t {
-    VkDeviceAddress data;
-} nc__renderer_address_push_constants_t;
+typedef struct nc__renderer_procedural_overlay_push_constants_t {
+    uint32_t uniforms;
+    uint32_t element;
+} nc__renderer_procedural_overlay_push_constants_t;
+
+static_assert(sizeof(nc__renderer_procedural_overlay_uniforms_t) == 80, "Procedural uniforms must match GLSL");
+static_assert(sizeof(nc__renderer_gui_uniforms_t) == 72, "GUI uniforms must match their scalar GLSL array stride");
+static_assert(sizeof(nc__renderer_block_highlight_uniforms_t) == 100, "Highlight uniforms must match GLSL");
+static_assert(sizeof(nc__renderer_chunk_uniforms_t) == 96, "Chunk uniforms must match their scalar GLSL array stride");
+static_assert(sizeof(nc__renderer_sky_uniforms_t) == 160, "Sky uniforms must match their scalar GLSL array stride");
 
 #define TDS_TYPE nc__renderer_upload_op_vec
 #define TDS_VALUE_T nc__renderer_upload_op_t
 #include <tds/vector.h>
 
 #define TDS_TYPE nc__renderer_retired_texture_vec
-#define TDS_VALUE_T nc__renderer_retired_texture_t
+#define TDS_VALUE_T nc__renderer_texture_ptr_t
 #include <tds/vector.h>
 
 #define TDS_TYPE nc__renderer_retired_swapchain_vec
@@ -276,8 +271,6 @@ typedef struct nc_renderer_t {
     VkDevice device;
     VkQueue queue;
     uint32_t queue_family_index;
-    PFN_vkGetBufferDeviceAddressKHR get_buffer_device_address;
-    bool khr_get_buffer_device_address;
     VmaAllocator allocator;
 
     SDL_Window* window;
@@ -305,11 +298,13 @@ typedef struct nc_renderer_t {
 
     VkRenderPass render_pass;
     VkDescriptorSetLayout texture_descriptor_set_layout;
+    VkDescriptorSetLayout buffer_descriptor_set_layout;
     VkDescriptorSetLayout composite_descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     VkPipelineLayout composite_pipeline_layout;
-    VkDescriptorPool frame_descriptor_pool;
-    uint32_t frame_descriptor_set_count;
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet composite_descriptor_set;
+    VkDescriptorSet bound_descriptor_sets[3];
 
     VkPipeline opaque_chunk_pipeline;
     VkPipeline transparent_chunk_pipeline;
@@ -322,8 +317,7 @@ typedef struct nc_renderer_t {
     VkPipeline vignette_block_highlight_pipeline;
     VkPipeline plasma_block_highlight_pipeline;
     VkPipeline sky_pipeline;
-    VkSampler chunk_sampler;
-    VkSampler gui_sampler;
+    VkSampler texture_sampler;
     nc_renderer_texture_t* procedural_overlay_crosshair_texture;
 
     VkCommandPool command_pool;
@@ -348,6 +342,7 @@ typedef struct nc_renderer_t {
     uint32_t swapchain_retirement_probe_image_index;
 
     nc__renderer_buffer_allocator_t transfer_allocator;
+    nc__renderer_buffer_allocator_t frame_data_allocator;
     nc__renderer_buffer_allocator_t chunk_allocator;
 
     nc__renderer_upload_op_vec upload_ops;
@@ -355,7 +350,6 @@ typedef struct nc_renderer_t {
     nc__renderer_retired_texture_vec retired_textures;
     // Every old generation waiting on the current replacement's acquire-based retirement proof.
     nc__renderer_retired_swapchain_vec retired_swapchains;
-    bool uploads_dirty;
 
     uint64_t frame_id;
 } nc_renderer_t;
@@ -374,18 +368,13 @@ static const nc__renderer_required_extension nc__renderer_required_extensions[] 
         .alternative_names = (const char* const []){ VK_KHR_SWAPCHAIN_EXTENSION_NAME, NULL },
     },
     {
-        .alternative_names = (const char* const []){
-            VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-            VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-            NULL,
-        },
-    },
-    {
         .alternative_names = (const char* const []){ VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME, NULL },
     },
 };
 
 #define NC__RENDERER_REQUIRED_EXTENSION_COUNT NC_COUNTOF(nc__renderer_required_extensions)
+
+static void nc__renderer_update_composite_descriptor_set(const nc_renderer_t* renderer);
 
 static const char* nc__renderer_vk_result_string(const VkResult result) {
 #define NC__VULKAN_ERROR_CASE(x) case x: return #x
@@ -526,13 +515,52 @@ static vkm_vec2 nc__renderer_pre_rotate_point(const nc_renderer_t* renderer, con
     }
 }
 
-static VkDeviceAddress nc__renderer_get_buffer_address(const nc_renderer_t* renderer, VkBuffer buffer) {
-    return renderer->get_buffer_device_address(
+static bool nc__renderer_allocate_descriptor_set(
+    const nc_renderer_t* renderer,
+    VkDescriptorSetLayout layout,
+    VkDescriptorSet* out_descriptor_set
+) {
+    const VkResult result = vkAllocateDescriptorSets(
             renderer->device,
-            &(VkBufferDeviceAddressInfo){
-                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                .buffer = buffer,
-            });
+            &(VkDescriptorSetAllocateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                .descriptorPool = renderer->descriptor_pool,
+                .descriptorSetCount = 1,
+                .pSetLayouts = &layout,
+            },
+            out_descriptor_set);
+    NC__CHECK_VK_RESULT(result);
+    return true;
+error:
+    return false;
+}
+
+static void nc__renderer_free_descriptor_set(const nc_renderer_t* renderer, VkDescriptorSet descriptor_set) {
+    if (descriptor_set) {
+        vkFreeDescriptorSets(renderer->device, renderer->descriptor_pool, 1, &descriptor_set);
+    }
+}
+
+static void nc__renderer_bind_descriptor_set(
+    nc_renderer_t* renderer,
+    const uint32_t set_index,
+    VkDescriptorSet descriptor_set
+) {
+    NC_ASSERT(set_index < NC_COUNTOF(renderer->bound_descriptor_sets));
+    if (renderer->bound_descriptor_sets[set_index] == descriptor_set) {
+        return;
+    }
+
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout,
+            set_index,
+            1,
+            &descriptor_set,
+            0,
+            NULL);
+    renderer->bound_descriptor_sets[set_index] = descriptor_set;
 }
 
 static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
@@ -557,6 +585,7 @@ static bool nc__renderer_buffer_page_is_empty(const nc__renderer_buffer_page_t* 
 }
 
 static void nc__renderer_destroy_buffer_page(nc_renderer_t* renderer, nc__renderer_buffer_page_t* page) {
+    nc__renderer_free_descriptor_set(renderer, page->descriptor_set);
     vmaDestroyBuffer(renderer->allocator, page->buffer, page->allocation);
     nc__renderer_buffer_range_vec_fini(&page->free_ranges);
     free(page);
@@ -585,7 +614,32 @@ static bool nc__renderer_create_buffer_page(
             &page->buffer,
             &page->allocation,
             &allocation_info));
-    page->address = nc__renderer_get_buffer_address(renderer, page->buffer);
+    if (allocator->buffer_usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
+        // This is the minimum guaranteed maxStorageBufferRange.
+        NC_ASSERT(capacity <= 134217728);
+        if (!nc__renderer_allocate_descriptor_set(
+                renderer,
+                renderer->buffer_descriptor_set_layout,
+                &page->descriptor_set)) {
+            goto error;
+        }
+        vkUpdateDescriptorSets(
+                renderer->device,
+                1,
+                &(VkWriteDescriptorSet){
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = page->descriptor_set,
+                    .dstBinding = 0,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .pBufferInfo = &(VkDescriptorBufferInfo){
+                        .buffer = page->buffer,
+                        .range = capacity,
+                    },
+                },
+                0,
+                NULL);
+    }
     page->mapping = allocation_info.pMappedData;
     page->last_used_frame = renderer->frame_id;
     page->capacity = capacity;
@@ -599,6 +653,10 @@ static bool nc__renderer_create_buffer_page(
     return true;
 
 error:
+    nc__renderer_free_descriptor_set(renderer, page->descriptor_set);
+    if (page->buffer) {
+        vmaDestroyBuffer(renderer->allocator, page->buffer, page->allocation);
+    }
     nc__renderer_buffer_range_vec_fini(&page->free_ranges);
     free(page);
     return false;
@@ -834,8 +892,7 @@ static VkCompositeAlphaFlagBitsKHR nc__renderer_choose_composite_alpha(const VkC
 
 static bool nc__renderer_find_required_extensions(
     VkPhysicalDevice physical_device,
-    const char** out_enabled_extensions,
-    bool* khr_get_buffer_device_address
+    const char** out_enabled_extensions
 ) {
     VkExtensionProperties* extensions = NULL;
 
@@ -866,11 +923,6 @@ static bool nc__renderer_find_required_extensions(
         }
 
         out_enabled_extensions[enabled_extension_count++] = selected_name;
-        if (strcmp(selected_name, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
-            *khr_get_buffer_device_address = true;
-        } else if (strcmp(selected_name, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
-            *khr_get_buffer_device_address = false;
-        }
     }
 
     free(extensions);
@@ -884,19 +936,12 @@ error:
 static bool nc__renderer_physical_device_supports_required_features(
     const nc_renderer_t* renderer,
     VkPhysicalDevice physical_device,
-    const VkPhysicalDeviceProperties* properties,
-    const bool khr_get_buffer_device_address
+    const VkPhysicalDeviceProperties* properties
 ) {
     if (properties->apiVersion < NC__RENDERER_VK_API_VERSION) {
         return false;
     }
 
-    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
-    };
-    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
-    };
     VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_layout_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
     };
@@ -904,12 +949,6 @@ static bool nc__renderer_physical_device_supports_required_features(
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext = &scalar_block_layout_features,
     };
-    if (khr_get_buffer_device_address) {
-        scalar_block_layout_features.pNext = &buffer_device_address_features;
-    } else {
-        scalar_block_layout_features.pNext = &buffer_device_address_features_ext;
-    }
-
     vkGetPhysicalDeviceFeatures2(physical_device, &features);
 
     VkSurfaceCapabilitiesKHR surface_capabilities;
@@ -954,10 +993,7 @@ static bool nc__renderer_physical_device_supports_required_features(
     }
 #endif
 
-    const VkBool32 buffer_device_address = khr_get_buffer_device_address
-            ? buffer_device_address_features.bufferDeviceAddress
-            : buffer_device_address_features_ext.bufferDeviceAddress;
-    if (!buffer_device_address || !scalar_block_layout_features.scalarBlockLayout) {
+    if (!scalar_block_layout_features.scalarBlockLayout) {
         return false;
     }
 
@@ -1041,7 +1077,6 @@ static bool nc__renderer_select_physical_device(
     VkDeviceSize best_memory = 0;
     for (uint32_t i = 0; i < physical_device_count; i++) {
         uint32_t queue_family_index;
-        bool khr_get_buffer_device_address = false;
         const char* candidate_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
 
         VkPhysicalDeviceProperties physical_device_properties;
@@ -1049,13 +1084,11 @@ static bool nc__renderer_select_physical_device(
 
         if (!nc__renderer_find_required_extensions(
                 physical_devices[i],
-                candidate_device_extensions,
-                &khr_get_buffer_device_address)
+                candidate_device_extensions)
             || !nc__renderer_physical_device_supports_required_features(
                     renderer,
                     physical_devices[i],
-                    &physical_device_properties,
-                    khr_get_buffer_device_address)
+                    &physical_device_properties)
             || !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
             continue;
         }
@@ -1066,7 +1099,6 @@ static bool nc__renderer_select_physical_device(
             renderer->physical_device = physical_devices[i];
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
-            renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             break;
         }
@@ -1099,7 +1131,6 @@ static bool nc__renderer_select_physical_device(
             renderer->physical_device = physical_devices[i];
             renderer->queue_family_index = queue_family_index;
             renderer->physical_device_properties = physical_device_properties;
-            renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             best_memory = nc__renderer_get_vram_size(physical_devices[i]);
         } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
@@ -1114,7 +1145,6 @@ static bool nc__renderer_select_physical_device(
                 renderer->physical_device = physical_devices[i];
                 renderer->queue_family_index = queue_family_index;
                 renderer->physical_device_properties = physical_device_properties;
-                renderer->khr_get_buffer_device_address = khr_get_buffer_device_address;
                 memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
                 best_memory = current_memory;
             }
@@ -1180,20 +1210,6 @@ static bool nc__renderer_create_device(
 #else
     enabled_features.features.textureCompressionBC = VK_TRUE;
 #endif
-    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
-        .bufferDeviceAddress = VK_TRUE,
-    };
-
-    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT,
-        .bufferDeviceAddress = VK_TRUE,
-    };
-
-    scalar_block_layout_features.pNext = renderer->khr_get_buffer_device_address
-            ? (void*)&buffer_device_address_features
-            : (void*)&buffer_device_address_features_ext;
-
     NC__CHECK_VK_RESULT(vkCreateDevice(
             renderer->physical_device,
             &(VkDeviceCreateInfo){
@@ -1212,18 +1228,10 @@ static bool nc__renderer_create_device(
             NULL,
             &renderer->device));
     volkLoadDevice(renderer->device);
-    renderer->get_buffer_device_address = renderer->khr_get_buffer_device_address
-            ? vkGetBufferDeviceAddressKHR
-            : vkGetBufferDeviceAddressEXT;
-    if (!renderer->get_buffer_device_address) {
-        // last attempt at getting this function pointer
-        renderer->get_buffer_device_address = vkGetBufferDeviceAddress;
-    }
     vkGetDeviceQueue(renderer->device, renderer->queue_family_index, 0, &renderer->queue);
 
     NC__CHECK_VK_RESULT(vmaCreateAllocator(
             &(VmaAllocatorCreateInfo){
-                .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
                 .physicalDevice = renderer->physical_device,
                 .device = renderer->device,
                 .instance = renderer->instance,
@@ -2059,6 +2067,7 @@ static bool nc__renderer_create_swapchain(nc_renderer_t* renderer, const VkSwapc
             || !nc__renderer_create_framebuffers(renderer)) {
         goto error;
     }
+    nc__renderer_update_composite_descriptor_set(renderer);
 
     free(formats);
     renderer->swapchain_dirty = false;
@@ -2099,25 +2108,37 @@ static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
             renderer->device,
             &(VkDescriptorPoolCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                .flags = 0,
-                .maxSets = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
-                .poolSizeCount = 2,
+                .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+                .maxSets = NC__RENDERER_MAX_DESCRIPTOR_SETS,
+                .poolSizeCount = 3,
                 .pPoolSizes = (VkDescriptorPoolSize[]){
                     {
                         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        .descriptorCount = NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                        .descriptorCount = NC__RENDERER_MAX_DESCRIPTOR_SETS,
+                    },
+                    {
+                        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        .descriptorCount = NC__RENDERER_MAX_DESCRIPTOR_SETS,
                     },
                     {
                         .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
-                        .descriptorCount = 2 * NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS,
+                        .descriptorCount = 2,
                     },
                 },
             },
             NULL,
-            &renderer->frame_descriptor_pool));
+            &renderer->descriptor_pool));
+    if (!nc__renderer_allocate_descriptor_set(
+            renderer,
+            renderer->composite_descriptor_set_layout,
+            &renderer->composite_descriptor_set)) {
+        goto error;
+    }
     return true;
 
 error:
+    vkDestroyDescriptorPool(renderer->device, renderer->descriptor_pool, NULL);
+    renderer->descriptor_pool = VK_NULL_HANDLE;
     return false;
 }
 
@@ -2136,6 +2157,20 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
             },
             NULL,
             &renderer->texture_descriptor_set_layout));
+    NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
+            renderer->device,
+            &(VkDescriptorSetLayoutCreateInfo){
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .bindingCount = 1,
+                .pBindings = &(VkDescriptorSetLayoutBinding){
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                },
+            },
+            NULL,
+            &renderer->buffer_descriptor_set_layout));
     NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(
             renderer->device,
             &(VkDescriptorSetLayoutCreateInfo){
@@ -2162,20 +2197,16 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
             renderer->device,
             &(VkPipelineLayoutCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                .setLayoutCount = 1,
-                .pSetLayouts = &renderer->texture_descriptor_set_layout,
-                .pushConstantRangeCount = 2,
-                .pPushConstantRanges = (VkPushConstantRange[]){
-                    {
-                        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-                        .offset = NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
-                        .size = 2 * sizeof(VkDeviceAddress),
-                    },
-                    {
-                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                        .offset = sizeof(VkDeviceAddress),
-                        .size = 2 * sizeof(VkDeviceAddress),
-                    },
+                .setLayoutCount = 3,
+                .pSetLayouts = (VkDescriptorSetLayout[]){
+                    renderer->texture_descriptor_set_layout,
+                    renderer->buffer_descriptor_set_layout,
+                    renderer->buffer_descriptor_set_layout,
+                },
+                .pushConstantRangeCount = 1,
+                .pPushConstantRanges = &(VkPushConstantRange){
+                    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .size = NC__RENDERER_MAX_PUSH_CONSTANT_SIZE,
                 },
             },
             NULL,
@@ -2196,8 +2227,8 @@ error:
 }
 
 static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
-    vkDestroyDescriptorPool(renderer->device, renderer->frame_descriptor_pool, NULL);
-    renderer->frame_descriptor_pool = VK_NULL_HANDLE;
+    vkDestroyDescriptorPool(renderer->device, renderer->descriptor_pool, NULL);
+    renderer->descriptor_pool = VK_NULL_HANDLE;
 
     vkDestroyPipelineLayout(renderer->device, renderer->pipeline_layout, NULL);
     renderer->pipeline_layout = VK_NULL_HANDLE;
@@ -2207,6 +2238,9 @@ static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
 
     vkDestroyDescriptorSetLayout(renderer->device, renderer->texture_descriptor_set_layout, NULL);
     renderer->texture_descriptor_set_layout = VK_NULL_HANDLE;
+
+    vkDestroyDescriptorSetLayout(renderer->device, renderer->buffer_descriptor_set_layout, NULL);
+    renderer->buffer_descriptor_set_layout = VK_NULL_HANDLE;
 
     vkDestroyDescriptorSetLayout(renderer->device, renderer->composite_descriptor_set_layout, NULL);
     renderer->composite_descriptor_set_layout = VK_NULL_HANDLE;
@@ -2549,8 +2583,10 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer, nc_asset_mana
             "gui",
             "gui",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-            // Transfer pages already expose device addresses; vertex input would require a
-            // second upload API that exposes each page's VkBuffer and byte offset.
+            // TODO: Explore the possibility of just implementing vertex attributes just for this.
+            // Maybe that reduces descriptor complexity.
+            // Shader storage keeps the allocator page abstraction intact; vertex input would require a second upload
+            // API that exposes each page's VkBuffer and byte offset.
             &no_vertex_input,
             &raster_no_cull,
             &depth_disabled,
@@ -2656,7 +2692,6 @@ static void nc__renderer_destroy_pipelines(nc_renderer_t* renderer) {
 
 static bool nc__renderer_create_sampler(
     const nc_renderer_t* renderer,
-    const VkSamplerMipmapMode mipmap_mode,
     VkSampler* sampler
 ) {
     NC__CHECK_VK_RESULT(vkCreateSampler(
@@ -2665,7 +2700,7 @@ static bool nc__renderer_create_sampler(
                 .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                 .magFilter = VK_FILTER_NEAREST,
                 .minFilter = VK_FILTER_NEAREST,
-                .mipmapMode = mipmap_mode,
+                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
                 .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                 .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -2684,7 +2719,7 @@ static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer) {
             renderer->device,
             &(VkCommandPoolCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-                .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                 .queueFamilyIndex = renderer->queue_family_index,
             },
             NULL,
@@ -2717,115 +2752,37 @@ error:
     return false;
 }
 
-// Copies short-lived uniforms or draw data into the persistently mapped transfer arena and returns the GPU address
-// pushed to the shaders. The whole arena is reset only after the frame fence makes every returned address dead.
-static bool nc__renderer_write_buffer_reference_data(
+// Each shader-visible page owns one descriptor for its entire buffer. Aligning each allocation to its GLSL scalar
+// array stride lets draws select data with compact element indices without rewriting descriptors or wasting the
+// device's often-large storage-buffer descriptor offset alignment.
+static bool nc__renderer_write_frame_data(
     nc_renderer_t* renderer,
     const void* data,
-    const uint32_t size,
-    VkDeviceAddress* out_address
+    const uint32_t element_count,
+    const uint32_t element_size,
+    nc__renderer_buffer_page_t** out_page,
+    uint32_t* out_index
 ) {
+    NC_ASSERT(element_count && element_size && element_count <= UINT32_MAX / element_size);
+    const uint32_t size = element_count * element_size;
     nc__renderer_buffer_slice_t allocation;
     if (!nc__renderer_allocate_buffer_slice(
             renderer,
-            &renderer->transfer_allocator,
+            &renderer->frame_data_allocator,
             size,
-            NC__RENDERER_BUFFER_REFERENCE_ALIGNMENT,
+            element_size,
             &allocation)) {
         return false;
     }
     memcpy((uint8_t*)allocation.page->mapping + allocation.offset, data, size);
 
-    *out_address = allocation.page->address + allocation.offset;
+    NC_ASSERT(allocation.offset % element_size == 0);
+    *out_page = allocation.page;
+    *out_index = allocation.offset / element_size;
     return true;
 }
 
-static bool nc__renderer_bind_texture_descriptor_set(
-    nc_renderer_t* renderer,
-    const nc_renderer_texture_t* texture,
-    VkSampler sampler
-) {
-    if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
-        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
-        return false;
-    }
-
-    VkDescriptorSet texture_set;
-    const VkResult result = vkAllocateDescriptorSets(
-            renderer->device,
-            &(VkDescriptorSetAllocateInfo){
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                .descriptorPool = renderer->frame_descriptor_pool,
-                .descriptorSetCount = 1,
-                .pSetLayouts = &renderer->texture_descriptor_set_layout,
-            },
-            &texture_set);
-    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
-        return false;
-    }
-    NC__CHECK_VK_RESULT(result);
-
-    renderer->frame_descriptor_set_count++;
-
-    vkUpdateDescriptorSets(
-            renderer->device,
-            1,
-            &(VkWriteDescriptorSet){
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = texture_set,
-                .dstBinding = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo = &(VkDescriptorImageInfo){
-                    .sampler = sampler,
-                    .imageView = texture->image_view,
-                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                },
-            },
-            0,
-            NULL);
-
-    vkCmdBindDescriptorSets(
-            renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            renderer->pipeline_layout,
-            0,
-            1,
-            &texture_set,
-            0,
-            NULL);
-
-    return true;
-
-error:
-    return false;
-}
-
-static bool nc__renderer_bind_composite_descriptor_set(nc_renderer_t* renderer) {
-    if (renderer->frame_descriptor_set_count >= NC__RENDERER_MAX_FRAME_DESCRIPTOR_SETS) {
-        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
-        return false;
-    }
-
-    VkDescriptorSet descriptor_set;
-    const VkResult result = vkAllocateDescriptorSets(
-            renderer->device,
-            &(VkDescriptorSetAllocateInfo){
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                .descriptorPool = renderer->frame_descriptor_pool,
-                .descriptorSetCount = 1,
-                .pSetLayouts = &renderer->composite_descriptor_set_layout,
-            },
-            &descriptor_set);
-    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        NC_SET_ERROR("The per-frame Vulkan descriptor pool is exhausted.");
-        return false;
-    }
-    NC__CHECK_VK_RESULT(result);
-
-    renderer->frame_descriptor_set_count++;
-
+static void nc__renderer_update_composite_descriptor_set(const nc_renderer_t* renderer) {
     const VkDescriptorImageInfo image_infos[] = {
         {
             .imageView = renderer->accumulation.view,
@@ -2842,7 +2799,7 @@ static bool nc__renderer_bind_composite_descriptor_set(nc_renderer_t* renderer) 
             (VkWriteDescriptorSet[]){
                 {
                     .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet = descriptor_set,
+                    .dstSet = renderer->composite_descriptor_set,
                     .dstBinding = 0,
                     .descriptorCount = 1,
                     .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
@@ -2850,7 +2807,7 @@ static bool nc__renderer_bind_composite_descriptor_set(nc_renderer_t* renderer) 
                 },
                 {
                     .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet = descriptor_set,
+                    .dstSet = renderer->composite_descriptor_set,
                     .dstBinding = 1,
                     .descriptorCount = 1,
                     .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
@@ -2859,20 +2816,6 @@ static bool nc__renderer_bind_composite_descriptor_set(nc_renderer_t* renderer) 
             },
             0,
             NULL);
-
-    vkCmdBindDescriptorSets(
-            renderer->frame_command_buffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            renderer->composite_pipeline_layout,
-            0,
-            1,
-            &descriptor_set,
-            0,
-            NULL);
-    return true;
-
-error:
-    return false;
 }
 
 static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer, const SDL_Rect* scissor_rect) {
@@ -2905,7 +2848,7 @@ static void nc__renderer_set_viewport_and_scissor(const nc_renderer_t* renderer,
 }
 
 static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
-    if (!renderer->uploads_dirty || nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
+    if (nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         return true;
     }
 
@@ -2921,11 +2864,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     VkImageMemoryBarrier* image_barriers = texture_op_count > 0
             ? calloc(texture_op_count, sizeof(*image_barriers))
             : NULL;
-    nc_renderer_texture_t** barrier_textures = texture_op_count > 0
-            ? calloc(texture_op_count, sizeof(*barrier_textures))
-            : NULL;
     uint32_t texture_barrier_count = 0;
-    VkPipelineStageFlags texture_src_stages = 0;
 
     for (uint32_t i = 0; i < upload_count; i++) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
@@ -2933,10 +2872,10 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             continue;
         }
 
-        nc_renderer_texture_t* texture = op.texture.texture;
+        const nc_renderer_texture_t* texture = op.texture.texture;
         bool barrier_already_added = false;
         for (uint32_t j = 0; j < texture_barrier_count; j++) {
-            if (barrier_textures[j] == texture) {
+            if (image_barriers[j].image == texture->image) {
                 barrier_already_added = true;
                 break;
             }
@@ -2945,27 +2884,12 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             continue;
         }
 
-        VkAccessFlags src_access = 0;
-        switch (texture->layout) {
-            // TODO: Does this affect transaction elimination in ARM?
-            case VK_IMAGE_LAYOUT_UNDEFINED:
-                texture_src_stages |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-                break;
-            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-                texture_src_stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-                src_access = VK_ACCESS_SHADER_READ_BIT;
-                break;
-            default:
-                NC_ASSERT(false);
-                break;
-        }
-
-        barrier_textures[texture_barrier_count] = texture;
+        // Textures are immutable after their creation upload, so every image starts in the undefined layout. A future
+        // texture-update API would need to restore per-texture layout tracking here.
         image_barriers[texture_barrier_count] = (VkImageMemoryBarrier){
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .srcAccessMask = src_access,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-            .oldLayout = texture->layout,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2982,7 +2906,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     if (texture_barrier_count > 0) {
         vkCmdPipelineBarrier(
                 renderer->frame_command_buffer,
-                texture_src_stages,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 0,
                 0,
@@ -3060,7 +2984,6 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         image_barriers[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         image_barriers[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         image_barriers[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier_textures[i]->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
     // All uploads precede all drawing, so one global memory dependency is enough.
@@ -3085,8 +3008,6 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
     }
 
     nc__renderer_upload_op_vec_clear(&renderer->upload_ops);
-    renderer->uploads_dirty = false;
-    free((void*)barrier_textures);
     free(image_barriers);
     return true;
 }
@@ -3137,7 +3058,6 @@ static bool nc__renderer_queue_chunk_mesh_upload(
         .size = size,
         .buffer.mesh = mesh,
     });
-    renderer->uploads_dirty = true;
     return true;
 }
 
@@ -3166,7 +3086,6 @@ static bool nc__renderer_queue_texture_upload(
             .layer = layer,
         },
     });
-    renderer->uploads_dirty = true;
     return true;
 }
 
@@ -3188,8 +3107,6 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
     result->height = height;
     result->layer_count = layer_count;
     result->mip_level_count = mip_level_count;
-    // TODO: Does this affect transaction elimination in ARM?
-    result->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     NC__CHECK_VK_RESULT(vmaCreateImage(
             renderer->allocator,
@@ -3229,10 +3146,34 @@ static nc_renderer_texture_t* nc__renderer_create_texture_object(
             },
             NULL,
             &result->image_view));
+    if (!nc__renderer_allocate_descriptor_set(
+            renderer,
+            renderer->texture_descriptor_set_layout,
+            &result->descriptor_set)) {
+        goto error;
+    }
+    vkUpdateDescriptorSets(
+            renderer->device,
+            1,
+            &(VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = result->descriptor_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &(VkDescriptorImageInfo){
+                    .sampler = renderer->texture_sampler,
+                    .imageView = result->image_view,
+                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                },
+            },
+            0,
+            NULL);
     return result;
 
 error:
     if (result) {
+        nc__renderer_free_descriptor_set(renderer, result->descriptor_set);
         vkDestroyImageView(renderer->device, result->image_view, NULL);
         if (result->image) {
             vmaDestroyImage(renderer->allocator, result->image, result->allocation);
@@ -3256,7 +3197,6 @@ static void nc__renderer_cancel_uploads_for_texture(nc_renderer_t* renderer, con
             i++;
         }
     }
-    renderer->uploads_dirty = nc__renderer_upload_op_vec_count(&renderer->upload_ops) > 0;
 }
 
 static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, const nc_renderer_chunk_mesh_t* mesh) {
@@ -3272,12 +3212,20 @@ static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, 
             i++;
         }
     }
-    renderer->uploads_dirty = nc__renderer_upload_op_vec_count(&renderer->upload_ops) > 0;
 }
 
 static void nc__renderer_release_chunk_mesh(nc_renderer_t* renderer, nc_renderer_chunk_mesh_t* mesh) {
     nc__renderer_release_buffer_slice(renderer, &mesh->slice);
     free(mesh);
+}
+
+static void nc__renderer_destroy_texture_now(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
+    nc__renderer_free_descriptor_set(renderer, texture->descriptor_set);
+    vkDestroyImageView(renderer->device, texture->image_view, NULL);
+    if (texture->image) {
+        vmaDestroyImage(renderer->allocator, texture->image, texture->allocation);
+    }
+    free(texture);
 }
 
 static void nc__renderer_destroy_or_retire_texture(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
@@ -3288,22 +3236,11 @@ static void nc__renderer_destroy_or_retire_texture(nc_renderer_t* renderer, nc_r
     nc__renderer_cancel_uploads_for_texture(renderer, texture);
 
     if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        nc__renderer_retired_texture_vec_append(
-                &renderer->retired_textures,
-                (nc__renderer_retired_texture_t){
-                    .image = texture->image,
-                    .image_view = texture->image_view,
-                    .allocation = texture->allocation,
-                });
-        free(texture);
+        nc__renderer_retired_texture_vec_append(&renderer->retired_textures, texture);
         return;
     }
 
-    vkDestroyImageView(renderer->device, texture->image_view, NULL);
-    if (texture->image) {
-        vmaDestroyImage(renderer->allocator, texture->image, texture->allocation);
-    }
-    free(texture);
+    nc__renderer_destroy_texture_now(renderer, texture);
 }
 
 static void nc__renderer_destroy_retired_resources(nc_renderer_t* renderer) {
@@ -3315,11 +3252,10 @@ static void nc__renderer_destroy_retired_resources(nc_renderer_t* renderer) {
     }
 
     for (uint32_t i = 0; i < nc__renderer_retired_texture_vec_count(&renderer->retired_textures); i++) {
-        const nc__renderer_retired_texture_t texture = nc__renderer_retired_texture_vec_get(
+        nc_renderer_texture_t* texture = nc__renderer_retired_texture_vec_get(
                 &renderer->retired_textures,
                 i);
-        vkDestroyImageView(renderer->device, texture.image_view, NULL);
-        vmaDestroyImage(renderer->allocator, texture.image, texture.allocation);
+        nc__renderer_destroy_texture_now(renderer, texture);
     }
     nc__renderer_retired_texture_vec_clear(&renderer->retired_textures);
 }
@@ -3346,34 +3282,32 @@ static bool nc__renderer_draw_chunk(
         .sunlight_intensity = sunlight_intensity,
         .quad_expansion = *quad_expansion,
     };
-    const VkDeviceAddress mesh_address = draw->mesh->slice.page->address + draw->mesh->slice.offset;
-    const VkDeviceAddress pass_address = mesh_address + (transparent ? draw->mesh->transparent_offset : 0);
+    const uint32_t pass_offset = draw->mesh->slice.offset + (transparent ? draw->mesh->transparent_offset : 0);
+    NC_ASSERT(pass_offset % NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE == 0);
     nc__renderer_chunk_push_constants_t push_constants = {
-        .quad_buffer = pass_address,
-        .face_data_buffer = pass_address + quad_count * NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE,
+        .quads = pass_offset / NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE,
+        .face_data = pass_offset / NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE + quad_count,
     };
-    if (!nc__renderer_write_buffer_reference_data(
+    nc__renderer_buffer_page_t* uniforms_page;
+    if (!nc__renderer_write_frame_data(
             renderer,
             &uniforms,
+            1,
             sizeof(uniforms),
+            &uniforms_page,
             &push_constants.uniforms)) {
         return false;
     }
 
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
+    nc__renderer_bind_descriptor_set(renderer, 2, draw->mesh->slice.page->descriptor_set);
     vkCmdPushConstants(
             renderer->frame_command_buffer,
             renderer->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
-            2 * sizeof(VkDeviceAddress),
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(push_constants),
             &push_constants);
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            sizeof(VkDeviceAddress),
-            2 * sizeof(VkDeviceAddress),
-            &push_constants.uniforms);
     vkCmdDraw(renderer->frame_command_buffer, 4, quad_count, 0, 0);
     return true;
 }
@@ -3395,30 +3329,27 @@ static bool nc__renderer_draw_sky(
         },
         .gradient_stops = draw->gradient_stops,
     };
-    VkDeviceAddress uniforms_address;
-    if (!nc__renderer_write_buffer_reference_data(
+    nc__renderer_buffer_page_t* uniforms_page;
+    uint32_t uniforms_index;
+    if (!nc__renderer_write_frame_data(
             renderer,
             &uniforms,
+            1,
             sizeof(uniforms),
-            &uniforms_address)) {
+            &uniforms_page,
+            &uniforms_index)) {
         return false;
     }
 
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->sky_pipeline);
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
     vkCmdPushConstants(
             renderer->frame_command_buffer,
             renderer->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
-            sizeof(uniforms_address),
-            &uniforms_address);
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
-            sizeof(uniforms_address),
-            &uniforms_address);
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(uniforms_index),
+            &uniforms_index);
     vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
     return true;
 }
@@ -3432,13 +3363,10 @@ static bool nc__renderer_draw_block_highlight(
         return true;
     }
 
-    const nc__renderer_block_highlight_vertex_uniforms_t vertex_uniforms = {
+    const vkm_ubvec4 color = nc_cvar_get_block_highlight_color();
+    const nc__renderer_block_highlight_uniforms_t uniforms = {
         .view_projection = *view_projection,
         .block_position_and_scale = { { draw->position.x, draw->position.y, draw->position.z, 1.02f } },
-    };
-
-    const vkm_ubvec4 color = nc_cvar_get_block_highlight_color();
-    const nc__renderer_block_highlight_fragment_uniforms_t fragment_uniforms = {
         .color = {
             .r = nc__renderer_srgb_to_linear((float)color.r / 255.0f),
             .g = nc__renderer_srgb_to_linear((float)color.g / 255.0f),
@@ -3465,39 +3393,27 @@ static bool nc__renderer_draw_block_highlight(
             break;
     }
 
-    nc__renderer_address_push_constants_t push_constants;
-    if (!nc__renderer_write_buffer_reference_data(
+    nc__renderer_buffer_page_t* uniforms_page;
+    uint32_t uniforms_index;
+    if (!nc__renderer_write_frame_data(
             renderer,
-            &vertex_uniforms,
-            sizeof(vertex_uniforms),
-            &push_constants.data)) {
+            &uniforms,
+            1,
+            sizeof(uniforms),
+            &uniforms_page,
+            &uniforms_index)) {
         return false;
     }
 
     vkCmdBindPipeline(renderer->frame_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
     vkCmdPushConstants(
             renderer->frame_command_buffer,
             renderer->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
-            sizeof(push_constants),
-            &push_constants);
-
-    if (!nc__renderer_write_buffer_reference_data(
-            renderer,
-            &fragment_uniforms,
-            sizeof(fragment_uniforms),
-            &push_constants.data)) {
-        return false;
-    }
-
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
-            sizeof(push_constants),
-            &push_constants);
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(uniforms_index),
+            &uniforms_index);
     vkCmdDraw(renderer->frame_command_buffer, 36, 1, 0, 0);
     return true;
 }
@@ -3536,36 +3452,46 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         },
     };
     nc__renderer_gui_push_constants_t push_constants;
-    if (!nc__renderer_write_buffer_reference_data(
+    nc__renderer_buffer_page_t* uniforms_page;
+    if (!nc__renderer_write_frame_data(
             renderer,
             &uniforms,
+            1,
             sizeof(uniforms),
+            &uniforms_page,
             &push_constants.uniforms)) {
         return false;
     }
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
 
-    VkDeviceAddress rectangle_address = 0;
-    if (draw->rectangle_count && !nc__renderer_write_buffer_reference_data(
+    nc__renderer_buffer_page_t* rectangles_page = NULL;
+    uint32_t rectangles_index = 0;
+    if (draw->rectangle_count && !nc__renderer_write_frame_data(
             renderer,
             draw->rectangles,
-            draw->rectangle_count * sizeof(draw->rectangles[0]),
-            &rectangle_address)) {
+            draw->rectangle_count,
+            sizeof(draw->rectangles[0]),
+            &rectangles_page,
+            &rectangles_index)) {
         return false;
     }
 
     VkPipeline bound_pipeline = VK_NULL_HANDLE;
-    const nc_renderer_texture_t* bound_texture = NULL;
     for (uint32_t i = 0; i < draw->draw_command_count; i++) {
         const nc_renderer_overlay_draw_command_t* draw_command = &draw->draw_commands[i];
         SDL_FRect gui_scissor = draw_command->clip_rect;
         const nc_renderer_texture_t* texture;
+        nc__renderer_buffer_page_t* command_rectangles_page;
         uint32_t instance_count;
 
         if (draw_command->type == NC_RENDERER_OVERLAY_COMMAND_RECTANGLES) {
             texture = draw->font_texture;
             instance_count = draw_command->rectangles.rectangle_count;
-            push_constants.rectangles = rectangle_address +
-                    draw_command->rectangles.first_rectangle * sizeof(draw->rectangles[0]);
+            if (instance_count == 0) {
+                continue;
+            }
+            command_rectangles_page = rectangles_page;
+            push_constants.rectangles = rectangles_index + draw_command->rectangles.first_rectangle;
             if (bound_pipeline != renderer->gui_pipeline) {
                 vkCmdBindPipeline(
                         renderer->frame_command_buffer,
@@ -3587,10 +3513,12 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
                 .corner_radii = draw_command->image.corner_radii,
                 .overlay_color = draw_command->image.overlay_color,
             };
-            if (!nc__renderer_write_buffer_reference_data(
+            if (!nc__renderer_write_frame_data(
                     renderer,
                     &image,
+                    1,
                     sizeof(image),
+                    &command_rectangles_page,
                     &push_constants.rectangles)) {
                 return false;
             }
@@ -3623,11 +3551,8 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         if (!texture || texture->layer_count > 1) {
             continue;
         }
-        if (texture != bound_texture &&
-                !nc__renderer_bind_texture_descriptor_set(renderer, texture, renderer->gui_sampler)) {
-            return false;
-        }
-        bound_texture = texture;
+        nc__renderer_bind_descriptor_set(renderer, 0, texture->descriptor_set);
+        nc__renderer_bind_descriptor_set(renderer, 2, command_rectangles_page->descriptor_set);
 
         SDL_Rect framebuffer_scissor;
         const SDL_Rect* framebuffer_scissor_pointer = NULL;
@@ -3642,8 +3567,8 @@ static bool nc__renderer_draw_overlay(nc_renderer_t* renderer, const nc_renderer
         vkCmdPushConstants(
                 renderer->frame_command_buffer,
                 renderer->pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                NC__RENDERER_VERTEX_PUSH_CONSTANT_OFFSET,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
                 sizeof(push_constants),
                 &push_constants);
         vkCmdDraw(renderer->frame_command_buffer, 4, instance_count, 0, 0);
@@ -3685,22 +3610,19 @@ static bool nc__renderer_draw_procedural_overlay(
     uniforms.crosshair[2] = draw->crosshair_size;
     uniforms.crosshair[3] = draw->crosshair_size;
 
-    nc__renderer_address_push_constants_t push_constants;
-    if (!nc__renderer_write_buffer_reference_data(renderer, &uniforms, sizeof(uniforms), &push_constants.data) ||
-            !nc__renderer_bind_texture_descriptor_set(
+    nc__renderer_procedural_overlay_push_constants_t push_constants;
+    nc__renderer_buffer_page_t* uniforms_page;
+    if (!nc__renderer_write_frame_data(
             renderer,
-            renderer->procedural_overlay_crosshair_texture,
-            renderer->gui_sampler)) {
+            &uniforms,
+            1,
+            sizeof(uniforms),
+            &uniforms_page,
+            &push_constants.uniforms)) {
         return false;
     }
-
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            NC__RENDERER_FRAGMENT_PUSH_CONSTANT_OFFSET,
-            sizeof(push_constants),
-            &push_constants);
+    nc__renderer_bind_descriptor_set(renderer, 0, renderer->procedural_overlay_crosshair_texture->descriptor_set);
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
 
     const vkm_usvec2 framebuffer_size = nc_renderer_get_framebuffer_size(renderer);
     vkCmdBindPipeline(
@@ -3730,13 +3652,14 @@ static bool nc__renderer_draw_procedural_overlay(
         }
 
         nc__renderer_set_viewport_and_scissor(renderer, &scissor);
+        push_constants.element = i;
         vkCmdPushConstants(
                 renderer->frame_command_buffer,
                 renderer->pipeline_layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
-                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
-                sizeof(i),
-                &i);
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(push_constants),
+                &push_constants);
         vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
     }
 
@@ -3749,15 +3672,15 @@ static bool nc__renderer_draw_procedural_overlay(
     };
     const SDL_Rect crosshair_scissor = nc__renderer_gui_scissor(crosshair_bounds, framebuffer_size);
     if (crosshair_scissor.w > 0 && crosshair_scissor.h > 0) {
-        const uint32_t crosshair_element = 2;
         nc__renderer_set_viewport_and_scissor(renderer, &crosshair_scissor);
+        push_constants.element = 2;
         vkCmdPushConstants(
                 renderer->frame_command_buffer,
                 renderer->pipeline_layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
-                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
-                sizeof(crosshair_element),
-                &crosshair_element);
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(push_constants),
+                &push_constants);
         vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
     }
 
@@ -3784,13 +3707,14 @@ static bool nc__renderer_draw_procedural_overlay(
         }
 
         nc__renderer_set_viewport_and_scissor(renderer, &scissor);
+        push_constants.element = i;
         vkCmdPushConstants(
                 renderer->frame_command_buffer,
                 renderer->pipeline_layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
-                NC__RENDERER_FRAGMENT_ELEMENT_PUSH_CONSTANT_OFFSET,
-                sizeof(i),
-                &i);
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(push_constants),
+                &push_constants);
         vkCmdDraw(renderer->frame_command_buffer, 3, 1, 0, 0);
     }
     return true;
@@ -3828,7 +3752,15 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
                     result,
                     &result->transfer_allocator,
                     NC__RENDERER_STAGING_PAGE_CAPACITY,
-                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VMA_MEMORY_USAGE_AUTO,
+                    VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                    1)
+            || !nc__renderer_initialize_buffer_allocator(
+                    result,
+                    &result->frame_data_allocator,
+                    NC__RENDERER_STAGING_PAGE_CAPACITY,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                     VMA_MEMORY_USAGE_AUTO,
                     VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
                     1)
@@ -3836,14 +3768,11 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
                     result,
                     &result->chunk_allocator,
                     NC__RENDERER_CHUNK_PAGE_CAPACITY,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                     VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                     0,
                     NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY)
-            || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_LINEAR, &result->chunk_sampler)
-            || !nc__renderer_create_sampler(result, VK_SAMPLER_MIPMAP_MODE_NEAREST, &result->gui_sampler)
+            || !nc__renderer_create_sampler(result, &result->texture_sampler)
             || !nc__renderer_create_swapchain(result, VK_NULL_HANDLE)
             || !nc__renderer_create_pipelines(result, asset_manager)) {
         goto error;
@@ -3927,14 +3856,13 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
         renderer->retired_swapchains_pending_destruction = false;
     }
 
-    if (!renderer->uploads_dirty && nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
+    if (nc__renderer_upload_op_vec_count(&renderer->upload_ops) == 0) {
         nc__renderer_reset_buffer_allocator(&renderer->transfer_allocator);
         nc__renderer_trim_buffer_allocator(renderer, &renderer->transfer_allocator);
     }
+    nc__renderer_reset_buffer_allocator(&renderer->frame_data_allocator);
+    nc__renderer_trim_buffer_allocator(renderer, &renderer->frame_data_allocator);
     nc__renderer_trim_buffer_allocator(renderer, &renderer->chunk_allocator);
-
-    NC__CHECK_VK_RESULT(vkResetDescriptorPool(renderer->device, renderer->frame_descriptor_pool, 0));
-    renderer->frame_descriptor_set_count = 0;
 
     if ((renderer->swapchain_dirty || renderer->surface_dirty) && !nc__renderer_recreate_swapchain(renderer)) {
         goto error;
@@ -3946,6 +3874,7 @@ bool nc_renderer_begin_frame(nc_renderer_t* renderer) {
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                 .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             }));
+    memset(renderer->bound_descriptor_sets, 0, sizeof(renderer->bound_descriptor_sets));
     renderer->frame_in_progress = true;
 
     renderer->frame_has_swapchain_image = false;
@@ -4002,6 +3931,11 @@ bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     NC_ASSERT(renderer->frame_command_buffer);
 
     for (const nc__renderer_buffer_page_t* page = renderer->transfer_allocator.pages; page; page = page->next) {
+        if (page->flush_size > 0) {
+            NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->allocation, 0, page->flush_size));
+        }
+    }
+    for (const nc__renderer_buffer_page_t* page = renderer->frame_data_allocator.pages; page; page = page->next) {
         if (page->flush_size > 0) {
             NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->allocation, 0, page->flush_size));
         }
@@ -4327,9 +4261,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         (float)renderer->swapchain_extent.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
     } };
 
-    if (!nc__renderer_bind_texture_descriptor_set(renderer, frame->terrain_texture_array, renderer->chunk_sampler)) {
-        return false;
-    }
+    nc__renderer_bind_descriptor_set(renderer, 0, frame->terrain_texture_array->descriptor_set);
 
 #pragma region Opaque pass
     vkCmdBindPipeline(
@@ -4380,9 +4312,18 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
 
 #pragma region Composite pass
     vkCmdNextSubpass(renderer->frame_command_buffer, VK_SUBPASS_CONTENTS_INLINE);
-    if (!nc__renderer_bind_composite_descriptor_set(renderer)) {
-        return false;
-    }
+    vkCmdBindDescriptorSets(
+            renderer->frame_command_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->composite_pipeline_layout,
+            0,
+            1,
+            &renderer->composite_descriptor_set,
+            0,
+            NULL);
+    // The incompatible composite set-0 layout disturbs every cached main-layout set. Composite is bound only once per
+    // frame, so invalidating the useful main cache is simpler than maintaining a second cache for this one draw.
+    memset(renderer->bound_descriptor_sets, 0, sizeof(renderer->bound_descriptor_sets));
     vkCmdBindPipeline(
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4427,16 +4368,16 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         nc__renderer_wait_idle(renderer);
         nc__renderer_destroy_retired_resources(renderer);
 
-        nc__renderer_destroy_descriptor_state(renderer);
         nc__renderer_destroy_or_retire_texture(renderer, renderer->procedural_overlay_crosshair_texture);
 
         nc__renderer_destroy_pipelines(renderer);
-        vkDestroySampler(renderer->device, renderer->chunk_sampler, NULL);
-        vkDestroySampler(renderer->device, renderer->gui_sampler, NULL);
         nc__renderer_destroy_swapchain(renderer);
         vkDestroyRenderPass(renderer->device, renderer->render_pass, NULL);
         nc__renderer_buffer_allocator_fini(renderer, &renderer->transfer_allocator);
+        nc__renderer_buffer_allocator_fini(renderer, &renderer->frame_data_allocator);
         nc__renderer_buffer_allocator_fini(renderer, &renderer->chunk_allocator);
+        nc__renderer_destroy_descriptor_state(renderer);
+        vkDestroySampler(renderer->device, renderer->texture_sampler, NULL);
         vkDestroySemaphore(renderer->device, renderer->image_available_semaphore, NULL);
         vkDestroyFence(renderer->device, renderer->frame_fence, NULL);
         vkDestroyCommandPool(renderer->device, renderer->command_pool, NULL);
