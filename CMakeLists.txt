@@ -205,12 +205,17 @@ else()
     set_source_files_properties(src/vma_implementation.cpp PROPERTIES COMPILE_OPTIONS -w)
     target_compile_options(novacube PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
-            $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
-            $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
-    if(TARGET_X86 AND NOT ANDROID)
-        target_compile_options(novacube PRIVATE -march=haswell)
+            $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(novacube PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
+        target_link_options(novacube PRIVATE -nostdlib++)
+    else()
+        target_compile_options(novacube PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-nodefaultlibs>)
+        target_link_options(novacube PRIVATE -nodefaultlibs -lc)
     endif()
-    target_link_options(novacube PRIVATE -nostdlib++)
+    if(TARGET_X86 AND NOT ANDROID)
+        target_compile_options(novacube PRIVATE -march=silvermont)
+    endif()
 endif()
 
 target_include_directories(novacube PRIVATE

@@ -1471,7 +1471,7 @@ bool nc_asset_baker_bake_assets(const nc_asset_baker_options_t* options) {
     nc__asset_baker_source_asset_info_t info = {
         .output_database_file = output_database_file,
         .texconv_executable = options->texconv_executable ? options->texconv_executable : "texconv",
-        .astcenc_executable = options->astcenc_executable ? options->astcenc_executable : "astcenc-avx2",
+        .astcenc_executable = options->astcenc_executable ? options->astcenc_executable : "astcenc-sse4.1",
         .debug = options->debug,
         .mobile = options->platform == NC_ASSET_BAKER_PLATFORM_MOBILE,
         .strip_png_metadata = options->strip_png_metadata,

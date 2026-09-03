@@ -67,7 +67,7 @@
 // This is left ignored because in some macros using _Generic we list both const and non-const types. Some compilers
 // (clang and possibly others...?) throw a warning complaining about unreachable cases because qualifiers (const and
 // others) are discarded, so we just tell them to shut up, we use the same function in both variants anyway.
-#pragma GCC diagnostic ignored "-Wunreachable-code-generic-assoc"
+//#pragma GCC diagnostic ignored "-Wunreachable-code-generic-assoc"
 #endif
 
 #if !defined(_MSC_VER) || defined(__clang__)

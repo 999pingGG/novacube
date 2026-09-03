@@ -93,7 +93,7 @@ void nc_chunk_column_update_dirty(
         void* lookup_context);
 
 // Block-to-chunk conversion is floor division, not C's truncating division: block -1 belongs to chunk -1, not 0.
-inline int32_t nc_block_coord_to_chunk_coord(const int32_t block_coord) {
+static inline int32_t nc_block_coord_to_chunk_coord(const int32_t block_coord) {
     int32_t result = block_coord / NC_CHUNK_SIZE;
     if (block_coord < 0 && block_coord % NC_CHUNK_SIZE != 0) {
         result--;
@@ -101,15 +101,15 @@ inline int32_t nc_block_coord_to_chunk_coord(const int32_t block_coord) {
     return result;
 }
 
-inline int32_t nc_block_coord_to_chunk_local_coord(const int32_t block_coord, const int32_t chunk_coord) {
+static inline int32_t nc_block_coord_to_chunk_local_coord(const int32_t block_coord, const int32_t chunk_coord) {
     return (int32_t)((int64_t)block_coord - (int64_t)chunk_coord * NC_CHUNK_SIZE);
 }
 
-inline int32_t nc_chunk_local_coord_to_block_coord(const int32_t chunk_coord, const int32_t local_coord) {
+static inline int32_t nc_chunk_local_coord_to_block_coord(const int32_t chunk_coord, const int32_t local_coord) {
     return chunk_coord * NC_CHUNK_SIZE + local_coord;
 }
 
-inline void nc_block_to_chunk_coords(const vkm_ivec3* block_coords, vkm_ivec3* chunk_coords) {
+static inline void nc_block_to_chunk_coords(const vkm_ivec3* block_coords, vkm_ivec3* chunk_coords) {
     *chunk_coords = (vkm_ivec3){ {
         nc_block_coord_to_chunk_coord(block_coords->x),
         nc_block_coord_to_chunk_coord(block_coords->y),
@@ -117,7 +117,7 @@ inline void nc_block_to_chunk_coords(const vkm_ivec3* block_coords, vkm_ivec3* c
     } };
 }
 
-inline void nc_block_to_chunk_local_coords(
+static inline void nc_block_to_chunk_local_coords(
     const vkm_ivec3* block_coords,
     const vkm_ivec3* chunk_coords,
     vkm_ivec3* local_coords
@@ -129,18 +129,18 @@ inline void nc_block_to_chunk_local_coords(
     } };
 }
 
-inline vkm_ivec2 nc_chunk_to_chunk_column_coords(const vkm_ivec3* chunk_coords) {
+static inline vkm_ivec2 nc_chunk_to_chunk_column_coords(const vkm_ivec3* chunk_coords) {
     return (vkm_ivec2){ { chunk_coords->x, chunk_coords->z } };
 }
 
-inline void nc_block_column_to_chunk_column_coords(const vkm_ivec2* block_coords, vkm_ivec2* chunk_coords) {
+static inline void nc_block_column_to_chunk_column_coords(const vkm_ivec2* block_coords, vkm_ivec2* chunk_coords) {
     *chunk_coords = (vkm_ivec2){ {
         nc_block_coord_to_chunk_coord(block_coords->x),
         nc_block_coord_to_chunk_coord(block_coords->y),
     } };
 }
 
-inline void nc_block_column_to_chunk_local_coords(
+static inline void nc_block_column_to_chunk_local_coords(
     const vkm_ivec2* block_coords,
     const vkm_ivec2* chunk_coords,
     vkm_ivec2* local_coords
@@ -151,14 +151,14 @@ inline void nc_block_column_to_chunk_local_coords(
     } };
 }
 
-inline bool nc_chunk_coords_are_valid(const vkm_ivec3* coords) {
+static inline bool nc_chunk_coords_are_valid(const vkm_ivec3* coords) {
     return coords->x >= NC_MIN_CHUNK_COORD && coords->x <= NC_MAX_CHUNK_COORD
             && coords->y >= NC_MIN_CHUNK_COORD && coords->y <= NC_MAX_CHUNK_COORD
             && coords->z >= NC_MIN_CHUNK_COORD && coords->z <= NC_MAX_CHUNK_COORD;
 }
 
 // Checked chunk arithmetic also guarantees that every block coordinate inside the result fits in an int32_t.
-inline bool nc_chunk_offset_coords(
+static inline bool nc_chunk_offset_coords(
     const vkm_ivec3* coords,
     const int offset_x,
     const int offset_y,
@@ -178,7 +178,7 @@ inline bool nc_chunk_offset_coords(
 }
 
 // World positions use the containing block (mathematical floor), then reuse the same block-to-chunk conversion path.
-inline bool nc_world_position_coord_to_block_coord(const float position, int32_t* block_coord) {
+static inline bool nc_world_position_coord_to_block_coord(const float position, int32_t* block_coord) {
     if (!isfinite(position)) {
         return false;
     }
@@ -190,13 +190,13 @@ inline bool nc_world_position_coord_to_block_coord(const float position, int32_t
     return true;
 }
 
-inline bool nc_world_position_to_block_coords(const vkm_vec3* position, vkm_ivec3* block_coords) {
+static inline bool nc_world_position_to_block_coords(const vkm_vec3* position, vkm_ivec3* block_coords) {
     return nc_world_position_coord_to_block_coord(position->x, &block_coords->x)
             && nc_world_position_coord_to_block_coord(position->y, &block_coords->y)
             && nc_world_position_coord_to_block_coord(position->z, &block_coords->z);
 }
 
-inline bool nc_world_position_to_chunk_coords(const vkm_vec3* position, vkm_ivec3* chunk_coords) {
+static inline bool nc_world_position_to_chunk_coords(const vkm_vec3* position, vkm_ivec3* chunk_coords) {
     vkm_ivec3 block_coords;
     if (!nc_world_position_to_block_coords(position, &block_coords)) {
         return false;

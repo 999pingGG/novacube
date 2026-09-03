@@ -19,6 +19,7 @@ _Pragma("GCC diagnostic ignored \"-Wunused-parameter\"")
 _Pragma("GCC diagnostic ignored \"-Wmissing-field-initializers\"")
 _Pragma("GCC diagnostic ignored \"-Wsign-compare\"")
 _Pragma("GCC diagnostic ignored \"-Waggressive-loop-optimizations\"")
+_Pragma("GCC diagnostic ignored \"-Wunknown-pragmas\"")
 #define NC_IGNORE_ALL_WARNINGS_END   _Pragma("GCC diagnostic pop")
 #else
 #define NC_IGNORE_ALL_WARNINGS_BEGIN

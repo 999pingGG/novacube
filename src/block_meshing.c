@@ -67,6 +67,9 @@ static void nc__mesh_binary_plane(
                 width++;
             }
 
+	    if (quad_count >= 128) {
+		    printf("QUAD COUNT!!! %d\n", quad_count);
+	    }
             NC_ASSERT(quad_count < 128);
             result[quad_count++] = (nc_greedy_quad_t){
                 .x = (uint8_t)row,

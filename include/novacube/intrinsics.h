@@ -14,7 +14,8 @@
 
 static inline uint16_t nc__u16_trailing_zeroes(const uint16_t x) {
 #ifdef NC__X86_INTRINSICS
-    return _tzcnt_u16(x);
+	if (x == 0) return 16;
+    return __builtin_ctz(x);
 #else
     return x == 0 ? 16 : (uint16_t)__builtin_ctz((unsigned int)x);
 #endif
@@ -22,7 +23,8 @@ static inline uint16_t nc__u16_trailing_zeroes(const uint16_t x) {
 
 static inline uint16_t nc__u16_trailing_ones(const uint16_t x) {
 #ifdef NC__X86_INTRINSICS
-    return _tzcnt_u16((uint16_t)~x);
+	if (x == 0xffff) return 16;
+    return __builtin_ctz((uint16_t)~x);
 #else
     return x == UINT16_MAX ? 16 : (uint16_t)__builtin_ctz((unsigned int)(uint16_t)~x);
 #endif
@@ -30,7 +32,8 @@ static inline uint16_t nc__u16_trailing_ones(const uint16_t x) {
 
 static inline uint32_t nc__u32_trailing_zeroes(const uint32_t x) {
 #ifdef NC__X86_INTRINSICS
-    return _tzcnt_u32(x);
+	if (x == 0) return 32;
+    return __builtin_ctz(x);
 #else
     return x == 0 ? 32 : (uint32_t)__builtin_ctz(x);
 #endif
@@ -38,7 +41,8 @@ static inline uint32_t nc__u32_trailing_zeroes(const uint32_t x) {
 
 static inline uint32_t nc__u32_trailing_ones(const uint32_t x) {
 #ifdef NC__X86_INTRINSICS
-    return _tzcnt_u32(~x);
+	if (x == 0xffffffff) return 32;
+    return __builtin_ctz(~x);
 #else
     return x == UINT32_MAX ? 32 : (uint32_t)__builtin_ctz(~x);
 #endif

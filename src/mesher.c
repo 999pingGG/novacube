@@ -23,6 +23,9 @@ void nc_mesher_mesh_binary_plane(
 ) {
     int quad_count = 0;
 
+    int debug = 0;
+    int prev = 0;
+
     for (int row = 0; row < NC_CHUNK_SIZE; row++) {
         int column = 0;
         while (column < lod_size) {
@@ -62,6 +65,10 @@ void nc_mesher_mesh_binary_plane(
                 .height = (uint8_t)height,
             };
 
+	    if (prev == quad_count) {
+		    debug++;
+	    }
+	    prev = quad_count;
             quad_count++;
             column += height;
         }

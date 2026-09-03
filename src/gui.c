@@ -617,6 +617,9 @@ const nc_gui_view_t* nc_gui_get_view(nc_gui_context_t* context) {
 bool nc_gui_handle_event(nc_gui_context_t* context, const SDL_Event* event) {
     nc__gui_update_view(context);
 
+    char t[1024];
+    SDL_GetEventDescription(event, t, 1024);
+    puts(t);
     switch (event->type) {
         case SDL_EVENT_MOUSE_MOTION:
             if (!context->captured_finger_active &&
