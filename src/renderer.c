@@ -267,10 +267,8 @@ typedef struct nc__renderer_image_t {
 typedef struct nc_renderer_t {
     VkInstance instance;
     VkPhysicalDevice physical_device;
-    VkPhysicalDeviceProperties physical_device_properties;
     VkDevice device;
     VkQueue queue;
-    uint32_t queue_family_index;
     VmaAllocator allocator;
 
     SDL_Window* window;
@@ -1059,7 +1057,9 @@ VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physical_device) {
 static bool nc__renderer_select_physical_device(
     nc_renderer_t* renderer,
     const bool prefer_low_power,
-    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT]
+    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT],
+    char chosen_device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE],
+    uint32_t* queue_family_index
 ) {
     VkPhysicalDevice* physical_devices = NULL;
 
@@ -1076,7 +1076,7 @@ static bool nc__renderer_select_physical_device(
     int highest_score = 0;
     VkDeviceSize best_memory = 0;
     for (uint32_t i = 0; i < physical_device_count; i++) {
-        uint32_t queue_family_index;
+        uint32_t candidate_queue_family_index;
         const char* candidate_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
 
         VkPhysicalDeviceProperties physical_device_properties;
@@ -1089,7 +1089,7 @@ static bool nc__renderer_select_physical_device(
                     renderer,
                     physical_devices[i],
                     &physical_device_properties)
-            || !nc__renderer_find_queue_family(renderer, physical_devices[i], &queue_family_index)) {
+            || !nc__renderer_find_queue_family(renderer, physical_devices[i], &candidate_queue_family_index)) {
             continue;
         }
 
@@ -1097,8 +1097,8 @@ static bool nc__renderer_select_physical_device(
             // Insuperable GPU.
             highest_score = 999;
             renderer->physical_device = physical_devices[i];
-            renderer->queue_family_index = queue_family_index;
-            renderer->physical_device_properties = physical_device_properties;
+            *queue_family_index = candidate_queue_family_index;
+            strcpy(chosen_device_name, physical_device_properties.deviceName);
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             break;
         }
@@ -1129,8 +1129,8 @@ static bool nc__renderer_select_physical_device(
             // Prioritize a GPU of the preferred type.
             highest_score = current_score;
             renderer->physical_device = physical_devices[i];
-            renderer->queue_family_index = queue_family_index;
-            renderer->physical_device_properties = physical_device_properties;
+            *queue_family_index = candidate_queue_family_index;
+            strcpy(chosen_device_name, physical_device_properties.deviceName);
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             best_memory = nc__renderer_get_vram_size(physical_devices[i]);
         } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
@@ -1143,8 +1143,8 @@ static bool nc__renderer_select_physical_device(
 
             if (preferred) {
                 renderer->physical_device = physical_devices[i];
-                renderer->queue_family_index = queue_family_index;
-                renderer->physical_device_properties = physical_device_properties;
+                *queue_family_index = candidate_queue_family_index;
+                strcpy(chosen_device_name, physical_device_properties.deviceName);
                 memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
                 best_memory = current_memory;
             }
@@ -1192,7 +1192,8 @@ error:
 
 static bool nc__renderer_create_device(
     nc_renderer_t* renderer,
-    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT]
+    const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT],
+    const uint32_t queue_family_index
 ) {
     VkPhysicalDeviceFeatures2 enabled_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -1218,7 +1219,7 @@ static bool nc__renderer_create_device(
                 .queueCreateInfoCount = 1,
                 .pQueueCreateInfos = &(VkDeviceQueueCreateInfo){
                     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                    .queueFamilyIndex = renderer->queue_family_index,
+                    .queueFamilyIndex = queue_family_index,
                     .queueCount = 1,
                     .pQueuePriorities = &(float){ 1.0f },
                 },
@@ -1228,7 +1229,7 @@ static bool nc__renderer_create_device(
             NULL,
             &renderer->device));
     volkLoadDevice(renderer->device);
-    vkGetDeviceQueue(renderer->device, renderer->queue_family_index, 0, &renderer->queue);
+    vkGetDeviceQueue(renderer->device, queue_family_index, 0, &renderer->queue);
 
     NC__CHECK_VK_RESULT(vmaCreateAllocator(
             &(VmaAllocatorCreateInfo){
@@ -2714,13 +2715,13 @@ error:
     return false;
 }
 
-static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer) {
+static bool nc__renderer_create_frame_resources(nc_renderer_t* renderer, const uint32_t queue_family_index) {
     NC__CHECK_VK_RESULT(vkCreateCommandPool(
             renderer->device,
             &(VkCommandPoolCreateInfo){
                 .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                 .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-                .queueFamilyIndex = renderer->queue_family_index,
+                .queueFamilyIndex = queue_family_index,
             },
             NULL,
             &renderer->command_pool));
@@ -3722,10 +3723,10 @@ static bool nc__renderer_draw_procedural_overlay(
 
 nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_manager_t* asset_manager) {
     nc_texture_baked_asset_t crosshair_texture_asset = { 0 };
+    uint32_t queue_family_index = UINT32_MAX;
 
     nc_renderer_t* result = calloc(1, sizeof(*result));
     result->foreground = true;
-    result->queue_family_index = UINT32_MAX;
 
     bool sdl_result = SDL_InitSubSystem(SDL_INIT_VIDEO);
     NC_CHECK_SDL_RESULT(sdl_result);
@@ -3740,14 +3741,20 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
     NC_CHECK_SDL_RESULT(sdl_result);
 
     const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
+    char chosen_device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
     if (!nc__renderer_create_instance(result)
             || !nc__renderer_create_window(result, info)
             || !nc__renderer_create_surface(result)
-            || !nc__renderer_select_physical_device(result, info->prefer_low_power, enabled_device_extensions)
-            || !nc__renderer_create_device(result, enabled_device_extensions)
+            || !nc__renderer_select_physical_device(
+                    result,
+                    info->prefer_low_power,
+                    enabled_device_extensions,
+                    chosen_device_name,
+                    &queue_family_index)
+            || !nc__renderer_create_device(result, enabled_device_extensions, queue_family_index)
             || !nc__renderer_create_descriptor_set_layouts(result)
             || !nc__renderer_create_descriptor_pool(result)
-            || !nc__renderer_create_frame_resources(result)
+            || !nc__renderer_create_frame_resources(result, queue_family_index)
             || !nc__renderer_initialize_buffer_allocator(
                     result,
                     &result->transfer_allocator,
@@ -3796,7 +3803,7 @@ nc_renderer_t* nc_renderer_init(const nc_renderer_create_info_t* info, nc_asset_
 
     nc_asset_manager_texture_baked_asset_fini(&crosshair_texture_asset);
 
-    SDL_Log("Vulkan renderer initialized on %s.", result->physical_device_properties.deviceName);
+    SDL_Log("Vulkan device: %s", chosen_device_name);
     return result;
 
 error:
