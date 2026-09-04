@@ -159,12 +159,8 @@ typedef struct nc_renderer_chunk_mesh_t {
 
 typedef struct nc__renderer_upload_op_t {
     union {
-        struct {
-            nc_renderer_chunk_mesh_t* mesh;
-        } buffer;
-        struct {
-            nc_renderer_texture_t* texture;
-        } texture;
+        nc_renderer_chunk_mesh_t* mesh;
+        nc_renderer_texture_t* texture;
     };
     nc__renderer_upload_kind_t kind;
     // Only for textures.
@@ -2900,7 +2896,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             continue;
         }
 
-        const nc_renderer_texture_t* texture = op.texture.texture;
+        const nc_renderer_texture_t* texture = op.texture;
         bool barrier_already_added = false;
         for (uint32_t j = 0; j < texture_barrier_count; j++) {
             if (image_barriers[j].image == texture->image) {
@@ -2953,7 +2949,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
         const nc__renderer_buffer_page_t* source_page = op.source_slice.page;
         if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
-            const nc__renderer_buffer_slice_t destination = op.buffer.mesh->slice;
+            const nc__renderer_buffer_slice_t destination = op.mesh->slice;
             NC_ASSERT(op.source_slice.size <= destination.size);
             vkCmdCopyBuffer(
                     renderer->frame_command_buffer,
@@ -2971,7 +2967,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             buffer_dst_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             buffer_dst_access |= VK_ACCESS_SHADER_READ_BIT;
         } else {
-            nc_renderer_texture_t* texture = op.texture.texture;
+            nc_renderer_texture_t* texture = op.texture;
             // The upload operation owns one contiguous chain. Vulkan needs one region per mip, but copies every
             // region with this single command instead of queueing and staging each level independently.
             VkBufferImageCopy regions[NC__RENDERER_MAX_TEXTURE_MIP_LEVELS];
@@ -3085,7 +3081,7 @@ static bool nc__renderer_queue_chunk_mesh_upload(
         .source_slice.page = source.page,
         .source_slice.offset = source.offset,
         .source_slice.size = size,
-        .buffer.mesh = mesh,
+        .mesh = mesh,
     });
     return true;
 }
@@ -3110,9 +3106,7 @@ static bool nc__renderer_queue_texture_upload(
         .source_slice.page = source.page,
         .source_slice.offset = source.offset,
         .source_slice.size = size,
-        .texture = {
-            .texture = texture,
-        },
+        .texture = texture,
         .layer = layer,
     });
     return true;
@@ -3220,7 +3214,7 @@ static void nc__renderer_cancel_uploads_for_texture(nc_renderer_t* renderer, con
     uint32_t i = 0;
     while (i < nc__renderer_upload_op_vec_count(&renderer->upload_ops)) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
-        if (op.kind == NC__RENDERER_UPLOAD_TEXTURE && op.texture.texture == texture) {
+        if (op.kind == NC__RENDERER_UPLOAD_TEXTURE && op.texture == texture) {
             nc__renderer_upload_op_vec_remove(&renderer->upload_ops, i);
         } else {
             i++;
@@ -3235,7 +3229,7 @@ static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, 
     uint32_t i = 0;
     while (i < nc__renderer_upload_op_vec_count(&renderer->upload_ops)) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
-        if (op.kind == NC__RENDERER_UPLOAD_BUFFER && op.buffer.mesh == mesh) {
+        if (op.kind == NC__RENDERER_UPLOAD_BUFFER && op.mesh == mesh) {
             nc__renderer_upload_op_vec_remove(&renderer->upload_ops, i);
         } else {
             i++;

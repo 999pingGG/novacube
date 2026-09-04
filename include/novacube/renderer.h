@@ -12,7 +12,7 @@
 #include <novacube/cvkm.h>
 
 typedef struct nc_renderer_texture_t nc_renderer_texture_t;
-// High-level renderer-owned chunk geometry. Its paging allocation and Vulkan address stay private.
+// High-level renderer-owned chunk geometry. Its paging allocation and Vulkan descriptor stay private.
 typedef struct nc_renderer_chunk_mesh_t nc_renderer_chunk_mesh_t;
 
 typedef struct nc_renderer_t nc_renderer_t;
