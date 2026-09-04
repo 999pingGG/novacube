@@ -113,27 +113,31 @@ typedef struct nc__renderer_buffer_range_t {
 
 typedef struct nc__renderer_buffer_page_t {
     VkBuffer buffer;
-    VkDescriptorSet descriptor_set;
     VmaAllocation allocation;
+    VkDescriptorSet descriptor_set;
     // Host-visible pages stay mapped for their entire lifetime. Device-local pages leave this NULL.
     void* mapping;
     nc__renderer_buffer_range_vec free_ranges;
     struct nc__renderer_buffer_page_t* next;
     uint64_t last_used_frame;
+    // Highest byte touched by an allocation in the current frame. For mapped, potentially non-coherent memory,
+    // nc_renderer_end_frame() flushes the range [0, flush_size) once before submitting the command buffer.
     uint32_t flush_size;
+    // Capacity of this particular page. It normally equals allocator->page_capacity, but an oversized page
+    // is rounded up to a multiple of that value when a single allocation does not fit in a regular page.
     uint32_t capacity;
 } nc__renderer_buffer_page_t;
 
 typedef struct nc__renderer_buffer_slice_t {
     nc__renderer_buffer_page_t* page;
     uint32_t offset;
-    uint32_t capacity;
+    uint32_t size;
 } nc__renderer_buffer_slice_t;
 
+// Page-based best-fit allocator using coalescing free ranges.
 typedef struct nc__renderer_buffer_allocator_t {
-    // Page creation settings live here because this allocator may grow long after renderer initialization.
     // A linked list keeps page objects stable while slices and pending uploads point into them.
-    nc__renderer_buffer_page_t* pages;
+    nc__renderer_buffer_page_t* first_page;
     VkBufferUsageFlags buffer_usage;
     VmaMemoryUsage memory_usage;
     VmaAllocationCreateFlags allocation_flags;
@@ -160,13 +164,12 @@ typedef struct nc__renderer_upload_op_t {
         } buffer;
         struct {
             nc_renderer_texture_t* texture;
-            uint16_t layer;
         } texture;
     };
-    nc__renderer_buffer_page_t* source_page;
-    uint32_t source_offset;
-    uint32_t size;
     nc__renderer_upload_kind_t kind;
+    // Only for textures.
+    uint16_t layer;
+    nc__renderer_buffer_slice_t source_slice;
 } nc__renderer_upload_op_t;
 
 typedef struct nc__renderer_retired_swapchain_t {
@@ -571,7 +574,7 @@ static void nc__renderer_wait_idle(nc_renderer_t* renderer) {
     renderer->frame_fence_pending = false;
 }
 
-static uint32_t nc__renderer_round_up_u32(const uint32_t value, const uint32_t alignment) {
+static uint32_t nc__renderer_round_up(const uint32_t value, const uint32_t alignment) {
     const uint32_t remainder = value % alignment;
     return remainder ? value + alignment - remainder : value;
 }
@@ -589,6 +592,7 @@ static void nc__renderer_destroy_buffer_page(nc_renderer_t* renderer, nc__render
     free(page);
 }
 
+// Creates a new page, appends it to the allocator and also returns it.
 static bool nc__renderer_create_buffer_page(
     nc_renderer_t* renderer,
     nc__renderer_buffer_allocator_t* allocator,
@@ -644,9 +648,9 @@ static bool nc__renderer_create_buffer_page(
     nc__renderer_buffer_range_vec_append(
             &page->free_ranges,
             (nc__renderer_buffer_range_t){ .size = capacity });
-    page->next = allocator->pages;
-    allocator->pages = page;
-    NC_ASSERT((page->mapping != NULL) == ((allocator->allocation_flags & VMA_ALLOCATION_CREATE_MAPPED_BIT) != 0));
+    page->next = allocator->first_page;
+    allocator->first_page = page;
+    NC_ASSERT(!!page->mapping == !!(allocator->allocation_flags & VMA_ALLOCATION_CREATE_MAPPED_BIT));
     *out_page = page;
     return true;
 
@@ -682,7 +686,8 @@ static bool nc__renderer_initialize_buffer_allocator(
 }
 
 static void nc__renderer_reset_buffer_allocator(nc__renderer_buffer_allocator_t* allocator) {
-    for (nc__renderer_buffer_page_t* page = allocator->pages; page; page = page->next) {
+    // Traverse the linked list of pages.
+    for (nc__renderer_buffer_page_t* page = allocator->first_page; page; page = page->next) {
         nc__renderer_buffer_range_vec_clear(&page->free_ranges);
         nc__renderer_buffer_range_vec_append(
                 &page->free_ranges,
@@ -691,23 +696,21 @@ static void nc__renderer_reset_buffer_allocator(nc__renderer_buffer_allocator_t*
     }
 }
 
-static void nc__renderer_trim_buffer_allocator(
-    nc_renderer_t* renderer,
-    nc__renderer_buffer_allocator_t* allocator
-) {
-    // Expired pages are destroyed only after every slice has coalesced into one whole-page free range. Keeping one
-    // regular page avoids allocation churn after a quiet spell; oversized pages have no such exemption.
+static void nc__renderer_trim_buffer_allocator(nc_renderer_t* renderer, nc__renderer_buffer_allocator_t* allocator) {
+    // A page is expired when it has not been allocated from or released for at least the retention period. A page is
+    // empty only when release_buffer_slice() has merged all its free ranges into [0, page->capacity); coalescing is
+    // performed during release. Keep one regular page as a warm spare, while fully free oversized pages can always be
+    // destroyed.
     uint32_t regular_page_count = 0;
-    for (nc__renderer_buffer_page_t* page = allocator->pages; page; page = page->next) {
+    for (nc__renderer_buffer_page_t* page = allocator->first_page; page; page = page->next) {
         regular_page_count += page->capacity == allocator->page_capacity;
     }
 
-    nc__renderer_buffer_page_t** page_link = &allocator->pages;
+    nc__renderer_buffer_page_t** page_link = &allocator->first_page;
     while (*page_link) {
         nc__renderer_buffer_page_t* page = *page_link;
         const bool regular = page->capacity == allocator->page_capacity;
-        const bool expired = renderer->frame_id - page->last_used_frame
-                >= NC__RENDERER_BUFFER_PAGE_RETENTION_FRAMES;
+        const bool expired = renderer->frame_id - page->last_used_frame >= NC__RENDERER_BUFFER_PAGE_RETENTION_FRAMES;
         if (!nc__renderer_buffer_page_is_empty(page) || !expired || (regular && regular_page_count <= 1)) {
             page_link = &page->next;
             continue;
@@ -735,7 +738,7 @@ static bool nc__renderer_allocate_buffer_slice(
         alignment = allocator->allocation_granularity;
     }
 
-    const uint32_t allocation_size = nc__renderer_round_up_u32(size, allocator->allocation_granularity);
+    const uint32_t allocation_size = nc__renderer_round_up(size, allocator->allocation_granularity);
 
     // Best fit scans every free range. These lists are small in practice, and a size index would need a second
     // structure to preserve cheap adjacency coalescing. If profiling ever catches this lollygagging, use size bins.
@@ -743,17 +746,20 @@ static bool nc__renderer_allocate_buffer_slice(
     uint32_t best_range = 0;
     uint32_t best_offset = 0;
     uint32_t best_remaining = UINT32_MAX;
-    for (nc__renderer_buffer_page_t* page = allocator->pages; page; page = page->next) {
-        for (uint32_t j = 0; j < nc__renderer_buffer_range_vec_count(&page->free_ranges); j++) {
-            const nc__renderer_buffer_range_t range = page->free_ranges.array[j];
-            const uint32_t offset = nc__renderer_round_up_u32(range.offset, alignment);
+    // Iterate pages.
+    for (nc__renderer_buffer_page_t* page = allocator->first_page; page; page = page->next) {
+        // Iterate the free ranges of the page.
+        for (uint32_t i = 0; i < nc__renderer_buffer_range_vec_count(&page->free_ranges); i++) {
+            const nc__renderer_buffer_range_t range = page->free_ranges.array[i];
+            const uint32_t offset = nc__renderer_round_up(range.offset, alignment);
             if (offset + allocation_size > range.offset + range.size) {
+                // The range is not large enough, keep looking.
                 continue;
             }
             const uint32_t remaining = range.size - allocation_size;
             if (remaining < best_remaining) {
                 best_page = page;
-                best_range = j;
+                best_range = i;
                 best_offset = offset;
                 best_remaining = remaining;
             }
@@ -761,8 +767,13 @@ static bool nc__renderer_allocate_buffer_slice(
     }
 
     if (!best_page) {
+        // Couldn't find a fitting free range in the existing pages, allocate a new one.
+
+        // If the requested size is larger than a page, create an oversized page whose capacity is the smallest
+        // multiple of the regular page capacity that can contain the allocation. For example, 17 MiB with 16-MiB
+        // pages becomes 32 MiB, while 33 MiB becomes 48 MiB. This keeps the unused tail below one regular page.
         const uint32_t capacity = allocation_size > allocator->page_capacity
-                ? nc__renderer_round_up_u32(allocation_size, allocator->page_capacity)
+                ? nc__renderer_round_up(allocation_size, allocator->page_capacity)
                 : allocator->page_capacity;
         if (!nc__renderer_create_buffer_page(renderer, allocator, capacity, &best_page)) {
             return false;
@@ -772,9 +783,12 @@ static bool nc__renderer_allocate_buffer_slice(
     }
 
     // Remove the chosen hole, then return any alignment prefix and unused tail to the free list.
+
+    // Handle alignment prefix.
     const nc__renderer_buffer_range_t range = best_page->free_ranges.array[best_range];
     nc__renderer_buffer_range_vec_remove(&best_page->free_ranges, best_range);
     if (best_offset > range.offset) {
+        // There's some padding left after alignment, return it to the free list.
         nc__renderer_buffer_range_vec_append(
                 &best_page->free_ranges,
                 (nc__renderer_buffer_range_t){
@@ -782,9 +796,12 @@ static bool nc__renderer_allocate_buffer_slice(
                     .size = best_offset - range.offset,
                 });
     }
+
+    // Handle unused tail.
     const uint32_t allocation_end = best_offset + allocation_size;
     const uint32_t range_end = range.offset + range.size;
     if (allocation_end < range_end) {
+        // There's some unused space after our chosen hole, return it to the free list.
         nc__renderer_buffer_range_vec_append(
                 &best_page->free_ranges,
                 (nc__renderer_buffer_range_t){
@@ -793,27 +810,33 @@ static bool nc__renderer_allocate_buffer_slice(
                 });
     }
 
+    // Now signal the page as last touched this frame.
     best_page->last_used_frame = renderer->frame_id;
+    // Track the largest written prefix for one end-of-frame flush. This does not upload anything by itself, and it is
+    // not flushed once per allocation; end_frame() flushes [0, flush_size) once. The prefix may include unchanged
+    // bytes because this simple tracker avoids maintaining a separate dirty-range list.
     if (best_page->mapping && allocation_end > best_page->flush_size) {
         best_page->flush_size = allocation_end;
     }
     *allocation = (nc__renderer_buffer_slice_t){
         .page = best_page,
         .offset = best_offset,
-        .capacity = allocation_size,
+        .size = allocation_size,
     };
     return true;
 }
 
+// TODO: Defragmentation strats, for when the pages become too holey.
 static void nc__renderer_release_buffer_slice(nc_renderer_t* renderer, nc__renderer_buffer_slice_t* allocation) {
     nc__renderer_buffer_page_t* page = allocation->page;
     nc__renderer_buffer_range_t released = {
         .offset = allocation->offset,
-        .size = allocation->capacity,
+        .size = allocation->size,
     };
 
-    // Free ranges are intentionally unordered because allocation already scans all of them for best fit. Merge every
-    // adjacent range here so a fully released page always collapses back to one range.
+    // Merge the released slice into any directly adjacent free ranges. The free-range vector is intentionally
+    // unordered because allocation scans all ranges for best fit; this loop keeps expanding released and rescans after
+    // each merge, so a fully released page collapses to one range even when both neighbors are present.
     uint32_t i = 0;
     while (i < nc__renderer_buffer_range_vec_count(&page->free_ranges)) {
         const nc__renderer_buffer_range_t range = page->free_ranges.array[i];
@@ -833,17 +856,14 @@ static void nc__renderer_release_buffer_slice(nc_renderer_t* renderer, nc__rende
     *allocation = (nc__renderer_buffer_slice_t){ 0 };
 }
 
-static void nc__renderer_buffer_allocator_fini(
-    nc_renderer_t* renderer,
-    nc__renderer_buffer_allocator_t* allocator
-) {
-    nc__renderer_buffer_page_t* page = allocator->pages;
+static void nc__renderer_buffer_allocator_fini(nc_renderer_t* renderer, nc__renderer_buffer_allocator_t* allocator) {
+    nc__renderer_buffer_page_t* page = allocator->first_page;
     while (page) {
         nc__renderer_buffer_page_t* next = page->next;
         nc__renderer_destroy_buffer_page(renderer, page);
         page = next;
     }
-    allocator->pages = NULL;
+    allocator->first_page = NULL;
 }
 
 static bool nc__renderer_extension_list_contains(
@@ -2584,7 +2604,7 @@ static bool nc__renderer_create_pipelines(nc_renderer_t* renderer, nc_asset_mana
             "gui",
             "gui",
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-            // TODO: Explore the possibility of just implementing vertex attributes just for this.
+            // TODO: Explore the possibility of implementing vertex attributes just for this.
             // Maybe that reduces descriptor complexity.
             // Shader storage keeps the allocator page abstraction intact; vertex input would require a second upload
             // API that exposes each page's VkBuffer and byte offset.
@@ -2918,24 +2938,25 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                 image_barriers);
     }
 
+    // TODO: I feel like we can get rid of these two variables.
     VkPipelineStageFlags buffer_dst_stages = 0;
     VkAccessFlags buffer_dst_access = 0;
 
     for (uint32_t i = 0; i < upload_count; i++) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
-        const nc__renderer_buffer_page_t* source_page = op.source_page;
+        const nc__renderer_buffer_page_t* source_page = op.source_slice.page;
         if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
             const nc__renderer_buffer_slice_t destination = op.buffer.mesh->slice;
-            NC_ASSERT(op.size <= destination.capacity);
+            NC_ASSERT(op.source_slice.size <= destination.size);
             vkCmdCopyBuffer(
                     renderer->frame_command_buffer,
                     source_page->buffer,
                     destination.page->buffer,
                     1,
                     &(VkBufferCopy){
-                        .srcOffset = op.source_offset,
+                        .srcOffset = op.source_slice.offset,
                         .dstOffset = destination.offset,
-                        .size = op.size,
+                        .size = op.source_slice.size,
                     });
 
             // Chunk storage is consumed by both shader stages. Splitting this dependency further would add
@@ -2947,7 +2968,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
             // The upload operation owns one contiguous chain. Vulkan needs one region per mip, but copies every
             // region with this single command instead of queueing and staging each level independently.
             VkBufferImageCopy regions[NC__RENDERER_MAX_TEXTURE_MIP_LEVELS];
-            VkDeviceSize mip_offset = op.source_offset;
+            VkDeviceSize mip_offset = op.source_slice.offset;
             uint32_t mip_width = (uint32_t)texture->width;
             uint32_t mip_height = (uint32_t)texture->height;
             for (uint8_t mip_level = 0; mip_level < texture->mip_level_count; mip_level++) {
@@ -2956,7 +2977,7 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
                     .imageSubresource = {
                         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                         .mipLevel = mip_level,
-                        .baseArrayLayer = op.texture.layer,
+                        .baseArrayLayer = op.layer,
                         .layerCount = 1,
                     },
                     .imageExtent = { mip_width, mip_height, 1 },
@@ -2964,12 +2985,12 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
                 const size_t mip_size = texture->mip_level_count > 1
                         ? ((size_t)mip_width + 3) / 4 * (((size_t)mip_height + 3) / 4) * 16
-                        : op.size;
+                        : op.source_slice.size;
                 mip_offset += mip_size;
                 mip_width = mip_width > 1 ? mip_width >> 1 : 1;
                 mip_height = mip_height > 1 ? mip_height >> 1 : 1;
             }
-            NC_ASSERT(mip_offset == (VkDeviceSize)op.source_offset + op.size);
+            NC_ASSERT(mip_offset == (VkDeviceSize)op.source_slice.offset + op.source_slice.size);
             vkCmdCopyBufferToImage(
                     renderer->frame_command_buffer,
                     source_page->buffer,
@@ -3026,7 +3047,7 @@ static bool nc__renderer_queue_chunk_mesh_upload(
     const uint32_t size
 ) {
     NC_ASSERT(size);
-    NC_ASSERT(size <= mesh->slice.capacity);
+    NC_ASSERT(size <= mesh->slice.size);
 
     nc__renderer_buffer_slice_t source;
     if (!nc__renderer_allocate_buffer_slice(renderer, &renderer->transfer_allocator, size, 8, &source)) {
@@ -3054,9 +3075,9 @@ static bool nc__renderer_queue_chunk_mesh_upload(
     nc__renderer_cancel_uploads_for_chunk_mesh(renderer, mesh);
     nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_BUFFER,
-        .source_page = source.page,
-        .source_offset = source.offset,
-        .size = size,
+        .source_slice.page = source.page,
+        .source_slice.offset = source.offset,
+        .source_slice.size = size,
         .buffer.mesh = mesh,
     });
     return true;
@@ -3079,13 +3100,13 @@ static bool nc__renderer_queue_texture_upload(
     memcpy((uint8_t*)source.page->mapping + source.offset, data, size);
     nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_TEXTURE,
-        .source_page = source.page,
-        .source_offset = source.offset,
-        .size = size,
+        .source_slice.page = source.page,
+        .source_slice.offset = source.offset,
+        .source_slice.size = size,
         .texture = {
             .texture = texture,
-            .layer = layer,
         },
+        .layer = layer,
     });
     return true;
 }
@@ -3937,12 +3958,12 @@ error:
 bool nc_renderer_end_frame(nc_renderer_t* renderer) {
     NC_ASSERT(renderer->frame_command_buffer);
 
-    for (const nc__renderer_buffer_page_t* page = renderer->transfer_allocator.pages; page; page = page->next) {
+    for (const nc__renderer_buffer_page_t* page = renderer->transfer_allocator.first_page; page; page = page->next) {
         if (page->flush_size > 0) {
             NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->allocation, 0, page->flush_size));
         }
     }
-    for (const nc__renderer_buffer_page_t* page = renderer->frame_data_allocator.pages; page; page = page->next) {
+    for (const nc__renderer_buffer_page_t* page = renderer->frame_data_allocator.first_page; page; page = page->next) {
         if (page->flush_size > 0) {
             NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->allocation, 0, page->flush_size));
         }
@@ -4070,7 +4091,7 @@ bool nc_renderer_upload_chunk_mesh(
     }
 
     nc_renderer_chunk_mesh_t* replacement = *mesh;
-    if (!replacement || size > replacement->slice.capacity) {
+    if (!replacement || size > replacement->slice.size) {
         replacement = calloc(1, sizeof(*replacement));
         if (!nc__renderer_allocate_buffer_slice(
                 renderer,
