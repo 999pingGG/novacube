@@ -954,9 +954,9 @@ error:
 static bool nc__renderer_physical_device_supports_required_features(
     const nc_renderer_t* renderer,
     VkPhysicalDevice physical_device,
-    const VkPhysicalDeviceProperties* properties
+    const VkPhysicalDeviceProperties2* properties
 ) {
-    if (properties->apiVersion < NC__RENDERER_VK_API_VERSION) {
+    if (properties->properties.apiVersion < NC__RENDERER_VK_API_VERSION) {
         return false;
     }
 
@@ -1023,13 +1023,16 @@ static bool nc__renderer_find_queue_family(
     VkPhysicalDevice physical_device,
     uint32_t* out_queue_family_index
 ) {
-    VkQueueFamilyProperties* queue_families = NULL;
+    VkQueueFamilyProperties2* queue_families = NULL;
 
     uint32_t queue_family_count;
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, NULL);
+    vkGetPhysicalDeviceQueueFamilyProperties2(physical_device, &queue_family_count, NULL);
 
-    queue_families = malloc(queue_family_count * sizeof(*queue_families));
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families);
+    queue_families = calloc(queue_family_count, sizeof(*queue_families));
+    for (uint32_t i = 0; i < queue_family_count; i++) {
+        queue_families[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+    }
+    vkGetPhysicalDeviceQueueFamilyProperties2(physical_device, &queue_family_count, queue_families);
 
     for (uint32_t i = 0; i < queue_family_count; i++) {
         VkBool32 present_supported;
@@ -1040,9 +1043,9 @@ static bool nc__renderer_find_queue_family(
                 &present_supported));
 
         const VkQueueFlags required_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
-        if (queue_families[i].queueCount > 0 &&
+        if (queue_families[i].queueFamilyProperties.queueCount > 0 &&
                 present_supported &&
-                (queue_families[i].queueFlags & required_flags) == required_flags) {
+                (queue_families[i].queueFamilyProperties.queueFlags & required_flags) == required_flags) {
             *out_queue_family_index = i;
             free(queue_families);
             return true;
@@ -1058,12 +1061,14 @@ error:
 }
 
 VkDeviceSize nc__renderer_get_vram_size(VkPhysicalDevice physical_device) {
-    VkPhysicalDeviceMemoryProperties memory_properties;
-    vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+    VkPhysicalDeviceMemoryProperties2 memory_properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+    };
+    vkGetPhysicalDeviceMemoryProperties2(physical_device, &memory_properties);
 
     VkDeviceSize total = 0;
-    for (uint32_t i = 0; i < memory_properties.memoryHeapCount; ++i) {
-        const VkMemoryHeap heap = memory_properties.memoryHeaps[i];
+    for (uint32_t i = 0; i < memory_properties.memoryProperties.memoryHeapCount; ++i) {
+        const VkMemoryHeap heap = memory_properties.memoryProperties.memoryHeaps[i];
 
         // Check whether the heap is dedicated memory.
         if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
@@ -1099,8 +1104,10 @@ static bool nc__renderer_select_physical_device(
         uint32_t candidate_queue_family_index;
         const char* candidate_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT];
 
-        VkPhysicalDeviceProperties physical_device_properties;
-        vkGetPhysicalDeviceProperties(physical_devices[i], &physical_device_properties);
+        VkPhysicalDeviceProperties2 physical_device_properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        };
+        vkGetPhysicalDeviceProperties2(physical_devices[i], &physical_device_properties);
 
         if (!nc__renderer_find_required_extensions(
                 physical_devices[i],
@@ -1118,13 +1125,13 @@ static bool nc__renderer_select_physical_device(
             highest_score = 999;
             renderer->physical_device = physical_devices[i];
             *queue_family_index = candidate_queue_family_index;
-            strcpy(chosen_device_name, physical_device_properties.deviceName);
+            strcpy(chosen_device_name, physical_device_properties.properties.deviceName);
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             break;
         }
 
         int current_score;
-        switch (physical_device_properties.deviceType) {
+        switch (physical_device_properties.properties.deviceType) {
             case VK_PHYSICAL_DEVICE_TYPE_OTHER:
                 current_score = 1;
                 break;
@@ -1150,7 +1157,7 @@ static bool nc__renderer_select_physical_device(
             highest_score = current_score;
             renderer->physical_device = physical_devices[i];
             *queue_family_index = candidate_queue_family_index;
-            strcpy(chosen_device_name, physical_device_properties.deviceName);
+            strcpy(chosen_device_name, physical_device_properties.properties.deviceName);
             memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
             best_memory = nc__renderer_get_vram_size(physical_devices[i]);
         } else if (gpu_memory_preference != NC_GPU_MEMORY_PREFERENCE_NONE && current_score == highest_score) {
@@ -1164,7 +1171,7 @@ static bool nc__renderer_select_physical_device(
             if (preferred) {
                 renderer->physical_device = physical_devices[i];
                 *queue_family_index = candidate_queue_family_index;
-                strcpy(chosen_device_name, physical_device_properties.deviceName);
+                strcpy(chosen_device_name, physical_device_properties.properties.deviceName);
                 memcpy(enabled_device_extensions, candidate_device_extensions, sizeof(candidate_device_extensions));
                 best_memory = current_memory;
             }
