@@ -10,7 +10,6 @@ layout(set = 0, binding = 0) uniform sampler2DArray terrain_textures;
 
 struct chunk_uniforms {
     mat4 view_projection;
-    vec3 position;
     // Only this value is used by the fragment shader.
     float sunlight_intensity;
     vec4 quad_expansion;
@@ -27,8 +26,7 @@ layout(set = 2, binding = 0, scalar) restrict readonly buffer chunk_mesh_buffer 
 
 layout(push_constant) uniform push_constants {
     uint uniforms;
-    uint quads;
-    uint face_data;
+    uint transparent;
 } pc;
 
 const float ambient_intensity = 0.01;
@@ -76,7 +74,7 @@ vec4 compute_color() {
     // discrete lookup so those fragments cannot read past the face-data array through the device address.
     uvec2 face_data_coord = min(uvec2(floor(face_data_uv)), face_data_size - uvec2(1));
     uint face_index = face_data_coord.y * face_data_size.x + face_data_coord.x;
-    uvec2 packed_data = mesh_data.values[pc.face_data + face_data_offset + face_index];
+    uvec2 packed_data = mesh_data.values[face_data_offset + face_index];
 
     // unpack data
     uint texture_array_layer = packed_data.x & 0x7ffu;

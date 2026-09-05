@@ -8,7 +8,6 @@
 #include <stdint.h>
 
 #include <novacube/cvkm.h>
-#include <novacube/renderer.h>
 
 // Chunk dimensions and block-array layout live here so terrain, generation and meshing cannot disagree about them.
 // Local coordinates passed to the indexing macros must be in [0, NC_CHUNK_SIZE).
@@ -43,11 +42,6 @@ bool nc_chunk_offset_block_index(
 #define TDS_WORD_T uint64_t
 #include <tds/bitset.h>
 
-typedef uint8_t nc_chunk_flags_t;
-enum {
-    NC_CHUNK_MESH_PENDING_BIT = 1 << 0,
-};
-
 typedef struct nc_chunk_t {
     vkm_ivec3 coords;
     uint16_t blocks[NC_BLOCKS_PER_CHUNK];
@@ -55,12 +49,6 @@ typedef struct nc_chunk_t {
     uint8_t light_levels[NC_BLOCKS_PER_CHUNK];
     // Owned by terrain lighting. Kept opaque here to avoid leaking its private queue-bitset implementation.
     void* queued_light_nodes[2];
-    // TODO: Keep all the following fields private.
-    // One renderer-owned packed allocation backs both opaque and transparent mesh passes.
-    nc_renderer_chunk_mesh_t* mesh;
-    uint32_t opaque_quad_count;
-    uint32_t transparent_quad_count;
-    nc_chunk_flags_t flags;
 } nc_chunk_t;
 
 typedef struct nc_chunk_column_t {
@@ -78,7 +66,7 @@ nc_chunk_t* nc_chunk_init(
         const vkm_ivec3* coords,
         const uint16_t blocks[NC_BLOCKS_PER_CHUNK]);
 void nc_chunk_replace_blocks(nc_chunk_t* chunk, const uint16_t blocks[NC_BLOCKS_PER_CHUNK]);
-void nc_chunk_fini(nc_renderer_t* renderer, nc_chunk_t* chunk);
+void nc_chunk_fini(nc_chunk_t* chunk);
 nc_chunk_column_t* nc_chunk_column_init(const nc_chunk_t* chunk);
 void nc_chunk_column_fini(nc_chunk_column_t* column);
 void nc_chunk_column_include_chunk(

@@ -27,6 +27,7 @@ NC_IGNORE_ALL_WARNINGS_END
 #include <novacube/build_info.h>
 #include <novacube/error_handling.h>
 #include <novacube/renderer.h>
+#include <novacube/mesher.h>
 #include <novacube/standard_functions.h>
 
 #ifdef ANDROID
@@ -111,6 +112,14 @@ typedef struct nc__renderer_buffer_range_t {
 #define TDS_VALUE_T nc__renderer_buffer_range_t
 #include <tds/vector.h>
 
+// (AI-assisted) Persistent mapped storage is resized only after the sole frame fence has completed.
+typedef struct nc__renderer_mapped_buffer_t {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    void* mapping;
+    uint32_t capacity;
+} nc__renderer_mapped_buffer_t;
+
 typedef struct nc__renderer_buffer_page_t {
     VkBuffer buffer;
     VmaAllocation allocation;
@@ -126,6 +135,13 @@ typedef struct nc__renderer_buffer_page_t {
     // Capacity of this particular page. It normally equals allocator->page_capacity, but an oversized page
     // is rounded up to a multiple of that value when a single allocation does not fit in a regular page.
     uint32_t capacity;
+    nc__renderer_mapped_buffer_t chunk_lookup;
+    uint32_t draw_count[2];
+    uint32_t draw_first[2];
+    uint32_t draw_cursor[2];
+    uint32_t lookup_flush_begin;
+    uint32_t lookup_flush_end;
+    bool chunk_descriptors_dirty;
 } nc__renderer_buffer_page_t;
 
 typedef struct nc__renderer_buffer_slice_t {
@@ -145,22 +161,49 @@ typedef struct nc__renderer_buffer_allocator_t {
     uint32_t allocation_granularity;
 } nc__renderer_buffer_allocator_t;
 
-typedef struct nc_renderer_chunk_mesh_t {
+// (AI-assisted) Gameplay never sees these movable records or their GPU allocation addresses.
+typedef struct nc__renderer_chunk_t {
     nc__renderer_buffer_slice_t slice;
-    // Intrusive singly-linked-list pointer used only while this mesh waits for the in-flight frame fence. Live meshes
-    // leave it NULL. This avoids allocating a separate retirement-list node for every destroyed or replaced mesh.
-    struct nc_renderer_chunk_mesh_t* next_retired_mesh;
-    // Packed order is opaque quads/faces followed by transparent quads/faces. Equal 8-byte element strides let each
-    // draw derive its face-data index from one pass index plus its quad count.
+    vkm_vec3 position;
+    // Packed order remains opaque quads/faces followed by transparent quads/faces.
     uint32_t opaque_quad_count;
     uint32_t transparent_quad_count;
     uint32_t transparent_offset;
-} nc_renderer_chunk_mesh_t;
+    bool visible;
+    bool gpu_dirty;
+} nc__renderer_chunk_t;
+
+typedef struct nc__renderer_chunk_gpu_t {
+    vkm_vec3 position;
+    uint32_t opaque_quad_count;
+    uint32_t transparent_offset;
+    uint32_t transparent_quad_count;
+} nc__renderer_chunk_gpu_t;
+static_assert(sizeof(nc__renderer_chunk_gpu_t) == 24, "Chunk metadata must match scalar GLSL layout");
+
+typedef struct nc__renderer_chunk_mesh_data_t {
+    const void* quads;
+    const void* face_data;
+    uint32_t quad_count;
+    uint32_t face_data_count;
+} nc__renderer_chunk_mesh_data_t;
+
+#define TDS_TYPE nc__renderer_chunk_pool
+#define TDS_VALUE_T uint32_t
+#include <tds/dense-pool.h>
+
+#define TDS_TYPE nc__renderer_chunk_vec
+#define TDS_VALUE_T nc__renderer_chunk_t
+#include <tds/vector.h>
+
+#define TDS_TYPE nc__renderer_retired_slice_vec
+#define TDS_VALUE_T nc__renderer_buffer_slice_t
+#include <tds/vector.h>
 
 typedef struct nc__renderer_upload_op_t {
     union {
         struct {
-            nc_renderer_chunk_mesh_t* mesh;
+            uint32_t chunk_id;
         } buffer;
         struct {
             nc_renderer_texture_t* texture;
@@ -220,7 +263,6 @@ typedef struct nc__renderer_block_highlight_uniforms_t {
 
 typedef struct nc__renderer_chunk_uniforms_t {
     vkm_mat4 view_projection;
-    vkm_vec3 position;
     float sunlight_intensity;
     vkm_vec4 quad_expansion;
 } nc__renderer_chunk_uniforms_t;
@@ -234,8 +276,7 @@ typedef struct nc__renderer_sky_uniforms_t {
 
 typedef struct nc__renderer_chunk_push_constants_t {
     uint32_t uniforms;
-    uint32_t quads;
-    uint32_t face_data;
+    uint32_t transparent;
 } nc__renderer_chunk_push_constants_t;
 
 typedef struct nc__renderer_procedural_overlay_push_constants_t {
@@ -246,7 +287,7 @@ typedef struct nc__renderer_procedural_overlay_push_constants_t {
 static_assert(sizeof(nc__renderer_procedural_overlay_uniforms_t) == 80, "Procedural uniforms must match GLSL");
 static_assert(sizeof(nc__renderer_gui_uniforms_t) == 72, "GUI uniforms must match their scalar GLSL array stride");
 static_assert(sizeof(nc__renderer_block_highlight_uniforms_t) == 100, "Highlight uniforms must match GLSL");
-static_assert(sizeof(nc__renderer_chunk_uniforms_t) == 96, "Chunk uniforms must match their scalar GLSL array stride");
+static_assert(sizeof(nc__renderer_chunk_uniforms_t) == 84, "Chunk uniforms must match their scalar GLSL array stride");
 static_assert(sizeof(nc__renderer_sky_uniforms_t) == 160, "Sky uniforms must match their scalar GLSL array stride");
 
 #define TDS_TYPE nc__renderer_upload_op_vec
@@ -300,6 +341,7 @@ typedef struct nc_renderer_t {
     VkRenderPass render_pass;
     VkDescriptorSetLayout texture_descriptor_set_layout;
     VkDescriptorSetLayout buffer_descriptor_set_layout;
+    VkDescriptorSetLayout chunk_descriptor_set_layout;
     VkDescriptorSetLayout composite_descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     VkPipelineLayout composite_pipeline_layout;
@@ -347,18 +389,22 @@ typedef struct nc_renderer_t {
     nc__renderer_buffer_allocator_t chunk_allocator;
 
     nc__renderer_upload_op_vec upload_ops;
-    nc_renderer_chunk_mesh_t* retired_chunk_meshes;
+    nc__renderer_retired_slice_vec retired_chunk_slices;
+    nc__renderer_chunk_pool chunk_ids;
+    nc__renderer_chunk_vec chunks;
+    nc__renderer_mapped_buffer_t chunk_metadata;
+    nc__renderer_mapped_buffer_t chunk_indirect;
+    nc_renderer_chunk_stats_t chunk_stats;
+    nc_mesher_workspace_t mesher_workspace;
+    nc_mesh_quad_vec mesh_quads[2];
+    nc_mesh_face_data_vec mesh_faces[2];
+    bool multi_draw_indirect;
     nc__renderer_retired_texture_vec retired_textures;
     // Every old generation waiting on the current replacement's acquire-based retirement proof.
     nc__renderer_retired_swapchain_vec retired_swapchains;
 
     uint64_t frame_id;
 } nc_renderer_t;
-
-#define TDS_IMPLEMENT
-#define TDS_VALUE_T nc_renderer_chunk_draw_t
-#define TDS_TYPE nc_renderer_chunk_draw_vec
-#include <tds/vector.h>
 
 typedef struct nc__renderer_required_extension {
     const char* const* alternative_names;
@@ -579,6 +625,45 @@ static uint32_t nc__renderer_round_up(const uint32_t value, const uint32_t align
     return remainder ? value + alignment - remainder : value;
 }
 
+static void nc__renderer_mapped_buffer_fini(nc_renderer_t* renderer, nc__renderer_mapped_buffer_t* buffer) {
+    if (buffer->buffer) {
+        vmaDestroyBuffer(renderer->allocator, buffer->buffer, buffer->allocation);
+    }
+    *buffer = (nc__renderer_mapped_buffer_t){ 0 };
+}
+
+static bool nc__renderer_mapped_buffer_reserve(
+    nc_renderer_t* renderer,
+    nc__renderer_mapped_buffer_t* buffer,
+    const uint32_t size,
+    const VkBufferUsageFlags usage
+) {
+    NC_ASSERT(!renderer->frame_fence_pending);
+    if (size <= buffer->capacity) {
+        return true;
+    }
+    nc__renderer_mapped_buffer_t replacement = { .capacity = buffer->capacity ? buffer->capacity * 2 : 4096 };
+    if (replacement.capacity < size) {
+        replacement.capacity = size;
+    }
+    VmaAllocationInfo info;
+    NC__CHECK_VK_RESULT(vmaCreateBuffer(renderer->allocator, &(VkBufferCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = replacement.capacity,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    }, &(VmaAllocationCreateInfo){
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+    }, &replacement.buffer, &replacement.allocation, &info));
+    replacement.mapping = info.pMappedData;
+    nc__renderer_mapped_buffer_fini(renderer, buffer);
+    *buffer = replacement;
+    return true;
+error:
+    return false;
+}
+
 static bool nc__renderer_buffer_page_is_empty(const nc__renderer_buffer_page_t* page) {
     return nc__renderer_buffer_range_vec_count(&page->free_ranges) == 1
             && page->free_ranges.array[0].offset == 0
@@ -587,6 +672,7 @@ static bool nc__renderer_buffer_page_is_empty(const nc__renderer_buffer_page_t* 
 
 static void nc__renderer_destroy_buffer_page(nc_renderer_t* renderer, nc__renderer_buffer_page_t* page) {
     nc__renderer_free_descriptor_set(renderer, page->descriptor_set);
+    nc__renderer_mapped_buffer_fini(renderer, &page->chunk_lookup);
     vmaDestroyBuffer(renderer->allocator, page->buffer, page->allocation);
     nc__renderer_buffer_range_vec_fini(&page->free_ranges);
     free(page);
@@ -621,7 +707,8 @@ static bool nc__renderer_create_buffer_page(
         NC_ASSERT(capacity <= 134217728);
         if (!nc__renderer_allocate_descriptor_set(
                 renderer,
-                renderer->buffer_descriptor_set_layout,
+                allocator == &renderer->chunk_allocator
+                        ? renderer->chunk_descriptor_set_layout : renderer->buffer_descriptor_set_layout,
                 &page->descriptor_set)) {
             goto error;
         }
@@ -642,6 +729,7 @@ static bool nc__renderer_create_buffer_page(
                 0,
                 NULL);
     }
+    page->chunk_descriptors_dirty = true;
     page->mapping = allocation_info.pMappedData;
     page->last_used_frame = renderer->frame_id;
     page->capacity = capacity;
@@ -1222,10 +1310,22 @@ static bool nc__renderer_create_device(
     const char* enabled_device_extensions[NC__RENDERER_REQUIRED_EXTENSION_COUNT],
     const uint32_t queue_family_index
 ) {
+    VkPhysicalDeviceFeatures supported;
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceFeatures(renderer->physical_device, &supported);
+    vkGetPhysicalDeviceProperties(renderer->physical_device, &properties);
+    renderer->multi_draw_indirect = supported.multiDrawIndirect;
+    NC_ASSERT(renderer->multi_draw_indirect ? properties.limits.maxDrawIndirectCount > 1
+            : properties.limits.maxDrawIndirectCount == 1);
+    // (AI-assisted) Useful for checking the identical single-record path on desktop hardware.
+    if (SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "NC_FORCE_SINGLE_DRAW_INDIRECT")) {
+        renderer->multi_draw_indirect = false;
+    }
     VkPhysicalDeviceFeatures2 enabled_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .features = {
             .independentBlend = VK_TRUE,
+            .multiDrawIndirect = renderer->multi_draw_indirect,
         },
     };
     VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_layout_features = {
@@ -2146,7 +2246,7 @@ static bool nc__renderer_create_descriptor_pool(nc_renderer_t* renderer) {
                     },
                     {
                         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        .descriptorCount = NC__RENDERER_MAX_DESCRIPTOR_SETS,
+                        .descriptorCount = 3 * NC__RENDERER_MAX_DESCRIPTOR_SETS,
                     },
                     {
                         .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
@@ -2221,6 +2321,19 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
             },
             NULL,
             &renderer->composite_descriptor_set_layout));
+    const VkDescriptorSetLayoutBinding chunk_bindings[] = {
+        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT },
+        { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT },
+    };
+    NC__CHECK_VK_RESULT(vkCreateDescriptorSetLayout(renderer->device, &(VkDescriptorSetLayoutCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = NC_COUNTOF(chunk_bindings),
+        .pBindings = chunk_bindings,
+    }, NULL, &renderer->chunk_descriptor_set_layout));
     NC__CHECK_VK_RESULT(vkCreatePipelineLayout(
             renderer->device,
             &(VkPipelineLayoutCreateInfo){
@@ -2229,7 +2342,7 @@ static bool nc__renderer_create_descriptor_set_layouts(nc_renderer_t* renderer) 
                 .pSetLayouts = (VkDescriptorSetLayout[]){
                     renderer->texture_descriptor_set_layout,
                     renderer->buffer_descriptor_set_layout,
-                    renderer->buffer_descriptor_set_layout,
+                    renderer->chunk_descriptor_set_layout,
                 },
                 .pushConstantRangeCount = 1,
                 .pPushConstantRanges = &(VkPushConstantRange){
@@ -2267,6 +2380,7 @@ static void nc__renderer_destroy_descriptor_state(nc_renderer_t* renderer) {
     vkDestroyDescriptorSetLayout(renderer->device, renderer->texture_descriptor_set_layout, NULL);
     renderer->texture_descriptor_set_layout = VK_NULL_HANDLE;
 
+    vkDestroyDescriptorSetLayout(renderer->device, renderer->chunk_descriptor_set_layout, NULL);
     vkDestroyDescriptorSetLayout(renderer->device, renderer->buffer_descriptor_set_layout, NULL);
     renderer->buffer_descriptor_set_layout = VK_NULL_HANDLE;
 
@@ -2953,7 +3067,8 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
         const nc__renderer_buffer_page_t* source_page = op.source_slice.page;
         if (op.kind == NC__RENDERER_UPLOAD_BUFFER) {
-            const nc__renderer_buffer_slice_t destination = op.buffer.mesh->slice;
+            const nc__renderer_buffer_slice_t destination = nc__renderer_chunk_vec_first(&renderer->chunks)[
+                    nc__renderer_chunk_pool_get(&renderer->chunk_ids, op.buffer.chunk_id)].slice;
             NC_ASSERT(op.source_slice.size <= destination.size);
             vkCmdCopyBuffer(
                     renderer->frame_command_buffer,
@@ -3043,18 +3158,18 @@ static bool nc__renderer_flush_uploads(nc_renderer_t* renderer) {
 
 static void nc__renderer_cancel_uploads_for_chunk_mesh(
     nc_renderer_t* renderer,
-    const nc_renderer_chunk_mesh_t* mesh
+    const uint32_t id
 );
 
 static bool nc__renderer_queue_chunk_mesh_upload(
     nc_renderer_t* renderer,
-    nc_renderer_chunk_mesh_t* mesh,
-    const nc_renderer_chunk_mesh_data_t* opaque,
-    const nc_renderer_chunk_mesh_data_t* transparent,
+    const uint32_t id,
+    const nc__renderer_chunk_mesh_data_t* opaque,
+    const nc__renderer_chunk_mesh_data_t* transparent,
     const uint32_t size
 ) {
     NC_ASSERT(size);
-    NC_ASSERT(size <= mesh->slice.size);
+
 
     nc__renderer_buffer_slice_t source;
     if (!nc__renderer_allocate_buffer_slice(renderer, &renderer->transfer_allocator, size, 8, &source)) {
@@ -3079,13 +3194,13 @@ static bool nc__renderer_queue_chunk_mesh_upload(
 
     // One packed staging slice becomes one Vulkan copy, regardless of which of the four streams are empty.
     // Cancel only after staging succeeds, so an allocation failure leaves the previous queued mesh intact.
-    nc__renderer_cancel_uploads_for_chunk_mesh(renderer, mesh);
+    nc__renderer_cancel_uploads_for_chunk_mesh(renderer, id);
     nc__renderer_upload_op_vec_append(&renderer->upload_ops, (nc__renderer_upload_op_t){
         .kind = NC__RENDERER_UPLOAD_BUFFER,
         .source_slice.page = source.page,
         .source_slice.offset = source.offset,
         .source_slice.size = size,
-        .buffer.mesh = mesh,
+        .buffer.chunk_id = id,
     });
     return true;
 }
@@ -3228,14 +3343,13 @@ static void nc__renderer_cancel_uploads_for_texture(nc_renderer_t* renderer, con
     }
 }
 
-static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, const nc_renderer_chunk_mesh_t* mesh) {
-    // Buffer upload operations retain raw mesh pointers. Remove them before releasing the mesh so an
-    // upload queued but not yet flushed cannot dereference freed memory. This keeps cancellation correct without
-    // adding per-mesh queue state.
+static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, const uint32_t id) {
+    // (AI-assisted) Cancel before ID reuse, so a queued upload cannot target a newly registered chunk.
+    // IDs also survive dense-array moves without retaining pointers into reallocatable storage.
     uint32_t i = 0;
     while (i < nc__renderer_upload_op_vec_count(&renderer->upload_ops)) {
         const nc__renderer_upload_op_t op = nc__renderer_upload_op_vec_get(&renderer->upload_ops, i);
-        if (op.kind == NC__RENDERER_UPLOAD_BUFFER && op.buffer.mesh == mesh) {
+        if (op.kind == NC__RENDERER_UPLOAD_BUFFER && op.buffer.chunk_id == id) {
             nc__renderer_upload_op_vec_remove(&renderer->upload_ops, i);
         } else {
             i++;
@@ -3243,9 +3357,17 @@ static void nc__renderer_cancel_uploads_for_chunk_mesh(nc_renderer_t* renderer, 
     }
 }
 
-static void nc__renderer_release_chunk_mesh(nc_renderer_t* renderer, nc_renderer_chunk_mesh_t* mesh) {
-    nc__renderer_release_buffer_slice(renderer, &mesh->slice);
-    free(mesh);
+static void nc__renderer_retire_chunk_slice(nc_renderer_t* renderer, const nc__renderer_buffer_slice_t* slice) {
+    if (!slice->page) {
+        return;
+    }
+    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
+        // (AI-assisted) Retirement owns the allocation, independently of movable/reused chunk IDs.
+        nc__renderer_retired_slice_vec_append(&renderer->retired_chunk_slices, *slice);
+    } else {
+        nc__renderer_buffer_slice_t released = *slice;
+        nc__renderer_release_buffer_slice(renderer, &released);
+    }
 }
 
 static void nc__renderer_destroy_texture_now(nc_renderer_t* renderer, nc_renderer_texture_t* texture) {
@@ -3274,11 +3396,11 @@ static void nc__renderer_destroy_or_retire_texture(nc_renderer_t* renderer, nc_r
 
 static void nc__renderer_destroy_retired_resources(nc_renderer_t* renderer) {
     // This renderer has one in-flight submission, and callers reclaim retired resources only after its fence signals.
-    while (renderer->retired_chunk_meshes) {
-        nc_renderer_chunk_mesh_t* mesh = renderer->retired_chunk_meshes;
-        renderer->retired_chunk_meshes = mesh->next_retired_mesh;
-        nc__renderer_release_chunk_mesh(renderer, mesh);
+    for (uint32_t i = 0; i < nc__renderer_retired_slice_vec_count(&renderer->retired_chunk_slices); i++) {
+        nc__renderer_release_buffer_slice(renderer,
+                &nc__renderer_retired_slice_vec_first(&renderer->retired_chunk_slices)[i]);
     }
+    nc__renderer_retired_slice_vec_clear(&renderer->retired_chunk_slices);
 
     for (uint32_t i = 0; i < nc__renderer_retired_texture_vec_count(&renderer->retired_textures); i++) {
         nc_renderer_texture_t* texture = nc__renderer_retired_texture_vec_get(
@@ -3289,57 +3411,251 @@ static void nc__renderer_destroy_retired_resources(nc_renderer_t* renderer) {
     nc__renderer_retired_texture_vec_clear(&renderer->retired_textures);
 }
 
-static bool nc__renderer_draw_chunk(
-        nc_renderer_t* renderer,
-        const nc_renderer_chunk_draw_t* draw,
-        const vkm_mat4* view_projection,
-        const vkm_vec4* quad_expansion,
-        const float sunlight_intensity,
-        const bool transparent
+typedef struct nc__renderer_frustum_plane_t {
+    float x;
+    float y;
+    float z;
+    float distance;
+    float aabb_radius;
+} nc__renderer_frustum_plane_t;
+
+static nc__renderer_frustum_plane_t nc__renderer_make_frustum_plane(
+    const float x,
+    const float y,
+    const float z,
+    const float distance
 ) {
-    NC_ASSERT(draw->mesh);
-    const uint32_t quad_count = transparent
-            ? draw->mesh->transparent_quad_count
-            : draw->mesh->opaque_quad_count;
-    if (quad_count == 0) {
-        return true;
+    const float half_chunk_size = (float)NC_CHUNK_SIZE * 0.5f;
+    return (nc__renderer_frustum_plane_t){
+        .x = x,
+        .y = y,
+        .z = z,
+        .distance = distance,
+        .aabb_radius = half_chunk_size * (vkm_abs(x) + vkm_abs(y) + vkm_abs(z)),
+    };
+}
+
+static bool nc__renderer_chunk_is_outside_frustum(
+    const nc__renderer_frustum_plane_t planes[6],
+    const vkm_vec3* center
+) {
+    for (int i = 0; i < 6; i++) {
+        const nc__renderer_frustum_plane_t* plane = &planes[i];
+        if (plane->x * center->x + plane->y * center->y + plane->z * center->z
+                + plane->distance + plane->aabb_radius < 0.0f) {
+            return true;
+        }
     }
 
-    const nc__renderer_chunk_uniforms_t uniforms = {
-        .view_projection = *view_projection,
-        .position = draw->position,
-        .sunlight_intensity = sunlight_intensity,
-        .quad_expansion = *quad_expansion,
+    return false;
+}
+
+static bool nc__renderer_prepare_chunks(nc_renderer_t* renderer, const vkm_mat4* view_projection) {
+    const nc__renderer_frustum_plane_t planes[6] = {
+        nc__renderer_make_frustum_plane(
+                view_projection->m03 + view_projection->m00,
+                view_projection->m13 + view_projection->m10,
+                view_projection->m23 + view_projection->m20,
+                view_projection->m33 + view_projection->m30),
+        nc__renderer_make_frustum_plane(
+                view_projection->m03 - view_projection->m00,
+                view_projection->m13 - view_projection->m10,
+                view_projection->m23 - view_projection->m20,
+                view_projection->m33 - view_projection->m30),
+        nc__renderer_make_frustum_plane(
+                view_projection->m03 + view_projection->m01,
+                view_projection->m13 + view_projection->m11,
+                view_projection->m23 + view_projection->m21,
+                view_projection->m33 + view_projection->m31),
+        nc__renderer_make_frustum_plane(
+                view_projection->m03 - view_projection->m01,
+                view_projection->m13 - view_projection->m11,
+                view_projection->m23 - view_projection->m21,
+                view_projection->m33 - view_projection->m31),
+        nc__renderer_make_frustum_plane(
+                view_projection->m02,
+                view_projection->m12,
+                view_projection->m22,
+                view_projection->m32),
+        nc__renderer_make_frustum_plane(
+                view_projection->m03 - view_projection->m02,
+                view_projection->m13 - view_projection->m12,
+                view_projection->m23 - view_projection->m22,
+                view_projection->m33 - view_projection->m32),
     };
-    const uint32_t pass_offset = draw->mesh->slice.offset + (transparent ? draw->mesh->transparent_offset : 0);
-    NC_ASSERT(pass_offset % NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE == 0);
-    nc__renderer_chunk_push_constants_t push_constants = {
-        .quads = pass_offset / NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE,
-        .face_data = pass_offset / NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE + quad_count,
-    };
-    nc__renderer_buffer_page_t* uniforms_page;
-    if (!nc__renderer_write_frame_data(
-            renderer,
-            &uniforms,
-            1,
-            sizeof(uniforms),
-            &uniforms_page,
-            &push_constants.uniforms)) {
+
+    const uint32_t count = nc__renderer_chunk_vec_count(&renderer->chunks);
+    nc__renderer_chunk_t* chunks = nc__renderer_chunk_vec_first(&renderer->chunks);
+    const bool metadata_grew = count * sizeof(nc__renderer_chunk_gpu_t) > renderer->chunk_metadata.capacity;
+    if (!nc__renderer_mapped_buffer_reserve(renderer, &renderer->chunk_metadata,
+            (count ? count : 1) * sizeof(nc__renderer_chunk_gpu_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
         return false;
     }
+    nc__renderer_chunk_gpu_t* gpu = renderer->chunk_metadata.mapping;
+    uint32_t metadata_flush_begin = count;
+    uint32_t metadata_flush_end = 0;
+    for (nc__renderer_buffer_page_t* page = renderer->chunk_allocator.first_page; page; page = page->next) {
+        memset(page->draw_count, 0, sizeof(page->draw_count));
+        page->lookup_flush_begin = UINT32_MAX;
+        page->lookup_flush_end = 0;
+        if (!nc__renderer_mapped_buffer_reserve(renderer, &page->chunk_lookup,
+                page->capacity / NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY * sizeof(uint32_t),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+            return false;
+        }
+        if (page->chunk_descriptors_dirty || metadata_grew) {
+            const VkDescriptorBufferInfo infos[] = {
+                { .buffer = page->chunk_lookup.buffer, .range = page->chunk_lookup.capacity },
+                { .buffer = renderer->chunk_metadata.buffer, .range = renderer->chunk_metadata.capacity },
+            };
+            VkWriteDescriptorSet writes[2];
+            for (uint32_t i = 0; i < 2; i++) {
+                writes[i] = (VkWriteDescriptorSet){
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = page->descriptor_set,
+                    .dstBinding = i + 1,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .pBufferInfo = &infos[i],
+                };
+            }
+            vkUpdateDescriptorSets(renderer->device, 2, writes, 0, NULL);
+            page->chunk_descriptors_dirty = false;
+        }
+    }
 
-    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
-    nc__renderer_bind_descriptor_set(renderer, 2, draw->mesh->slice.page->descriptor_set);
-    vkCmdPushConstants(
-            renderer->frame_command_buffer,
-            renderer->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(push_constants),
-            &push_constants);
-    vkCmdDraw(renderer->frame_command_buffer, 4, quad_count, 0, 0);
+    // Keep this struct in cache by using a local variable.
+    nc_renderer_chunk_stats_t stats = { .loaded_chunk_count = count };
+    for (uint32_t i = 0; i < count; i++) {
+        nc__renderer_chunk_t* chunk = &chunks[i];
+        if (chunk->gpu_dirty || metadata_grew) {
+            gpu[i] = (nc__renderer_chunk_gpu_t){
+                .position = chunk->position,
+                .opaque_quad_count = chunk->opaque_quad_count,
+                .transparent_offset = chunk->transparent_offset,
+                .transparent_quad_count = chunk->transparent_quad_count,
+            };
+            if (chunk->slice.page) {
+                // (AI-assisted) Only the allocation start is addressed, even for a many-instance draw.
+                // Repairing a moved record changes one lookup entry without touching any GPU quads.
+                nc__renderer_buffer_page_t* page = chunk->slice.page;
+                uint32_t* lookup = page->chunk_lookup.mapping;
+                const uint32_t slot = chunk->slice.offset / NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY;
+                lookup[slot] = i;
+                if (slot * sizeof(*lookup) < page->lookup_flush_begin) {
+                    page->lookup_flush_begin = slot * sizeof(*lookup);
+                }
+                if ((slot + 1) * sizeof(*lookup) > page->lookup_flush_end) {
+                    page->lookup_flush_end = (slot + 1) * sizeof(*lookup);
+                }
+            }
+            if (i < metadata_flush_begin) {
+                metadata_flush_begin = i;
+            }
+            metadata_flush_end = i + 1;
+            chunk->gpu_dirty = false;
+        }
+        chunk->visible = false;
+        if (!chunk->opaque_quad_count && !chunk->transparent_quad_count) {
+            stats.empty_chunk_count++;
+            continue;
+        }
+        const vkm_vec3 center = { { chunk->position.x + NC_CHUNK_SIZE * 0.5f,
+                chunk->position.y + NC_CHUNK_SIZE * 0.5f, chunk->position.z + NC_CHUNK_SIZE * 0.5f } };
+        stats.total_opaque_quads_count += chunk->opaque_quad_count;
+        stats.total_transparent_quads_count += chunk->transparent_quad_count;
+        if (nc__renderer_chunk_is_outside_frustum(planes, &center)) {
+            stats.culled_chunk_count++;
+            stats.culled_opaque_quads_count += chunk->opaque_quad_count;
+            stats.culled_transparent_quads_count += chunk->transparent_quad_count;
+            continue;
+        }
+        chunk->visible = true;
+        chunk->slice.page->draw_count[0] += chunk->opaque_quad_count != 0;
+        chunk->slice.page->draw_count[1] += chunk->transparent_quad_count != 0;
+        stats.opaque_drawn_chunk_count += chunk->opaque_quad_count != 0;
+        stats.transparent_drawn_chunk_count += chunk->transparent_quad_count != 0;
+    }
+
+    // (AI-assisted) Page/pass prefix sums pack disjoint command ranges in one buffer; the second scan
+    // reuses visibility and never repeats the six-plane test or sorts per-chunk draw records.
+    uint32_t command_count = 0;
+    for (nc__renderer_buffer_page_t* page = renderer->chunk_allocator.first_page; page; page = page->next) {
+        for (uint32_t pass = 0; pass < 2; pass++) {
+            page->draw_first[pass] = command_count;
+            page->draw_cursor[pass] = command_count;
+            command_count += page->draw_count[pass];
+        }
+        if (page->lookup_flush_end) {
+            NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, page->chunk_lookup.allocation,
+                    page->lookup_flush_begin, page->lookup_flush_end - page->lookup_flush_begin));
+        }
+    }
+    if (metadata_flush_end) {
+        NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, renderer->chunk_metadata.allocation,
+                metadata_flush_begin * sizeof(*gpu), (metadata_flush_end - metadata_flush_begin) * sizeof(*gpu)));
+    }
+    if (!nc__renderer_mapped_buffer_reserve(renderer, &renderer->chunk_indirect,
+            command_count * sizeof(VkDrawIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)) {
+        return false;
+    }
+    VkDrawIndirectCommand* commands = renderer->chunk_indirect.mapping;
+    for (uint32_t i = 0; i < count; i++) {
+        const nc__renderer_chunk_t* chunk = &chunks[i];
+        if (!chunk->visible) {
+            continue;
+        }
+        const uint32_t pass_counts[] = { chunk->opaque_quad_count, chunk->transparent_quad_count };
+        for (uint32_t pass = 0; pass < 2; pass++) {
+            if (pass_counts[pass]) {
+                commands[chunk->slice.page->draw_cursor[pass]++] = (VkDrawIndirectCommand){
+                    .vertexCount = 4,
+                    .instanceCount = pass_counts[pass],
+                    .firstVertex = chunk->slice.offset / NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE * 4,
+                    .firstInstance = 0,
+                };
+            }
+        }
+    }
+    if (command_count) {
+        NC__CHECK_VK_RESULT(vmaFlushAllocation(renderer->allocator, renderer->chunk_indirect.allocation,
+                0, command_count * sizeof(*commands)));
+    }
+    renderer->chunk_stats = stats;
     return true;
+error:
+    return false;
 }
+
+static void nc__renderer_draw_chunks(
+    nc_renderer_t* renderer,
+    const nc__renderer_buffer_page_t* uniforms_page,
+    const uint32_t uniforms_index,
+    const bool transparent
+) {
+    const nc__renderer_chunk_push_constants_t pc = { .uniforms = uniforms_index, .transparent = transparent };
+    nc__renderer_bind_descriptor_set(renderer, 1, uniforms_page->descriptor_set);
+    vkCmdPushConstants(renderer->frame_command_buffer, renderer->pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+    for (nc__renderer_buffer_page_t* page = renderer->chunk_allocator.first_page; page; page = page->next) {
+        const uint32_t count = page->draw_count[transparent];
+        if (!count) {
+            continue;
+        }
+        nc__renderer_bind_descriptor_set(renderer, 2, page->descriptor_set);
+        const VkDeviceSize offset = (VkDeviceSize)page->draw_first[transparent] * sizeof(VkDrawIndirectCommand);
+        if (renderer->multi_draw_indirect) {
+            vkCmdDrawIndirect(renderer->frame_command_buffer, renderer->chunk_indirect.buffer,
+                    offset, count, sizeof(VkDrawIndirectCommand));
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                vkCmdDrawIndirect(renderer->frame_command_buffer, renderer->chunk_indirect.buffer,
+                        offset + (VkDeviceSize)i * sizeof(VkDrawIndirectCommand), 1, sizeof(VkDrawIndirectCommand));
+            }
+        }
+    }
+}
+
 
 static bool nc__renderer_draw_sky(
     nc_renderer_t* renderer,
@@ -4072,75 +4388,93 @@ vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer) {
     return renderer->window_size;
 }
 
-// Reuses the current allocation while the packed mesh still fits. If it has outgrown that capacity, the upload is
-// queued into a replacement first; only after that succeeds is the old mesh retired and the caller's handle replaced.
-bool nc_renderer_upload_chunk_mesh(
-    nc_renderer_t* renderer,
-    nc_renderer_chunk_mesh_t** mesh,
-    const nc_renderer_chunk_mesh_data_t* opaque,
-    const nc_renderer_chunk_mesh_data_t* transparent
-) {
-    NC_ASSERT(mesh && opaque && transparent);
-    NC_ASSERT((opaque->quad_count == 0 || opaque->quads) && (opaque->face_data_count == 0 || opaque->face_data));
-    NC_ASSERT(
-            (transparent->quad_count == 0 || transparent->quads)
-            && (transparent->face_data_count == 0 || transparent->face_data));
-
-    const uint32_t opaque_size =
-            (opaque->quad_count + opaque->face_data_count) * NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE;
-    const uint32_t transparent_size =
-            (transparent->quad_count + transparent->face_data_count) * NC__RENDERER_CHUNK_MESH_ELEMENT_SIZE;
-    const uint32_t size = opaque_size + transparent_size;
-    if (size == 0) {
-        nc_renderer_destroy_chunk_mesh(renderer, *mesh);
-        *mesh = NULL;
-        return true;
+uint32_t nc_renderer_create_chunk(nc_renderer_t* renderer, const vkm_ivec3* coords) {
+    const uint32_t index = nc__renderer_chunk_vec_count(&renderer->chunks);
+    if (index == renderer->chunks.capacity) {
+        nc__renderer_chunk_vec_reserve(&renderer->chunks, index ? index * 2 : 64);
     }
+    nc__renderer_chunk_vec_append(&renderer->chunks, (nc__renderer_chunk_t){
+        .position = { { (float)coords->x * NC_CHUNK_SIZE, (float)coords->y * NC_CHUNK_SIZE,
+                (float)coords->z * NC_CHUNK_SIZE } },
+        .gpu_dirty = true,
+    });
+    return nc__renderer_chunk_pool_append(&renderer->chunk_ids, index);
+}
 
-    nc_renderer_chunk_mesh_t* replacement = *mesh;
-    if (!replacement || size > replacement->slice.size) {
-        replacement = calloc(1, sizeof(*replacement));
-        if (!nc__renderer_allocate_buffer_slice(
-                renderer,
-                &renderer->chunk_allocator,
-                size,
-                NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY,
-                &replacement->slice)) {
-            free(replacement);
+void nc_renderer_destroy_chunk(nc_renderer_t* renderer, const uint32_t id) {
+    const uint32_t index = nc__renderer_chunk_pool_get(&renderer->chunk_ids, id);
+    nc__renderer_chunk_t* chunks = nc__renderer_chunk_vec_first(&renderer->chunks);
+    nc__renderer_cancel_uploads_for_chunk_mesh(renderer, id);
+    nc__renderer_retire_chunk_slice(renderer, &chunks[index].slice);
+    const uint32_t vacated = nc__renderer_chunk_pool_remove(&renderer->chunk_ids, id);
+    const uint32_t last = nc__renderer_chunk_pool_count(&renderer->chunk_ids);
+    NC_ASSERT(vacated == index);
+    if (vacated != last) {
+        chunks[vacated] = chunks[last];
+        chunks[vacated].gpu_dirty = true;
+        // (AI-assisted) TDS moved the last value but that value still names its old metadata index.
+        nc__renderer_chunk_pool_first(&renderer->chunk_ids)[vacated] = vacated;
+    }
+    nc__renderer_chunk_vec_remove(&renderer->chunks, last);
+}
+
+bool nc_renderer_update_chunk(
+    nc_renderer_t* renderer,
+    const uint32_t id,
+    const nc_block_registry_t* block_registry,
+    const uint16_t* blocks[3][3][3],
+    const uint8_t* light_levels[3][3][3]
+) {
+    nc__renderer_chunk_t* chunk = &nc__renderer_chunk_vec_first(&renderer->chunks)[
+            nc__renderer_chunk_pool_get(&renderer->chunk_ids, id)];
+    nc_mesher_compute_workspace(block_registry, blocks, &renderer->mesher_workspace);
+    nc__renderer_chunk_mesh_data_t passes[2];
+    for (uint32_t pass = 0; pass < 2; pass++) {
+        nc_mesh_quad_vec_clear(&renderer->mesh_quads[pass]);
+        nc_mesh_face_data_vec_clear(&renderer->mesh_faces[pass]);
+        nc_mesher_compute_chunk(block_registry, blocks, light_levels, &renderer->mesher_workspace,
+                &renderer->mesh_quads[pass], &renderer->mesh_faces[pass], pass != 0);
+        passes[pass] = (nc__renderer_chunk_mesh_data_t){
+            .quads = nc_mesh_quad_vec_first(&renderer->mesh_quads[pass]),
+            .face_data = nc_mesh_face_data_vec_first(&renderer->mesh_faces[pass]),
+            .quad_count = nc_mesh_quad_vec_count(&renderer->mesh_quads[pass]),
+            .face_data_count = nc_mesh_face_data_vec_count(&renderer->mesh_faces[pass]),
+        };
+    }
+    const uint32_t opaque_size = (passes[0].quad_count + passes[0].face_data_count) * 8;
+    const uint32_t size = opaque_size + (passes[1].quad_count + passes[1].face_data_count) * 8;
+    if (!size) {
+        nc__renderer_cancel_uploads_for_chunk_mesh(renderer, id);
+        nc__renderer_retire_chunk_slice(renderer, &chunk->slice);
+        chunk->slice = (nc__renderer_buffer_slice_t){ 0 };
+    } else {
+        nc__renderer_buffer_slice_t replacement = chunk->slice;
+        const bool grew = size > replacement.size;
+        if (grew && !nc__renderer_allocate_buffer_slice(renderer, &renderer->chunk_allocator, size,
+                NC__RENDERER_CHUNK_ALLOCATION_GRANULARITY, &replacement)) {
             return false;
         }
-    }
-
-    if (!nc__renderer_queue_chunk_mesh_upload(renderer, replacement, opaque, transparent, size)) {
-        if (replacement != *mesh) {
-            nc__renderer_release_chunk_mesh(renderer, replacement);
+        // Queue the replacement first; failure preserves the previous geometry and queued upload.
+        if (!nc__renderer_queue_chunk_mesh_upload(renderer, id, &passes[0], &passes[1], size)) {
+            if (grew) {
+                nc__renderer_release_buffer_slice(renderer, &replacement);
+            }
+            return false;
         }
-        return false;
+        if (grew) {
+            nc__renderer_retire_chunk_slice(renderer, &chunk->slice);
+            chunk->slice = replacement;
+        }
     }
-
-    replacement->opaque_quad_count = opaque->quad_count;
-    replacement->transparent_quad_count = transparent->quad_count;
-    replacement->transparent_offset = opaque_size;
-    if (replacement != *mesh) {
-        nc_renderer_destroy_chunk_mesh(renderer, *mesh);
-        *mesh = replacement;
-    }
+    chunk->opaque_quad_count = passes[0].quad_count;
+    chunk->transparent_quad_count = passes[1].quad_count;
+    chunk->transparent_offset = opaque_size / 8;
+    chunk->gpu_dirty = true;
     return true;
 }
 
-void nc_renderer_destroy_chunk_mesh(nc_renderer_t* renderer, nc_renderer_chunk_mesh_t* mesh) {
-    if (!mesh) {
-        return;
-    }
-
-    nc__renderer_cancel_uploads_for_chunk_mesh(renderer, mesh);
-    if (renderer->frame_in_progress || renderer->frame_fence_pending) {
-        // Keeping the slice allocated until the next fence wait prevents a new mesh from overwriting in-flight data.
-        mesh->next_retired_mesh = renderer->retired_chunk_meshes;
-        renderer->retired_chunk_meshes = mesh;
-    } else {
-        nc__renderer_release_chunk_mesh(renderer, mesh);
-    }
+void nc_renderer_get_chunk_stats(const nc_renderer_t* renderer, nc_renderer_chunk_stats_t* stats) {
+    *stats = renderer->chunk_stats;
 }
 
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(
@@ -4262,6 +4596,9 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
     nc__renderer_pre_rotate_view_projection(renderer, frame->view_projection, &view_projection);
     vkm_invert(&view_projection, &inverse_view_projection);
 
+    if (!nc__renderer_prepare_chunks(renderer, frame->view_projection)) {
+        return false;
+    }
     nc__renderer_initialize_render_pass_attachments(renderer);
     const VkClearValue clear_values[] = {
         // swapchain image (unused, the load operation is "don't care")
@@ -4296,6 +4633,18 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
         (float)renderer->swapchain_extent.y / (2.0f * NC__RENDERER_QUAD_EXPANSION_PIXELS),
     } };
 
+    const nc__renderer_chunk_uniforms_t chunk_uniforms = {
+        .view_projection = view_projection,
+        .sunlight_intensity = frame->sunlight_intensity,
+        .quad_expansion = quad_expansion,
+    };
+    nc__renderer_buffer_page_t* chunk_uniforms_page;
+    uint32_t chunk_uniforms_index;
+    if (!nc__renderer_write_frame_data(renderer, &chunk_uniforms, 1, sizeof(chunk_uniforms),
+            &chunk_uniforms_page, &chunk_uniforms_index)) {
+        return false;
+    }
+
     nc__renderer_bind_descriptor_set(renderer, 0, frame->terrain_texture_array->descriptor_set);
 
 #pragma region Opaque pass
@@ -4303,18 +4652,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->opaque_chunk_pipeline);
-    for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->opaque_chunk_draws); i++) {
-        const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->opaque_chunk_draws, i);
-        if (!nc__renderer_draw_chunk(
-                renderer,
-                &draw,
-                &view_projection,
-                &quad_expansion,
-                frame->sunlight_intensity,
-                false)) {
-            return false;
-        }
-    }
+    nc__renderer_draw_chunks(renderer, chunk_uniforms_page, chunk_uniforms_index, false);
 
     if (!nc__renderer_draw_sky(
             renderer,
@@ -4331,18 +4669,7 @@ bool nc_renderer_draw(nc_renderer_t* renderer, const nc_renderer_frame_t* frame)
             renderer->frame_command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             renderer->transparent_chunk_pipeline);
-    for (uint32_t i = 0; i < nc_renderer_chunk_draw_vec_count(frame->transparent_chunk_draws); i++) {
-        const nc_renderer_chunk_draw_t draw = nc_renderer_chunk_draw_vec_get(frame->transparent_chunk_draws, i);
-        if (!nc__renderer_draw_chunk(
-                renderer,
-                &draw,
-                &view_projection,
-                &quad_expansion,
-                frame->sunlight_intensity,
-                true)) {
-            return false;
-        }
-    }
+    nc__renderer_draw_chunks(renderer, chunk_uniforms_page, chunk_uniforms_index, true);
 #pragma endregion
 
 #pragma region Composite pass
@@ -4411,6 +4738,8 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         nc__renderer_buffer_allocator_fini(renderer, &renderer->transfer_allocator);
         nc__renderer_buffer_allocator_fini(renderer, &renderer->frame_data_allocator);
         nc__renderer_buffer_allocator_fini(renderer, &renderer->chunk_allocator);
+        nc__renderer_mapped_buffer_fini(renderer, &renderer->chunk_metadata);
+        nc__renderer_mapped_buffer_fini(renderer, &renderer->chunk_indirect);
         nc__renderer_destroy_descriptor_state(renderer);
         vkDestroySampler(renderer->device, renderer->texture_sampler, NULL);
         vkDestroySemaphore(renderer->device, renderer->image_available_semaphore, NULL);
@@ -4427,6 +4756,13 @@ void nc_renderer_fini(nc_renderer_t* renderer) {
         vkDestroyInstance(renderer->instance, NULL);
     }
 
+    nc__renderer_chunk_pool_fini(&renderer->chunk_ids);
+    nc__renderer_chunk_vec_fini(&renderer->chunks);
+    nc__renderer_retired_slice_vec_fini(&renderer->retired_chunk_slices);
+    for (uint32_t pass = 0; pass < 2; pass++) {
+        nc_mesh_quad_vec_fini(&renderer->mesh_quads[pass]);
+        nc_mesh_face_data_vec_fini(&renderer->mesh_faces[pass]);
+    }
     nc__renderer_upload_op_vec_fini(&renderer->upload_ops);
     nc__renderer_retired_texture_vec_fini(&renderer->retired_textures);
     nc__renderer_retired_swapchain_vec_fini(&renderer->retired_swapchains);

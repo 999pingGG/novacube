@@ -12,9 +12,6 @@
 #include <novacube/cvkm.h>
 
 typedef struct nc_renderer_texture_t nc_renderer_texture_t;
-// High-level renderer-owned chunk geometry. Its paging allocation and Vulkan address stay private.
-typedef struct nc_renderer_chunk_mesh_t nc_renderer_chunk_mesh_t;
-
 typedef struct nc_renderer_t nc_renderer_t;
 
 typedef struct nc_renderer_create_info_t {
@@ -65,26 +62,6 @@ typedef struct nc_renderer_overlay_draw_command_t {
     };
 } nc_renderer_overlay_draw_command_t;
 
-typedef struct nc_renderer_chunk_draw_t {
-    // The frame list selects the opaque or transparent pass; the mesh stores that pass's packed offset and count.
-    const nc_renderer_chunk_mesh_t* mesh;
-    vkm_vec3 position;
-} nc_renderer_chunk_draw_t;
-
-// CPU data for one opaque or transparent chunk pass. The renderer packs both passes into one device allocation;
-// callers retain ownership of the arrays and may release them as soon as nc_renderer_upload_chunk_mesh returns.
-typedef struct nc_renderer_chunk_mesh_data_t {
-    const void* quads;
-    const void* face_data;
-    uint32_t quad_count;
-    uint32_t face_data_count;
-} nc_renderer_chunk_mesh_data_t;
-
-#define TDS_DECLARE
-#define TDS_VALUE_T nc_renderer_chunk_draw_t
-#define TDS_TYPE nc_renderer_chunk_draw_vec
-#include <tds/vector.h>
-
 // Rectangle data is stored separately so adjacent solid/text commands can be drawn as one
 // instanced batch.
 typedef struct nc_renderer_overlay_draw_t {
@@ -128,8 +105,6 @@ typedef struct nc_renderer_frame_t {
     // Multiplier for sky light, in the [0, 1] range.
     float sunlight_intensity;
     const nc_renderer_sky_draw_t* sky_draw;
-    const nc_renderer_chunk_draw_vec* opaque_chunk_draws;
-    const nc_renderer_chunk_draw_vec* transparent_chunk_draws;
     const nc_renderer_texture_t* terrain_texture_array;
     const nc_renderer_overlay_draw_t* overlay_draws;
     uint32_t overlay_draw_count;
@@ -148,14 +123,32 @@ vkm_usvec2 nc_renderer_get_window_size(const nc_renderer_t* renderer);
 // Returns actual framebuffer pixels in the current display orientation, not SDL window units.
 vkm_usvec2 nc_renderer_get_framebuffer_size(const nc_renderer_t* renderer);
 void nc_renderer_get_window_safe_area(const nc_renderer_t* renderer, SDL_Rect* rect);
-// Treat *mesh as an optional renderer-owned resource: initialize it to NULL and keep passing the same slot on remesh.
-// Shrinks retain capacity, growth replaces it, and empty opaque and transparent data releases it.
-bool nc_renderer_upload_chunk_mesh(
+// (AI-assisted) IDs remain stable across updates, including empty meshes, until explicitly destroyed.
+// Updates borrow gameplay data only for this call; the renderer retains no block/light pointers.
+// Call updates before nc_renderer_draw. Shrinks retain capacity; growth replaces the allocation.
+struct nc_block_registry_t;
+uint32_t nc_renderer_create_chunk(nc_renderer_t* renderer, const vkm_ivec3* coords);
+bool nc_renderer_update_chunk(
         nc_renderer_t* renderer,
-        nc_renderer_chunk_mesh_t** mesh,
-        const nc_renderer_chunk_mesh_data_t* opaque,
-        const nc_renderer_chunk_mesh_data_t* transparent);
-void nc_renderer_destroy_chunk_mesh(nc_renderer_t* renderer, nc_renderer_chunk_mesh_t* mesh);
+        uint32_t id,
+        const struct nc_block_registry_t* block_registry,
+        const uint16_t* blocks[3][3][3],
+        const uint8_t* light_levels[3][3][3]);
+void nc_renderer_destroy_chunk(nc_renderer_t* renderer, uint32_t id);
+typedef struct nc_renderer_chunk_stats_t {
+    uint32_t loaded_chunk_count;
+    uint32_t empty_chunk_count;
+    uint32_t culled_chunk_count;
+    uint32_t opaque_drawn_chunk_count;
+    uint32_t transparent_drawn_chunk_count;
+    uint32_t total_opaque_quads_count;
+    uint32_t total_transparent_quads_count;
+    uint32_t culled_opaque_quads_count;
+    uint32_t culled_transparent_quads_count;
+} nc_renderer_chunk_stats_t;
+
+// (AI-assisted) Statistics from the most recent nc_renderer_draw that had a drawable swapchain image.
+void nc_renderer_get_chunk_stats(const nc_renderer_t* renderer, nc_renderer_chunk_stats_t* stats);
 // The texture creation functions below copy pixels into renderer-owned upload storage before returning; callers retain
 // ownership of every input buffer.
 nc_renderer_texture_t* nc_renderer_create_rgba_texture_2d(

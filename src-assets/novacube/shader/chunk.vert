@@ -3,7 +3,6 @@
 
 struct chunk_uniforms {
     mat4 view_projection;
-    vec3 position;
     // Used by the fragment shader.
     float sunlight_intensity;
     // XY expands from pixels to NDC; ZW is its CPU-precomputed reciprocal.
@@ -20,10 +19,20 @@ layout(set = 2, binding = 0, scalar) restrict readonly buffer chunk_mesh_buffer 
     uvec2 values[];
 } mesh_data;
 
+// (AI-assisted) Allocation-start slots map to dense metadata, without adding bytes to a quad.
+layout(set = 2, binding = 1, scalar) restrict readonly buffer chunk_allocation_lookup {
+    uint values[];
+} allocation_lookup;
+
+// Six scalar words per chunk: position.xyz, opaque count, transparent offset, transparent count.
+// Keep reads scalar/vector-valued to avoid the Adreno 610 struct-local compiler bug.
+layout(set = 2, binding = 2, scalar) restrict readonly buffer chunk_metadata_buffer {
+    uint values[];
+} chunk_metadata;
+
 layout(push_constant) uniform push_constants {
     uint uniforms;
-    uint quads;
-    uint face_data;
+    uint transparent;
 } pc;
 
 // Do not use `mediump` here, it causes severe rendering corruption in PowerVR Rogue GPUs.
@@ -106,8 +115,23 @@ vec2 texture_uv_from_face_position(uint direction, vec2 face_position) {
 }
 
 void main() {
-    chunk_uniforms uniforms = frame_data.values[pc.uniforms];
-    uvec2 data = mesh_data.values[pc.quads + gl_InstanceIndex];
+    mat4 view_projection = frame_data.values[pc.uniforms].view_projection;
+    vec4 quad_expansion = frame_data.values[pc.uniforms].quad_expansion;
+    // (AI-assisted) firstVertex carries the allocation address; every instance starts at that same vertex.
+    // Four vertices form one strip, while InstanceIndex alone advances through the pass's quads.
+    uint allocation_base = uint(gl_VertexIndex) >> 2;
+    uint corner = uint(gl_VertexIndex) & 3u;
+    uint metadata = allocation_lookup.values[allocation_base >> 4] * 6u;
+    vec3 position = uintBitsToFloat(uvec3(chunk_metadata.values[metadata],
+            chunk_metadata.values[metadata + 1u], chunk_metadata.values[metadata + 2u]));
+    uint quad_base = allocation_base;
+    uint quad_count = chunk_metadata.values[metadata + 3u];
+    if (pc.transparent != 0u) {
+        quad_base += chunk_metadata.values[metadata + 4u];
+        quad_count = chunk_metadata.values[metadata + 5u];
+    }
+    uint face_base = quad_base + quad_count;
+    uvec2 data = mesh_data.values[quad_base + uint(gl_InstanceIndex)];
 
     // Unpack data
     uint greedy_quad = data.x;
@@ -116,11 +140,11 @@ void main() {
     uint plane_direction_and_face_data_offset = data.y;
     uint plane = plane_direction_and_face_data_offset & 255u;
     uint direction = plane_direction_and_face_data_offset >> 8 & 255u;
-    face_data_offset = plane_direction_and_face_data_offset >> 16;
+    face_data_offset = face_base + (plane_direction_and_face_data_offset >> 16);
 
     uint corner_index = uses_left_handed_quad_basis(direction)
-            ? left_handed_strip_corner_order[gl_VertexIndex]
-            : right_handed_strip_corner_order[gl_VertexIndex];
+            ? left_handed_strip_corner_order[corner]
+            : right_handed_strip_corner_order[corner];
     vec2 vertex_offset = quad_corners[corner_index];
     vec2 quad_size = vec2(quad_size_in_model_voxels);
     vec2 vertex_position = vec2(quad_position) + quad_size * vertex_offset;
@@ -130,7 +154,7 @@ void main() {
     face_data_uv = quad_size * INVERSE_MODEL_SIZE * vertex_offset;
 
     vec3 translation = face_to_world_coords(direction, float(plane), vertex_position);
-    vec4 clip_position = uniforms.view_projection * vec4(translation * INVERSE_MODEL_SIZE + uniforms.position, 1.0);
+    vec4 clip_position = view_projection * vec4(translation * INVERSE_MODEL_SIZE + position, 1.0);
 
     // The chunk of code below is an AI-generated fix for the terrain getting plagued by lots of unrasterized pixels,
     // especially on mobiles.
@@ -139,19 +163,19 @@ void main() {
     // A voxel face's two axes are always world X/Y/Z, so their clip-space directions are matrix columns. Project both
     // directions at this vertex without another matrix multiply; the common perspective divisor is unnecessary.
     vec3 clip_u = direction >= 2 && direction < 4
-            ? uniforms.view_projection[2].xyw
-            : uniforms.view_projection[0].xyw;
+            ? view_projection[2].xyw
+            : view_projection[0].xyw;
     vec3 clip_v = direction < 2
-            ? uniforms.view_projection[2].xyw
-            : uniforms.view_projection[1].xyw;
+            ? view_projection[2].xyw
+            : view_projection[1].xyw;
     vec2 tangent_u = clip_u.xy * clip_position.w - clip_position.xy * clip_u.z;
     vec2 tangent_v = clip_v.xy * clip_position.w - clip_position.xy * clip_v.z;
 
     // Offset both edges incident to this corner against an axis-aligned screen-space rectangle. Solving in the quad's
     // projected U/V basis guarantees that every edge moves outward; simply moving away from the center does not.
     float projected_area = abs(tangent_u.x * tangent_v.y - tangent_u.y * tangent_v.x);
-    float u_edge_expansion = dot(abs(tangent_v.yx), uniforms.quad_expansion.xy);
-    float v_edge_expansion = dot(abs(tangent_u.yx), uniforms.quad_expansion.xy);
+    float u_edge_expansion = dot(abs(tangent_v.yx), quad_expansion.xy);
+    float v_edge_expansion = dot(abs(tangent_u.yx), quad_expansion.xy);
     vec2 corner_direction = vertex_offset * 2.0 - 1.0;
     vec2 raw_offset =
               tangent_u * (corner_direction.x * u_edge_expansion)
@@ -162,8 +186,8 @@ void main() {
     float bounded_area = max(
             projected_area,
             max(
-                    abs(raw_offset.x) * uniforms.quad_expansion.z,
-                    abs(raw_offset.y) * uniforms.quad_expansion.w));
+                    abs(raw_offset.x) * quad_expansion.z,
+                    abs(raw_offset.y) * quad_expansion.w));
     float valid_area = step(1e-12, projected_area);
     float inverse_bounded_area = valid_area / max(bounded_area, 1e-12);
     clip_position.xy += raw_offset * (clip_position.w * inverse_bounded_area);

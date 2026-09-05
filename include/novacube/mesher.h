@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #include <novacube/chunk.h>
-#include <novacube/renderer.h>
 
 #define NC_MESHER_BLOCK_MODEL_LENGTH 8
 #define NC_MESHER_BLOCK_MODEL
@@ -113,12 +112,6 @@ void nc_mesher_compute_chunk(
         nc_mesh_quad_vec* quads_result,
         nc_mesh_face_data_vec* face_data_result,
         bool transparent);
-bool nc_mesher_upload_chunk(
-        const nc_block_registry_t* block_registry,
-        nc_renderer_t* renderer,
-        nc_chunk_t* chunk,
-        const uint16_t* chunk_and_neighbors[3][3][3],
-        const uint8_t* light_levels_and_neighbors[3][3][3]);
 void nc_mesher_compute_block_model(
         const uint16_t voxel_data[NC_MESHER_INTS_PER_BLOCK_MODEL],
         nc_mesh_quad_vec* quads,

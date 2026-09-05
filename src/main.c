@@ -41,8 +41,6 @@ typedef struct nc__app_t {
     nc_player_input_t* player_input;
     nc_camera_t camera;
     nc_block_type_t selected_type;
-    nc_renderer_chunk_draw_vec opaque_chunk_draws;
-    nc_renderer_chunk_draw_vec transparent_chunk_draws;
 } nc__app_t;
 
 static void nc__app_modify_block(const nc__app_t* app, const nc_block_type_t block_type) {
@@ -99,8 +97,6 @@ static void nc__app_fini(nc__app_t* app) {
     nc_player_input_fini(app->player_input);
     nc_gui_fini(app->gui);
     nc_renderer_fini(app->renderer);
-    nc_renderer_chunk_draw_vec_fini(&app->opaque_chunk_draws);
-    nc_renderer_chunk_draw_vec_fini(&app->transparent_chunk_draws);
     nc_asset_manager_fini(app->asset_manager);
     free(app);
 }
@@ -382,13 +378,9 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         nc_gui_append_debug_text(app->gui, debug_buffer, 0);
     }
 
-    nc_terrain_rendering_stats_t terrain_rendering_stats;
-    nc_terrain_get_chunk_draws(
-            app->terrain,
-            &view_projection,
-            &app->opaque_chunk_draws,
-            &app->transparent_chunk_draws,
-            &terrain_rendering_stats);
+    nc_renderer_chunk_stats_t terrain_rendering_stats;
+    // (AI-assisted) The renderer reports the last completed draw preparation, like other frame diagnostics.
+    nc_renderer_get_chunk_stats(app->renderer, &terrain_rendering_stats);
     if (nc_cvar_get_show_terrain_rendering_stats()) {
         snprintf(
                 debug_buffer,
@@ -476,16 +468,12 @@ SDL_AppResult SDL_AppIterate(void* app_state) {
         .camera_position = app->camera.position,
         .sunlight_intensity = time_of_day * 0.98f + 0.02f,
         .sky_draw = &sky_draw,
-        .opaque_chunk_draws = &app->opaque_chunk_draws,
-        .transparent_chunk_draws = &app->transparent_chunk_draws,
         .terrain_texture_array = nc_terrain_get_textures(app->terrain),
         .overlay_draws = &overlay_draw,
         .overlay_draw_count = 1,
         .procedural_overlay_draw = &procedural_overlay_draw,
         .block_highlight_draw = &highlight_draw,
     });
-    nc_renderer_chunk_draw_vec_clear(&app->opaque_chunk_draws);
-    nc_renderer_chunk_draw_vec_clear(&app->transparent_chunk_draws);
     if (!success) {
         goto error;
     }

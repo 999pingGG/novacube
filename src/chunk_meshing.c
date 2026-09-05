@@ -686,61 +686,6 @@ void nc_mesher_compute_chunk(
     }
 }
 
-bool nc_mesher_upload_chunk(
-    const nc_block_registry_t* block_registry,
-    nc_renderer_t* renderer,
-    nc_chunk_t* chunk,
-    const uint16_t* chunk_and_neighbors[3][3][3],
-    const uint8_t* light_levels_and_neighbors[3][3][3]
-) {
-    nc_mesh_quad_vec opaque_quads;
-    nc_mesh_quad_vec transparent_quads;
-    nc_mesh_face_data_vec opaque_face_data;
-    nc_mesh_face_data_vec transparent_face_data;
-    nc_mesher_workspace_t workspace;
-    nc_mesher_compute_workspace(block_registry, chunk_and_neighbors, &workspace);
-    nc_mesher_compute_chunk(
-            block_registry,
-            chunk_and_neighbors,
-            light_levels_and_neighbors,
-            &workspace,
-            &opaque_quads,
-            &opaque_face_data,
-            false);
-    nc_mesher_compute_chunk(
-            block_registry,
-            chunk_and_neighbors,
-            light_levels_and_neighbors,
-            &workspace,
-            &transparent_quads,
-            &transparent_face_data,
-            true);
-
-    const nc_renderer_chunk_mesh_data_t opaque = {
-        .quads = opaque_quads.array,
-        .face_data = opaque_face_data.array,
-        .quad_count = opaque_quads.count,
-        .face_data_count = opaque_face_data.count,
-    };
-    const nc_renderer_chunk_mesh_data_t transparent = {
-        .quads = transparent_quads.array,
-        .face_data = transparent_face_data.array,
-        .quad_count = transparent_quads.count,
-        .face_data_count = transparent_face_data.count,
-    };
-    const bool result = nc_renderer_upload_chunk_mesh(renderer, &chunk->mesh, &opaque, &transparent);
-    if (result) {
-        chunk->opaque_quad_count = opaque_quads.count;
-        chunk->transparent_quad_count = transparent_quads.count;
-    }
-
-    nc_mesh_face_data_vec_fini(&opaque_face_data);
-    nc_mesh_quad_vec_fini(&opaque_quads);
-    nc_mesh_face_data_vec_fini(&transparent_face_data);
-    nc_mesh_quad_vec_fini(&transparent_quads);
-    return result;
-}
-
 bool nc_mesher_export_obj(const char* filename, const nc_mesh_quad_vec* quads) {
     FILE* file = fopen(filename, "w");
     if (!file) {

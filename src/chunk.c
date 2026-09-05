@@ -73,11 +73,10 @@ void nc_chunk_replace_blocks(nc_chunk_t* chunk, const uint16_t blocks[NC_BLOCKS_
     }
 }
 
-void nc_chunk_fini(nc_renderer_t* renderer, nc_chunk_t* chunk) {
+void nc_chunk_fini(nc_chunk_t* chunk) {
     if (!chunk) {
         return;
     }
-    nc_renderer_destroy_chunk_mesh(renderer, chunk->mesh);
     free(chunk->queued_light_nodes[0]);
     free(chunk->queued_light_nodes[1]);
     free(chunk);

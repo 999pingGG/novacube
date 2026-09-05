@@ -20,18 +20,6 @@ typedef struct nc_terrain_raycast_hit_t {
     float distance;
 } nc_terrain_raycast_hit_t;
 
-typedef struct nc_terrain_rendering_stats_t {
-    uint32_t loaded_chunk_count;
-    uint32_t empty_chunk_count;
-    uint32_t culled_chunk_count;
-    uint32_t opaque_drawn_chunk_count;
-    uint32_t transparent_drawn_chunk_count;
-    uint32_t total_opaque_quads_count;
-    uint32_t total_transparent_quads_count;
-    uint32_t culled_opaque_quads_count;
-    uint32_t culled_transparent_quads_count;
-} nc_terrain_rendering_stats_t;
-
 typedef struct nc_terrain_timing_stats_t {
     double residency_ms;
     double loading_ms;
@@ -64,12 +52,6 @@ bool nc_terrain_get_block(const nc_terrain_t* terrain, const vkm_ivec3* block_co
 uint32_t nc_terrain_get_loaded_chunk_count(const nc_terrain_t* terrain);
 void nc_terrain_get_timing_stats(const nc_terrain_t* terrain, nc_terrain_timing_stats_t* stats);
 bool nc_terrain_prepare_render(nc_terrain_t* terrain, nc_renderer_t* renderer);
-void nc_terrain_get_chunk_draws(
-        const nc_terrain_t* terrain,
-        const vkm_mat4* view_projection,
-        nc_renderer_chunk_draw_vec* opaque,
-        nc_renderer_chunk_draw_vec* transparent,
-        nc_terrain_rendering_stats_t* stats);
 nc_renderer_texture_t* nc_terrain_get_textures(const nc_terrain_t* terrain);
 bool nc_terrain_raycast(
         const nc_terrain_t* terrain,
