@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(NC_BUILD_ASSET_BAKER_ONLY "Build only the host-runnable asset baker." OFF)
+option(NC_OLDER_CPUS "(x86 only) Build for CPUs supporting at least SSE4.2 instead of AVX2." OFF)
 
 set(NC_SQLITE_COMPILE_DEFINITIONS
         SQLITE_DEFAULT_MEMSTATUS=0
@@ -202,7 +203,11 @@ endif()
 
 if(MSVC)
     if(TARGET_X86)
-        target_compile_options(novacube PRIVATE /arch:AVX2)
+        if(NC_OLDER_CPUS)
+            target_compile_options(novacube PRIVATE /arch:SSE4.2)
+        else()
+            target_compile_options(novacube PRIVATE /arch:AVX2)
+        endif()
     elseif(TARGET_ARM)
         target_compile_options(novacube PRIVATE /arch:VFPv4)
     endif()
@@ -212,7 +217,11 @@ else()
             $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
             $<$<COMPILE_LANGUAGE:CXX>:-nostdlib++>)
     if(TARGET_X86 AND NOT ANDROID)
-        target_compile_options(novacube PRIVATE -march=haswell)
+        if(NC_OLDER_CPUS)
+            target_compile_options(novacube PRIVATE -march=nehalem)
+        else()
+            target_compile_options(novacube PRIVATE -march=haswell)
+        endif()
     endif()
     target_link_options(novacube PRIVATE -nostdlib++)
 endif()
