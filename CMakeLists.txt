@@ -53,10 +53,15 @@ set(NC_COMMON_INCLUDE_DIRECTORIES
 find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
 find_library(MATH_LIBRARY m)
 
+set(NC_IGNORED_WARNINGS_FILES
+        src/vma_implementation.cpp
+        vendor/sqlite3/sqlite3.c
+        vendor/zstd/zstd.c)
+
 if(MSVC)
     set(NC_COMMON_COMPILE_DEFINITIONS _CRT_SECURE_NO_WARNINGS)
     set(NC_COMMON_COMPILE_OPTIONS /W4 /WX /Zc:preprocessor)
-    set_source_files_properties(vendor/sqlite3/sqlite3.c PROPERTIES COMPILE_FLAGS /W0)
+    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS /W0)
 else()
     set(NC_COMMON_COMPILE_OPTIONS
             -Wall
@@ -64,7 +69,7 @@ else()
             -Wpedantic
             -Werror
             -Wno-gnu-zero-variadic-macro-arguments)
-    set_source_files_properties(vendor/sqlite3/sqlite3.c PROPERTIES COMPILE_FLAGS -w)
+    set_source_files_properties(${NC_IGNORED_WARNINGS_FILES} PROPERTIES COMPILE_FLAGS -w)
 endif()
 
 function(nc_configure_common_target target)
@@ -202,7 +207,6 @@ if(MSVC)
         target_compile_options(novacube PRIVATE /arch:VFPv4)
     endif()
 else()
-    set_source_files_properties(src/vma_implementation.cpp PROPERTIES COMPILE_OPTIONS -w)
     target_compile_options(novacube PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
